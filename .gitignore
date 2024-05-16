@@ -43,7 +43,6 @@ $RECYCLE.BIN/
 # as it poses a security risk.
 .env
 .vagrant
-Vagrantfile
 
 #-------------------------
 # Temporary Files
