@@ -7,7 +7,7 @@ ARG LSPHP_VERSION=8.3
 RUN apt-get update && apt-get upgrade -y -o Dpkg::Options::="--force-confold" && install_clean wget zip unzip default-mysql-client
 
 RUN if [ $(uname -m) = "aarch64" ]; then \
-        install_clean libatomic1; \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libatomic1; \
     fi && \
 
 RUN mkdir -p /tmp/openlitespeed-release && \
