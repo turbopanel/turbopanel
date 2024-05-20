@@ -25,11 +25,10 @@ RUN if [ $(uname -m) = "aarch64" ]; then \
 # install litespeed repository
 RUN wget -O - https://repo.litespeed.sh | bash
 
-# install lsphp
+# Install other packages first
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y \
         lsphp83 lsphp83-common \
         lsphp83-curl \
-        lsphp83-dev \
         lsphp83-imap \
         lsphp83-intl \
         lsphp83-ldap \
@@ -40,9 +39,13 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y \
         lsphp83-pspell \
         lsphp83-snmp \
         lsphp83-sqlite3 \
-        lsphp83-tidy && \
-    /usr/local/lsws/lsphp83/bin/pecl install redis && \
-    echo "extension=redis.so" | tee -a /usr/local/lsws/lsphp83/etc/php/8.3/litespeed/php.ini > /dev/null
+        lsphp83-tidy
+
+# Manually handle the installation of lsphp83-dev
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        lsphp83-dev || true \
+    && /usr/local/lsws/lsphp83/bin/pecl install redis \
+    && echo "extension=redis.so" | tee -a /usr/local/lsws/lsphp83/etc/php/8.3/litespeed/php.ini > /dev/null
 
 # configure openLiteSpeed
 COPY ./image/lsws/httpd.conf /usr/local/lsws/conf/httpd_config.conf
