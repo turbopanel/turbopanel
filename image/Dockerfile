@@ -53,9 +53,9 @@ RUN if [ $(uname -m) != "aarch64" ]; then \
 
 # configure openLiteSpeed
 COPY ./image/lsws/httpd.conf /usr/local/lsws/conf/httpd_config.conf
-COPY ./image/lsws/turbopanel.conf /usr/local/lsws/conf/turbopanelconf
+COPY ./image/lsws/turbopanel.conf /usr/local/lsws/conf/turbopanel.conf
 RUN chown lsadm:nogroup /usr/local/lsws/conf/httpd_config.conf && \
-    chown lsadm:nogroup /usr/local/lsws/conf/turbopanelconf
+    chown lsadm:nogroup /usr/local/lsws/conf/turbopanel.conf
 
 RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
