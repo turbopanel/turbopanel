@@ -3,6 +3,9 @@ FROM phusion/baseimage:jammy-1.0.4
 ARG OPENLITESPEED_VERSION=1.8.1
 ARG LSPHP_VERSION=8.3
 
+# use baseimage-docker's init system.
+CMD ["/sbin/my_init"]
+
 # update baseimage and install required packages
 RUN apt-get update && apt-get upgrade -y -o Dpkg::Options::="--force-confold" && install_clean wget zip unzip default-mysql-client
 
@@ -49,7 +52,6 @@ RUN set -x && \
     /usr/local/lsws/lsphp83/bin/pecl install redis && \
     echo "extension=redis.so" | tee -a /usr/local/lsws/lsphp83/etc/php/8.3/litespeed/php.ini > /dev/null
 
-
 # configure openLiteSpeed
 COPY ./image/lsws/httpd.conf /usr/local/lsws/conf/httpd_config.conf
 COPY ./image/lsws/turbopanel.conf /usr/local/lsws/conf/turbopanelconf
@@ -66,3 +68,6 @@ COPY ./image/boot_openlitespeed.sh /etc/my_init.d/openlitespeed.sh
 RUN chmod +x /etc/my_init.d/openlitespeed.sh
 
 COPY --from=composer:lts /usr/bin/composer /usr/local/bin/composer
+
+RUN mkdir -p /opt/turbopanel
+COPY . /opt/turbopanel
