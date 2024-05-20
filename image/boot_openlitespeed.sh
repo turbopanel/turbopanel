@@ -9,7 +9,7 @@ CERT_FILE="default.crt"
 mkdir -p "$CERT_DIR"
 
 # Generate the RSA key and certificate
-openssl req -x509 -days 365 -newkey rsa:4096 -keyout "$KEY_FILE" -out "$CERT_FILE" -nodes -subj "/C=US/ST=State/L=City/O=Organization/CN=example.com"
+openssl req -x509 -days 3650 -newkey rsa:4096 -keyout "$KEY_FILE" -out "$CERT_FILE" -nodes -subj "/C=US/ST=Florida/L=Miami/O=TurboPanel/CN=turbopanel.local"
 
 # Move the generated key and certificate to the specified directory
 mv "$KEY_FILE" "$CERT_DIR"

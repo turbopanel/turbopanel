@@ -1,0 +1,26 @@
+networks:
+  tp-net:
+    name: tp-net
+
+services:
+  turbopanel:
+    image: ghcr.io/turbopanel/turbopanel:latest
+    container_name: turbopanel
+    hostname: turbopanel
+    restart: always
+    volumes:
+      - .:/opt/turbopanel
+    networks:
+      - tp-net
+    ports:
+      - 2052:2052
+      - 2053:2053
+      - 2082:2082
+      - 2083:2083
+      - 2086:2086
+      - 2087:2087
+      - 2095:2095
+      - 2096:2096
+      - 7080:7080
+      - 80:80
+      - 8088:8088

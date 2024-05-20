@@ -13,6 +13,8 @@ settings = {
 # edits below this line may cause unexpected behavior
 Vagrant.configure("2") do |config|
 
+  # config.vm.network "public_network"
+
   config.vm.box = settings[:box]
 
   # use the specified box version only if not falsy; otherwise the most recent version will be used
@@ -29,16 +31,13 @@ Vagrant.configure("2") do |config|
   # config.vm.synced_folder ".", "/vagrant", disabled: true
   config.vm.synced_folder ".", "/opt/turbopanel"
 
-  # config.vm.network "forwarded_port", guest: 80, host: 80
-  # config.vm.network "forwarded_port", guest: 443, host: 443
-
+  config.vm.network "forwarded_port", guest: 80, host: 80
+  config.vm.network "forwarded_port", guest: 8088, host: 8088
+  config.vm.network "forwarded_port", guest: 443, host: 443
   config.vm.network "forwarded_port", guest: 2082, host: 2082
   config.vm.network "forwarded_port", guest: 2083, host: 2083
   config.vm.network "forwarded_port", guest: 2087, host: 2087
   config.vm.network "forwarded_port", guest: 2089, host: 2089
-
-  # config.vm.network "forwarded_port", guest: 3306, host: 3306
-
   config.vm.network "forwarded_port", guest: 7080, host: 7080
 
   config.vm.provider :libvirt do |libvirt|
@@ -50,31 +49,24 @@ Vagrant.configure("2") do |config|
     parallels.cpus = settings[:cpus]
     parallels.memory = settings[:memory]
     parallels.name = settings[:name]
-    # parallels.update_guest_tools = true
-    parallels.check_guest_tools = false
+    parallels.update_guest_tools = true
   end
 
-  # use the web installer
+  config.vm.provider "virtualbox" do |virtualbox|
+    virtualbox.memory = settings[:memory]
+    virtualbox.cpus = settings[:cpus]
+  end
+
+  # use web installer
   # config.vm.provision "shell", path: "https://get.trbp.nl"
 
   # use vagrant docker provisioner
   config.vm.provision "docker" do |d|
-    # build the image
+    # Build the image
     d.build_image "/opt/turbopanel",
       args: [
-        "-f /opt/turbopanel/docker/Dockerfile",
-        "-t turbopanel/turbopanel:latest"
-      ].join(" ")
-    # run the container
-    d.run "turbopanel/turbopanel:latest",
-      daemonize: true,
-      args: [
-        "-p 2082:2082",
-        "-p 2083:2083",
-        "-p 2087:2087",
-        "-p 2089:2089",
-        "-p 7080:7080",
-        "-v /opt/turbopanel:/opt/turbopanel",
+        "-f /opt/turbopanel/image/Dockerfile",
+        "-t ghcr.io/turbopanel/turbopanel:latest"
       ].join(" ")
   end
 

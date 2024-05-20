@@ -7,10 +7,10 @@ The TurboPanel platform can be run locally on your computer for testing, develop
 Before you can run the TurboPanel platform locally, you will need to have the following installed on your machine:
 
 - [Vagrant](https://www.vagrantup.com/)
-- A supported virtualization provider such as:
-  - [libvirt](https://libvirt.org/)
-  - [Parallels](https://www.parallels.com/)
-  - [VirtualBox](https://www.virtualbox.org/)
+- A supported virtualization provider:
+  - [libvirt](https://libvirt.org/) (Linux
+  - [Parallels](https://www.parallels.com/) (macOS)
+  - [VirtualBox](https://www.virtualbox.org/) (Windows, macOS, Linux)
 - Any other dependencies required by your virtualization provider to run Vagrant boxes.
 
 ## Getting Started
