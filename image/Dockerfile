@@ -8,9 +8,8 @@ RUN apt-get update && apt-get upgrade -y -o Dpkg::Options::="--force-confold" &&
 
 RUN if [ $(uname -m) = "aarch64" ]; then \
         install_clean libatomic1; \
-    fi
-
-RUN mkdir -p /tmp/openlitespeed-release && \
+    fi && \
+    mkdir -p /tmp/openlitespeed-release && \
     wget -qO- https://github.com/litespeedtech/openlitespeed/releases/download/v${OPENLITESPEED_VERSION}/openlitespeed-${OPENLITESPEED_VERSION}-$(uname -m)-linux.tgz | tar xvz -C /tmp/openlitespeed-release --strip-components=1 && \
     cd /tmp/openlitespeed-release && \
     ./install.sh && \
