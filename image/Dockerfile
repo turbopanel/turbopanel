@@ -45,8 +45,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y \
         lsphp83-tidy
 
 # handle the installation of lsphp83-dev conditionally with debugging
-RUN set -x && \
-    if [ $(uname -m) != "aarch64" ]; then \
+RUN if [ $(uname -m) != "aarch64" ]; then \
         DEBIAN_FRONTEND=noninteractive apt-get install -y lsphp83-dev; \
     fi && \
     /usr/local/lsws/lsphp83/bin/pecl install redis && \
