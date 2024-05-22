@@ -29,7 +29,7 @@ class Database extends Config
         'hostname'     => 'turbopanel-db',
         'username'     => '',
         'password'     => '',
-        'database'     => '',
+        'database'     => 'turbopanel',
         'DBDriver'     => 'MySQLi',
         'DBPrefix'     => '',
         'pConnect'     => false,
