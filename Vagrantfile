@@ -34,8 +34,10 @@ Vagrant.configure("2") do |config|
   config.vm.network "forwarded_port", guest: 80, host: 80
   config.vm.network "forwarded_port", guest: 8088, host: 8088
   config.vm.network "forwarded_port", guest: 443, host: 443
+  config.vm.network "forwarded_port", guest: 3306, host: 3306
   config.vm.network "forwarded_port", guest: 2082, host: 2082
   config.vm.network "forwarded_port", guest: 2083, host: 2083
+  config.vm.network "forwarded_port", guest: 2086, host: 2086
   config.vm.network "forwarded_port", guest: 2087, host: 2087
   config.vm.network "forwarded_port", guest: 2089, host: 2089
   config.vm.network "forwarded_port", guest: 7080, host: 7080
@@ -61,13 +63,16 @@ Vagrant.configure("2") do |config|
   # config.vm.provision "shell", path: "https://get.trbp.nl"
 
   # use vagrant docker provisioner
-  config.vm.provision "docker" do |d|
+  # config.vm.provision "docker" do |d|
     # Build the image
-    d.build_image "/opt/turbopanel",
-      args: [
-        "-f /opt/turbopanel/image/Dockerfile",
-        "-t ghcr.io/turbopanel/turbopanel:latest"
-      ].join(" ")
-  end
+  #  d.build_image "/opt/turbopanel",
+  #    args: [
+  #      "-f /opt/turbopanel/image/Dockerfile",
+  #      "-t ghcr.io/turbopanel/turbopanel:latest"
+  #    ].join(" ")
+  # end
+
+  config.vm.provision "docker",
+    images: ["ghcr.io/turbopanel/turbopanel:1.0-development"]
 
 end
