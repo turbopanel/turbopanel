@@ -123,3 +123,7 @@ nb-configuration.xml
 
 /results/
 /phpunit*.xml
+/.config
+.profile
+.ash_history
+.shellfishrc
