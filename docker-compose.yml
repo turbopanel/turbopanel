@@ -1,9 +1,11 @@
 networks:
   tp-net:
     name: tp-net
+  tp-cache-net:
+    name: tp-cache-net
 
 services:
-  turbopanel:
+  app:
     image: ghcr.io/turbopanel/turbopanel:1.0-development
     container_name: turbopanel
     hostname: turbopanel
@@ -12,6 +14,7 @@ services:
       - .:/opt/turbopanel
     networks:
       - tp-net
+      - tp-cache-net
     ports:
       - 2052:2052
       - 2053:2053
@@ -23,7 +26,7 @@ services:
       - 2096:2096
       - 7080:7080
 
-  turbopanel-db:
+  db:
     image: mariadb:10.11-jammy
     container_name: turbopanel-db
     hostname: turbopanel-db
@@ -37,3 +40,14 @@ services:
       - tp-net
     ports:
       - 3306:3306
+
+  cache:
+    image: redis:6.2.6
+    container_name: turbopanel-cache
+    hostname: turbopanel-cache
+    restart: always
+    networks:
+      - tp-net
+      - tp-cache-net
+    ports:
+      - 6379:6379
