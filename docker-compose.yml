@@ -4,7 +4,7 @@ networks:
 
 services:
   turbopanel:
-    image: ghcr.io/turbopanel/turbopanel:latest
+    image: ghcr.io/turbopanel/turbopanel:1.0-development
     container_name: turbopanel
     hostname: turbopanel
     restart: always
@@ -22,5 +22,18 @@ services:
       - 2095:2095
       - 2096:2096
       - 7080:7080
-      - 80:80
-      - 8088:8088
+
+  turbopanel-db:
+    image: mariadb:10.11-jammy
+    container_name: turbopanel-db
+    hostname: turbopanel-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: turbopanel
+      MYSQL_USER: turbopanel
+      MYSQL_PASSWORD: turbopanel
+    networks:
+      - tp-net
+    ports:
+      - 3306:3306

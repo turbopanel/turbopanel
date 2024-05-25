@@ -9,6 +9,9 @@ CMD ["/sbin/my_init"]
 # update baseimage and install required packages
 RUN apt-get update && apt-get upgrade -y -o Dpkg::Options::="--force-confold" && install_clean wget zip unzip default-mysql-client
 
+# add turbopanel uid 950 and gid 950
+RUN groupadd -g 950 turbopanel && useradd -u 950 -g 950 -m -s /bin/bash turbopanel
+
 RUN if [ $(uname -m) = "aarch64" ]; then \
         install_clean libatomic1; \
     fi && \
@@ -50,6 +53,9 @@ RUN if [ $(uname -m) != "aarch64" ]; then \
     fi && \
     /usr/local/lsws/lsphp83/bin/pecl install redis && \
     echo "extension=redis.so" | tee -a /usr/local/lsws/lsphp83/etc/php/8.3/litespeed/php.ini > /dev/null
+
+# make lsphp83 the default php
+RUN ln -sf /usr/local/lsws/lsphp83/bin/php /usr/local/bin/php
 
 # configure openLiteSpeed
 COPY ./image/lsws/httpd.conf /usr/local/lsws/conf/httpd_config.conf
