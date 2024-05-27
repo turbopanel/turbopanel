@@ -140,3 +140,4 @@ nb-configuration.xml
 # git
 .git-credentials
 .netrc
+.gitconfig
