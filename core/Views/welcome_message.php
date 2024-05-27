@@ -225,7 +225,7 @@
 
     <div class="heroe">
 
-        <h1>Welcome to CodeIgniter <?= CodeIgniter\CodeIgniter::CI_VERSION ?></h1>
+        <h1>Welcome to TurboPanel <?= CodeIgniter\CodeIgniter::CI_VERSION ?></h1>
 
         <h2>The small framework with powerful features</h2>
 
@@ -243,11 +243,11 @@
 
     <p>If you would like to edit this page you will find it located at:</p>
 
-    <pre><code>app/Views/welcome_message.php</code></pre>
+    <pre><code>core/Views/welcome_message.php</code></pre>
 
     <p>The corresponding controller for this page can be found at:</p>
 
-    <pre><code>app/Controllers/Home.php</code></pre>
+    <pre><code>core/Controllers/Home.php</code></pre>
 
 </section>
 

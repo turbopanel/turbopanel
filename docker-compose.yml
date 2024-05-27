@@ -32,7 +32,7 @@ services:
     hostname: turbopanel-db
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: c5NcrPJhQuUaD4cEmj9o
       MYSQL_DATABASE: turbopanel
       MYSQL_USER: turbopanel
       MYSQL_PASSWORD: turbopanel

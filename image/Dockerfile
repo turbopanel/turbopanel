@@ -76,3 +76,7 @@ COPY --from=composer:lts /usr/bin/composer /usr/local/bin/composer
 
 RUN mkdir -p /opt/turbopanel
 COPY . /opt/turbopanel
+
+# change to turbopanel user and go to the project directory
+USER turbopanel
+WORKDIR /opt/turbopanel
