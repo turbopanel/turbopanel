@@ -120,6 +120,7 @@ nb-configuration.xml
 
 # Visual Studio Code
 .vscode/
+.vscode-server/
 
 /results/
 /phpunit*.xml
@@ -127,3 +128,17 @@ nb-configuration.xml
 .profile
 .ash_history
 .shellfishrc
+.bash_history
+.bash_logout
+.bashrc
+.wget-hsts
+.cache/motd.legal-displayed
+.docker/
+.dotnet/
+.ssh/authorized_keys
+
+# git
+.git-credentials
+.netrc
+.netrc
+.netrc
