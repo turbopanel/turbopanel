@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# get the current version from composer.json
+version=$(jq -r '.version' composer.json)
+
+# check if the version matches the format X.Y.Z.B (four part version number)
+if [[ $version =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    major=${BASH_REMATCH[1]}
+    minor=${BASH_REMATCH[2]}
+    patch=${BASH_REMATCH[3]}
+    build=${BASH_REMATCH[4]}
+    new_version="$major.$minor.$patch.$((build + 1))"
+    # update the version in composer.json
+    jq --arg new_version "$new_version" '.version = $new_version' composer.json > composer.tmp && mv composer.tmp composer.json
+    # add the updated composer.json to the commit
+    git add composer.json
+else
+    echo "Current version format is invalid. Version: $version"
+    exit 1
+fi
