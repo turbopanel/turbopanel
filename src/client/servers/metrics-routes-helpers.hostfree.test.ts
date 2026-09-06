@@ -8,6 +8,7 @@ import { DisabledServerMetricsStoreV4 } from '../../daemon/metrics/disabled-stor
 import type {
   EntitySeriesQueryV4,
   EntitySeriesResultV4,
+  HostSeriesQueryV4,
   HostSeriesResultV4,
   ServerMetricsStoreV4,
   StatusHistoryResult,
@@ -624,6 +625,60 @@ test('querySeriesResultsV4 forwards slotMapping/topologyGeneration for the netwo
   assertEquals(seen?.family, 'network')
   assertEquals(seen?.slotMapping?.normalNicSlot1, 'eth0')
   assertEquals(seen?.topologyGeneration, 5)
+})
+
+test('querySeriesResultsV4 invokes class-instance series methods with this bound', async () => {
+  class ThisSensitiveStore {
+    writeSample(): void {}
+    writeStatusEvent(): void {}
+    flushWrites(): void {
+      if (this == null) throw new TypeError('flushWrites this unbound')
+    }
+    queryHostSeries(input: HostSeriesQueryV4): Promise<HostSeriesResultV4> {
+      this.flushWrites()
+      return Promise.resolve({
+        kind: 'duckdb',
+        available: true,
+        serverId: input.serverId,
+        metrics: input.metrics,
+        points: [],
+        resolutionSeconds: 60,
+        gapCount: 0,
+        sampleCount: 1,
+      })
+    }
+    queryEntitySeries(input: EntitySeriesQueryV4): Promise<EntitySeriesResultV4> {
+      this.flushWrites()
+      return Promise.resolve({
+        kind: 'duckdb',
+        available: true,
+        serverId: input.serverId,
+        family: input.family,
+        metrics: input.metrics,
+        resolutionSeconds: 60,
+        entities: [],
+      })
+    }
+  }
+  const parsed = parseSeriesMetricSelectorsV4(
+    'host.cpu.busyPercent,network:eth0.receiveBytesPerSecond'
+  )
+  if (!parsed.ok) throw new TypeError('expected selectors to parse')
+  const outcome = await querySeriesResultsV4({
+    store: new ThisSensitiveStore() as ServerMetricsStoreV4,
+    backend: 'duckdb',
+    serverId: 'srv-1',
+    selectors: parsed.value,
+    fromIso: FROM,
+    toIso: TO,
+    resolutionSeconds: 60,
+    context: buildTopologyContextV4(undefined, undefined),
+  })
+  const { hostResult, entityResults } = requireSeriesQueryOk(outcome)
+  assertEquals(hostResult?.available, true)
+  assertEquals(hostResult?.sampleCount, 1)
+  assertEquals(entityResults[0]?.available, true)
+  assertEquals(entityResults[0]?.family, 'network')
 })
 
 test('querySeriesResultsV4 returns the host series from the store', async () => {

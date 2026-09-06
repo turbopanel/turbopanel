@@ -744,6 +744,7 @@ export function buildTopologyContextV4(
   } catch {
     return { topologyGeneration, ...EMPTY_TOPOLOGY_CONTEXT_V4 }
   }
+  const rootFilesystemTotalBytes = rootFilesystemTotalBytesV4(snapshot, slotMapping)
   return {
     topologyGeneration,
     slotMapping,
@@ -751,7 +752,7 @@ export function buildTopologyContextV4(
     capacities: {
       memoryTotalBytes: snapshot.memoryTotalBytes,
       swapTotalBytes: snapshot.swapTotalBytes,
-      rootFilesystemTotalBytes: rootFilesystemTotalBytesV4(snapshot, slotMapping),
+      rootFilesystemTotalBytes,
     },
   }
 }
@@ -903,8 +904,8 @@ async function queryHostSeriesForRouteV4(
     return { ok: true, hostResult: null }
   }
   try {
-    const queryHostSeries = input.store?.queryHostSeries
-    if (!queryHostSeries) {
+    const store = input.store
+    if (!store?.queryHostSeries) {
       return {
         ok: true,
         hostResult: unavailableHostSeriesResultV4({
@@ -916,7 +917,7 @@ async function queryHostSeriesForRouteV4(
     }
     return {
       ok: true,
-      hostResult: await queryHostSeries({
+      hostResult: await store.queryHostSeries({
         serverId: input.serverId,
         metrics: input.selectors.hostCanonicalNames,
         from: input.fromIso,
@@ -950,8 +951,8 @@ async function queryOneEntityFamilySeriesV4(
         }
       : {}
   try {
-    const queryEntitySeries = input.store?.queryEntitySeries
-    if (!queryEntitySeries) {
+    const store = input.store
+    if (!store?.queryEntitySeries) {
       return {
         ok: true,
         result: unavailableEntitySeriesResultV4({
@@ -964,7 +965,7 @@ async function queryOneEntityFamilySeriesV4(
     }
     return {
       ok: true,
-      result: await queryEntitySeries({
+      result: await store.queryEntitySeries({
         serverId: input.serverId,
         family,
         entityIds,

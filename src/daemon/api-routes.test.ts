@@ -2076,7 +2076,7 @@ test('POST /metrics truncates entity arrays to the resolved capability plan', as
     },
     body: JSON.stringify(
       buildValidMetricsFrameV4({
-        // Default (virtual) plan: gpuSlots=1, detailedBlockDeviceSlots=0,
+        // Default (virtual) plan: gpuSlots=1, detailedBlockDeviceSlots=1,
         // extraFilesystemSlots=0, physicalHardwareSignalSlots=0.
         gpus: [{ gpuId: 'gpu0' }, { gpuId: 'gpu1' }],
         blockDevices: [{ deviceId: 'sda' }],
@@ -2090,7 +2090,8 @@ test('POST /metrics truncates entity arrays to the resolved capability plan', as
   const sample = writes[0]
   assertEquals(sample?.gpus.length, 1)
   assertEquals(sample?.gpus[0]?.gpuId, 'gpu0')
-  assertEquals(sample?.blockDevices, [])
+  assertEquals(sample?.blockDevices.length, 1)
+  assertEquals(sample?.blockDevices[0]?.deviceId, 'sda')
   assertEquals(sample?.filesystems, [])
   assertEquals(sample?.hardwareSignals, [])
 })

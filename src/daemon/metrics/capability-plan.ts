@@ -35,7 +35,7 @@ export type MetricsCapabilityPlanV4 = {
   turboFabricEnabled: boolean
   /** Additional `filesystems` entries allowed beyond root-filesystem host metrics. */
   extraFilesystemSlots: number
-  /** `blockDevices` entries allowed (per-disk detail; 0 = none). */
+  /** `blockDevices` entries allowed (per-disk service devices; 0 = none). */
   detailedBlockDeviceSlots: number
   /** `gpus` entries allowed. */
   gpuSlots: number
@@ -103,7 +103,7 @@ export const PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN: MetricsCapabilityPlanV4 =
   normalNicSlots: 2,
   turboFabricEnabled: true,
   extraFilesystemSlots: 0,
-  detailedBlockDeviceSlots: 0,
+  detailedBlockDeviceSlots: 1,
   gpuSlots: 1,
   gpuInterconnectEnabled: false,
   physicalHardwareSignalSlots: 19,
