@@ -16,23 +16,12 @@ pnpm-lock.yaml sha256:d015bae0639fc4d3d898deb9a6972d232632ceb38f909f53318e914bd1
 - License: MIT OR Apache-2.0
 - Source: deno.lock (npm)
 
-### @cloudflare/workers-types@5.20260818.1
-
-- License: MIT OR Apache-2.0
-- Copyright: Cloudflare Workers DevProd Team
-- Homepage: https://github.com/cloudflare/workerd#readme
-
 ### @duckdb/node-api@1.5.5-r.4
 
 - License: MIT
 - Homepage: https://github.com/duckdb/duckdb-node-neo#readme
 
 ### @duckdb/node-bindings@1.5.5-r.4
-
-- License: MIT
-- Homepage: https://github.com/duckdb/duckdb-node-neo#readme
-
-### @duckdb/node-bindings-linux-x64@1.5.5-r.4
 
 - License: MIT
 - Homepage: https://github.com/duckdb/duckdb-node-neo#readme
@@ -161,12 +150,6 @@ pnpm-lock.yaml sha256:d015bae0639fc4d3d898deb9a6972d232632ceb38f909f53318e914bd1
 - License: MIT
 - Copyright: luin
 - Homepage: https://github.com/luin/asCallback#readme
-
-### supports-color@10.2.2
-
-- License: MIT
-- Copyright: Sindre Sorhus
-- Homepage: https://github.com/chalk/supports-color#readme
 
 ### yaml@2.9.0
 
@@ -306,6 +289,12 @@ These packages are used for development, test, or build tooling and are not bund
 - License: Apache-2.0
 - Homepage: https://github.com/cloudflare/workerd#readme
 
+### @cloudflare/workers-types@5.20260818.1
+
+- License: MIT OR Apache-2.0
+- Copyright: Cloudflare Workers DevProd Team
+- Homepage: https://github.com/cloudflare/workerd#readme
+
 ### @cspotcode/source-map-support@0.8.1
 
 - License: MIT
@@ -316,6 +305,11 @@ These packages are used for development, test, or build tooling and are not bund
 - License: Apache-2.0
 - Copyright: Drizzle Team
 - Homepage: https://github.com/drizzle-team/brocli
+
+### @duckdb/node-bindings-linux-x64@1.5.5-r.4
+
+- License: MIT
+- Homepage: https://github.com/duckdb/duckdb-node-neo#readme
 
 ### @esbuild-kit/core-utils@3.3.2
 
@@ -927,6 +921,12 @@ These packages are used for development, test, or build tooling and are not bund
 
 - License: MIT
 - Homepage: https://github.com/unjs/std-env#readme
+
+### supports-color@10.2.2
+
+- License: MIT
+- Copyright: Sindre Sorhus
+- Homepage: https://github.com/chalk/supports-color#readme
 
 ### supports-color@7.2.0
 
