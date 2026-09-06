@@ -35,9 +35,11 @@ import {
   type TopologyInventoryV4,
 } from './topology-inventory.ts'
 import type { AuthRouteOpts } from '../authn/http.ts'
+import type { ServerMachineClass } from '../../daemon/metrics/capability-plan.ts'
 import {
   type EffectiveCpuThermalLimits,
   HARDWARE_PROFILE_NIC_KEYS,
+  HARDWARE_PROFILE_NIC_SLOT_LIST_KEY,
   HARDWARE_PROFILE_SENSOR_SLOT_KEYS,
   HARDWARE_PROFILE_TOPOLOGY_ID_KEYS,
   resolveEffectiveCpuThermalLimits,
@@ -52,6 +54,7 @@ import {
   type TopologyDeviceId,
   type TopologyOverrides,
   type TopologySnapshot,
+  MAX_NIC_SLOTS,
 } from './topology-types.ts'
 import {
   type OrganizationOptions,
@@ -140,6 +143,7 @@ const KNOWN_HARDWARE_PROFILE_KEYS = new Set<string>([
   ...HARDWARE_PROFILE_SENSOR_SLOT_KEYS,
   ...HARDWARE_PROFILE_NIC_KEYS,
   ...HARDWARE_PROFILE_TOPOLOGY_ID_KEYS,
+  HARDWARE_PROFILE_NIC_SLOT_LIST_KEY,
   'hostingPath',
   'drivetempEnabled',
   'cpuTdpWattsOverride',
@@ -197,6 +201,44 @@ function parseCpuTjMaxCelsiusField(value: unknown): NumberFieldParse {
 
 type HardwareProfileFieldResult = { ok: true } | { ok: false; message: string }
 
+type NicSlotListParse = { ok: true; value: string[] | null } | { ok: false; message: string }
+
+/**
+ * `nicSlotDeviceIds`: `null` returns the server to auto selection; an array
+ * is the complete monitored-NIC list in slot order — every entry a non-blank
+ * opaque topology device id, deduplicated, at most `MAX_NIC_SLOTS` (the
+ * effective plan's smaller `normalNicSlots` limit is checked by the route
+ * once it has resolved that plan).
+ */
+function parseNicSlotListField(value: unknown): NicSlotListParse {
+  if (value === null) return { ok: true, value: null }
+  if (!Array.isArray(value)) {
+    return {
+      ok: false,
+      message: `${HARDWARE_PROFILE_NIC_SLOT_LIST_KEY} must be an array of topology device ids or null`,
+    }
+  }
+  const ids: string[] = []
+  for (const entry of value) {
+    if (entry === null) {
+      return {
+        ok: false,
+        message: `${HARDWARE_PROFILE_NIC_SLOT_LIST_KEY} entries must be non-blank strings`,
+      }
+    }
+    const parsed = parseOptionalStringField(HARDWARE_PROFILE_NIC_SLOT_LIST_KEY, entry)
+    if (!parsed.ok) return parsed
+    if (parsed.value !== null && !ids.includes(parsed.value)) ids.push(parsed.value)
+  }
+  if (ids.length > MAX_NIC_SLOTS) {
+    return {
+      ok: false,
+      message: `${HARDWARE_PROFILE_NIC_SLOT_LIST_KEY} accepts at most ${MAX_NIC_SLOTS} devices`,
+    }
+  }
+  return { ok: true, value: ids }
+}
+
 /** Rejects any key not in {@link KNOWN_HARDWARE_PROFILE_KEYS} so a typo cannot silently no-op. */
 function findUnknownHardwareProfileField(body: Record<string, unknown>): string | null {
   for (const key of Object.keys(body)) {
@@ -220,8 +262,7 @@ function applySensorSlotFields(
 }
 
 type OptionalStringProfileKey =
-  | (typeof HARDWARE_PROFILE_NIC_KEYS)[number]
-  | (typeof HARDWARE_PROFILE_TOPOLOGY_ID_KEYS)[number]
+  (typeof HARDWARE_PROFILE_NIC_KEYS)[number] | (typeof HARDWARE_PROFILE_TOPOLOGY_ID_KEYS)[number]
 
 function applyOptionalStringFields(
   keys: readonly OptionalStringProfileKey[],
@@ -279,6 +320,7 @@ function parseDrivetempEnabledField(value: unknown): DrivetempEnabledParse {
 }
 
 type SimpleUpdateKey =
+  | typeof HARDWARE_PROFILE_NIC_SLOT_LIST_KEY
   | 'hostingPath'
   | 'drivetempEnabled'
   | 'cpuTdpWattsOverride'
@@ -341,6 +383,13 @@ export function parseHardwareProfileBody(body: unknown): HardwareProfileBodyPars
   if (!topologyIdResult.ok) return topologyIdResult
 
   const simpleFieldAppliers: Array<() => HardwareProfileFieldResult> = [
+    () =>
+      applyOptionalField(
+        body[HARDWARE_PROFILE_NIC_SLOT_LIST_KEY],
+        HARDWARE_PROFILE_NIC_SLOT_LIST_KEY,
+        parseNicSlotListField,
+        update
+      ),
     () => applyOptionalField(body.hostingPath, 'hostingPath', parseHostingPathField, update),
     () =>
       applyOptionalField(
@@ -374,14 +423,17 @@ export function parseHardwareProfileBody(body: unknown): HardwareProfileBodyPars
 
 /**
  * True when `update` assigns at least one stable topology-id override
- * (`nicSlot1DeviceId` / `nicSlot2DeviceId` / `hostingFilesystemId`) — checked
+ * (`hostingFilesystemId`, or a non-empty `nicSlotDeviceIds` list) — checked
  * against the last recorded topology generation, never a live daemon round
  * trip, so it never requires a connected daemon.
  */
 export function hardwareProfileUpdateNeedsTopologyValidation(
   update: ServerHardwareProfileUpdate
 ): boolean {
-  return HARDWARE_PROFILE_TOPOLOGY_ID_KEYS.some((key) => Boolean(update[key]))
+  return (
+    HARDWARE_PROFILE_TOPOLOGY_ID_KEYS.some((key) => Boolean(update[key])) ||
+    (update.nicSlotDeviceIds?.length ?? 0) > 0
+  )
 }
 
 /** Narrowed subset of a recorded `TopologySnapshot` used for topology-id validation. */
@@ -398,20 +450,69 @@ export function findInvalidTopologyIdField(
   update: ServerHardwareProfileUpdate,
   snapshot: TopologyIdValidationSnapshot | undefined
 ): string | null {
-  const networkIds = new Set<TopologyDeviceId>((snapshot?.networks ?? []).map((n) => n.deviceId))
   const filesystemIds = new Set<FilesystemId>(
     (snapshot?.filesystems ?? []).map((fs) => fs.filesystemId)
   )
-  if (update.nicSlot1DeviceId && !networkIds.has(update.nicSlot1DeviceId)) {
-    return 'nicSlot1DeviceId'
-  }
-  if (update.nicSlot2DeviceId && !networkIds.has(update.nicSlot2DeviceId)) {
-    return 'nicSlot2DeviceId'
+  if (update.nicSlotDeviceIds && findUnmonitorableNicSlotId(update.nicSlotDeviceIds, snapshot)) {
+    return HARDWARE_PROFILE_NIC_SLOT_LIST_KEY
   }
   if (update.hostingFilesystemId && !filesystemIds.has(update.hostingFilesystemId)) {
     return 'hostingFilesystemId'
   }
   return null
+}
+
+/**
+ * The first requested NIC-slot id that is not an `uplink` in the recorded
+ * topology — a device the daemon never enumerated, or one it classified as a
+ * bond/bridge member, a VLAN child, a tunnel, a container bridge, or
+ * loopback (none of which are monitorable: their traffic is already counted
+ * on an uplink, or isn't the host's). `null` when every id is an uplink.
+ */
+export function findUnmonitorableNicSlotId(
+  nicSlotDeviceIds: readonly string[],
+  snapshot: TopologyIdValidationSnapshot | undefined
+): string | null {
+  const uplinks = new Set<TopologyDeviceId>(
+    (snapshot?.networks ?? [])
+      .filter((device) => device.kind === 'uplink')
+      .map((device) => device.deviceId)
+  )
+  return nicSlotDeviceIds.find((id) => !uplinks.has(id)) ?? null
+}
+
+/**
+ * Error text when the monitored-NIC list is longer than the server's
+ * effective `normalNicSlots` (its capability plan — 2 on the hosted platform
+ * by default, `MAX_NIC_SLOTS` self-hosted), or `null` when it fits. Checked at
+ * PUT time so a hosted operator never pins NICs that ingest would silently
+ * drop.
+ */
+export function nicSlotLimitViolationV4(
+  update: ServerHardwareProfileUpdate,
+  nicSlotLimit: number
+): string | null {
+  const requested = update.nicSlotDeviceIds?.length ?? 0
+  if (requested <= nicSlotLimit) return null
+  return (
+    `${HARDWARE_PROFILE_NIC_SLOT_LIST_KEY} lists ${requested} devices but this server may ` +
+    `monitor at most ${nicSlotLimit}`
+  )
+}
+
+/**
+ * Machine class for capability-plan resolution, from a recorded topology
+ * snapshot: only a physical host ever discovers host-level hardware signals,
+ * so a non-empty `hardwareSignals` array is the classification (mirrors the
+ * daemon ingest route's `classifyServerMachineForMetrics`). Unknown/missing
+ * snapshot → `'virtual'`, the conservative default.
+ */
+export function machineClassFromTopologySnapshotV4(snapshot: unknown): ServerMachineClass {
+  if (typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) {
+    return 'virtual'
+  }
+  const signals = (snapshot as Record<string, unknown>).hardwareSignals
+  return Array.isArray(signals) && signals.length > 0 ? 'physical' : 'virtual'
 }
 
 export function resolveStoreBackendKindV4(
@@ -489,8 +590,7 @@ export type SeriesMetricSelectorsV4 = {
 }
 
 export type ParseSeriesMetricSelectorsResultV4 =
-  | { ok: true; value: SeriesMetricSelectorsV4 }
-  | { ok: false; error: string }
+  { ok: true; value: SeriesMetricSelectorsV4 } | { ok: false; error: string }
 
 type SelectorApplyResult = { ok: true } | { ok: false; error: string }
 
@@ -622,7 +722,7 @@ export function seriesCacheMetricsListV4(selectors: SeriesMetricSelectorsV4): st
  * NIC slot). Rejecting it here keeps the two backends answering the same
  * request the same way.
  *
- * A `normalNicSlot1`/`normalNicSlot2` device is deliberately NOT rejected
+ * A slot-mapped normal-NIC device is deliberately NOT rejected
  * here (unlike the pre-reconstruction behavior this replaces): Cloudflare
  * now reconstructs its `receiveBytesPerSecond`/`transmitBytesPerSecond` from
  * `host.io`'s own rows when `queryEntitySeries` is called with a resolved
@@ -680,8 +780,7 @@ export function topologyOverridesFromHardwareProfile(
 ): TopologyOverrides {
   return {
     ...EMPTY_TOPOLOGY_OVERRIDES,
-    nicSlot1DeviceId: hardwareProfile?.nicSlot1DeviceId ?? null,
-    nicSlot2DeviceId: hardwareProfile?.nicSlot2DeviceId ?? null,
+    nicSlotDeviceIds: hardwareProfile?.nicSlotDeviceIds ?? [],
     hostingFilesystemId: hardwareProfile?.hostingFilesystemId ?? null,
     drivetempEnabled: hardwareProfile?.drivetempEnabled ?? false,
   }
@@ -776,6 +875,7 @@ export type SeriesRouteResponseV4 = {
   topologyGeneration: number | null
   cpuLimits: EffectiveCpuThermalLimits
   temperatureUnit: TemperatureUnit
+  nicSlotLimit: number
 }
 
 export function buildSeriesRouteResponseV4(
@@ -807,6 +907,7 @@ export function buildSeriesRouteResponseV4(
     topologyGeneration: params.context.topologyGeneration,
     cpuLimits: params.envelope.cpuLimits,
     temperatureUnit: params.envelope.temperatureUnit,
+    nicSlotLimit: params.envelope.nicSlotLimit,
   }
 }
 
@@ -1165,6 +1266,13 @@ export function connectionHistoryHasCacheableData(result: StatusHistoryResult): 
 export type CpuLimitsEnvelope = {
   cpuLimits: EffectiveCpuThermalLimits
   temperatureUnit: TemperatureUnit
+  /**
+   * The server's effective monitored-NIC slot limit (`normalNicSlots` of its
+   * resolved capability plan) — what the settings picker may let an operator
+   * pin. Rides the same envelope as `cpuLimits` because both are per-server
+   * facts the single-server routes already resolve and the UI reads together.
+   */
+  nicSlotLimit: number
 }
 
 /**
@@ -1177,11 +1285,13 @@ export type CpuLimitsEnvelope = {
  */
 export function buildCpuLimitsEnvelope(
   hardwareProfile: ServerHardwareProfile | undefined,
-  orgOptions: OrganizationOptions | null | undefined
+  orgOptions: OrganizationOptions | null | undefined,
+  nicSlotLimit: number
 ): CpuLimitsEnvelope {
   return {
     cpuLimits: resolveEffectiveCpuThermalLimits(hardwareProfile),
     temperatureUnit: resolveTemperatureUnit(orgOptions ?? {}),
+    nicSlotLimit,
   }
 }
 
@@ -1210,6 +1320,7 @@ export function buildHostSummaryPayload(
     latestAt: params.result.latestAt,
     cpuLimits: params.envelope.cpuLimits,
     temperatureUnit: params.envelope.temperatureUnit,
+    nicSlotLimit: params.envelope.nicSlotLimit,
   }
 }
 

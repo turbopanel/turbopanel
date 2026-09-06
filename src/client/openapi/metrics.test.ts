@@ -25,8 +25,8 @@ type SchemaObject = {
  * here so `satisfies` fails to compile when `ServerHardwareProfileUpdate`
  * gains or loses a field — the request schema below cannot drift silently.
  *
- * `nicSlot1DeviceId` / `nicSlot2DeviceId` / `hostingFilesystemId` are
- * included here: unlike `cpuModel` (a detected fact, never operator-set),
+ * `nicSlotDeviceIds` / `hostingFilesystemId` are included here: unlike
+ * `cpuModel` (a detected fact, never operator-set),
  * these stable topology-id pins ARE accepted through this operator PUT
  * body, validated against the server's last recorded topology generation
  * before `mergeServerHardwareProfile` persists them (see
@@ -47,8 +47,7 @@ const HARDWARE_PROFILE_UPDATE_KEYS = {
   systemFan2: true,
   nic1: true,
   nic2: true,
-  nicSlot1DeviceId: true,
-  nicSlot2DeviceId: true,
+  nicSlotDeviceIds: true,
   hostingFilesystemId: true,
   hostingPath: true,
   drivetempEnabled: true,
@@ -110,8 +109,7 @@ test('HostSeriesChartPoint documents topologyGeneration, never the retired hardw
 test('HostSeriesChartPoint documents the optional cpuHotspots payload returned with cpuDetail.* series buckets', () => {
   const schema = metricsSchemas.HostSeriesChartPoint as SchemaObject
   const cpuHotspots = schema.properties?.cpuHotspots as
-    | { type?: string; items?: { $ref?: string } }
-    | undefined
+    { type?: string; items?: { $ref?: string } } | undefined
   assertExists(cpuHotspots)
   assertEquals(cpuHotspots.type, 'array')
   assertEquals(cpuHotspots.items?.$ref, '#/components/schemas/HostSeriesCpuHotspotPoint')
@@ -144,6 +142,7 @@ test('HostSeriesChartResponse bundles host/entities/inventory/topologyGeneration
     'topologyGeneration',
     'cpuLimits',
     'temperatureUnit',
+    'nicSlotLimit',
   ])
   assertEquals('sensorsAvailable' in (schema.properties ?? {}), false)
   assertEquals('generationBreaks' in (schema.properties ?? {}), false)

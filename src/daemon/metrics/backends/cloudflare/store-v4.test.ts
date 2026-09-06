@@ -184,8 +184,7 @@ function writeCountFor(
 /** Slot mapping for a 2-uplink host: `eth0`/`eth1` are the normal NIC slots. */
 function twoUplinkSlotMapping(fabricDeviceIds: string[] = []): SlotMapping {
   return {
-    normalNicSlot1: 'eth0',
-    normalNicSlot2: 'eth1',
+    normalNicSlots: ['eth0', 'eth1'],
     fabricDeviceIds,
     rootFilesystemId: null,
     gpuPageOrder: [],

@@ -17,9 +17,15 @@ import {
   mergeServerHardwareProfile,
   parseServerHardwareProfile,
   parseServerHostResources,
+  parseServerOptions,
+  resolveEffectiveMetricsCapabilityPlan,
   type ServerHardwareProfile,
   type ServerHardwareProfileUpdate,
 } from '../../lib/db/server-metadata.ts'
+import {
+  type MetricsDeploymentKind,
+  metricsDeploymentKindForRuntime,
+} from '../../daemon/metrics/capability-plan.ts'
 import { parseOrganizationOptions } from '../../lib/organization-options.ts'
 import { getServerMetricsLiveMaxMinutes } from '../../lib/settings/server-metrics-settings.ts'
 import { loadServerStatusRecords } from './update-status.ts'
@@ -59,10 +65,12 @@ import {
   FLEET_HOST_METRICS_V4,
   fleetHostCapacitiesFromSnapshotV4,
   hardwareProfileUpdateNeedsTopologyValidation,
+  machineClassFromTopologySnapshotV4,
   metricEventsHasCacheableData,
   type MetricEventsResponse,
   metricsBackendUnavailableResponse,
   metricsQueryErrorMessage,
+  nicSlotLimitViolationV4,
   parseHardwareProfileBody,
   parseIsoTimestampQuery,
   parseOptionalResolution,
@@ -109,11 +117,13 @@ async function loadServerHardwareProfile(
 ): Promise<{
   hardwareProfile: ServerHardwareProfile | undefined
   organizationId: string | null
+  serverOptions: ReturnType<typeof parseServerOptions>
 }> {
   const [serverRow] = await db
     .select({
       metadata: server.metadata,
       organizationId: server.organizationId,
+      options: server.options,
     })
     .from(server)
     .where(eq(server.id, serverId))
@@ -141,30 +151,70 @@ async function loadServerHardwareProfile(
   return {
     hardwareProfile: effectiveHardwareProfile,
     organizationId: serverRow?.organizationId ?? null,
+    serverOptions: parseServerOptions(serverRow?.options),
   }
 }
 
+/** One organization-options read, shared by the envelope and the NIC-slot limit. */
+async function loadOrganizationOptions(
+  db: NonNullable<ReturnType<typeof getDb>>,
+  organizationId: string | null
+) {
+  if (!organizationId) return null
+  const [orgRow] = await db
+    .select({ options: organization.options })
+    .from(organization)
+    .where(eq(organization.id, organizationId))
+    .limit(1)
+  return parseOrganizationOptions(orgRow?.options)
+}
+
 /**
- * Resolve the CPU-headroom + temperature-unit envelope for a single-server
- * route (`/series`, `/summary`) from an already-loaded hardware profile —
- * see {@link loadServerHardwareProfile}.
+ * The server's effective monitored-NIC slot limit — `normalNicSlots` of its
+ * resolved capability plan (platform default for this deployment → org →
+ * server override), classified physical/virtual from its latest recorded
+ * topology the same way ingest does. The single source the settings PUT
+ * validates against and the envelope reports to the UI.
+ */
+function resolveNicSlotLimit(
+  inputs: Readonly<{
+    latestSnapshot: unknown
+    orgOptions: ReturnType<typeof parseOrganizationOptions> | null
+    serverOptions: ReturnType<typeof parseServerOptions>
+    deployment: MetricsDeploymentKind
+  }>
+): number {
+  return resolveEffectiveMetricsCapabilityPlan(
+    machineClassFromTopologySnapshotV4(inputs.latestSnapshot),
+    inputs.orgOptions ?? undefined,
+    inputs.serverOptions ?? undefined,
+    inputs.deployment
+  ).normalNicSlots
+}
+
+/**
+ * Resolve the CPU-headroom + temperature-unit + NIC-slot-limit envelope for
+ * a single-server route (`/series`, `/summary`) from an already-loaded
+ * hardware profile — see {@link loadServerHardwareProfile}.
  */
 async function loadCpuLimitsEnvelope(
   db: NonNullable<ReturnType<typeof getDb>>,
-  hardwareProfile: ServerHardwareProfile | undefined,
-  organizationId: string | null
+  inputs: Readonly<{
+    hardwareProfile: ServerHardwareProfile | undefined
+    organizationId: string | null
+    serverOptions: ReturnType<typeof parseServerOptions>
+    latestSnapshot: unknown
+    deployment: MetricsDeploymentKind
+  }>
 ): Promise<CpuLimitsEnvelope> {
-  let orgOptions = null
-  if (organizationId) {
-    const [orgRow] = await db
-      .select({ options: organization.options })
-      .from(organization)
-      .where(eq(organization.id, organizationId))
-      .limit(1)
-    orgOptions = parseOrganizationOptions(orgRow?.options)
-  }
-
-  return buildCpuLimitsEnvelope(hardwareProfile, orgOptions)
+  const orgOptions = await loadOrganizationOptions(db, inputs.organizationId)
+  const nicSlotLimit = resolveNicSlotLimit({
+    latestSnapshot: inputs.latestSnapshot,
+    orgOptions,
+    serverOptions: inputs.serverOptions,
+    deployment: inputs.deployment,
+  })
+  return buildCpuLimitsEnvelope(inputs.hardwareProfile, orgOptions, nicSlotLimit)
 }
 
 export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) {
@@ -173,6 +223,7 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
   }
   const secrets = opts.secrets
   const cache = createMetricsChartCache(opts.runtime)
+  const deployment = metricsDeploymentKindForRuntime(opts.runtime)
 
   router.use('/servers/metrics/*', createSessionMiddleware(secrets))
   router.use('/servers/:id/metrics/*', createSessionMiddleware(secrets))
@@ -336,7 +387,10 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
 
     const queryRange = canonicalizeMetricsRange(fromParsed.ms, toParsed.ms, resolutionSeconds)
 
-    const { hardwareProfile, organizationId } = await loadServerHardwareProfile(db, serverId)
+    const { hardwareProfile, organizationId, serverOptions } = await loadServerHardwareProfile(
+      db,
+      serverId
+    )
     const latestGeneration = await getLatestTopologyGeneration(db, serverId)
     const context = buildTopologyContextV4(latestGeneration, hardwareProfile)
 
@@ -377,7 +431,13 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
     }
     const { hostResult, entityResults } = seriesQuery
 
-    const envelope = await loadCpuLimitsEnvelope(db, hardwareProfile, organizationId)
+    const envelope = await loadCpuLimitsEnvelope(db, {
+      hardwareProfile,
+      organizationId,
+      serverOptions,
+      latestSnapshot: latestGeneration?.snapshot,
+      deployment,
+    })
     const hostChartResponse = hostResult
       ? toHostSeriesChartResponseV4({
           serverId,
@@ -451,7 +511,10 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       summaryResolutionSeconds
     )
 
-    const { hardwareProfile, organizationId } = await loadServerHardwareProfile(db, serverId)
+    const { hardwareProfile, organizationId, serverOptions } = await loadServerHardwareProfile(
+      db,
+      serverId
+    )
     const latestGeneration = await getLatestTopologyGeneration(db, serverId)
 
     const cacheKey = metricsChartCacheKey({
@@ -494,7 +557,13 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       return c.json(metricsBackendUnavailableResponse(backend), 503)
     }
 
-    const envelope = await loadCpuLimitsEnvelope(db, hardwareProfile, organizationId)
+    const envelope = await loadCpuLimitsEnvelope(db, {
+      hardwareProfile,
+      organizationId,
+      serverOptions,
+      latestSnapshot: latestGeneration?.snapshot,
+      deployment,
+    })
     const payload = buildHostSummaryPayload({
       serverId,
       from: queryRange.fromIso,
@@ -959,7 +1028,12 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
 
     const registry = getDaemonCellRegistry(c)
     if (hardwareProfileUpdateNeedsTopologyValidation(parsed.update)) {
-      const topologyError = await validateHardwareProfileTopologyIds(db, serverId, parsed.update)
+      const topologyError = await validateHardwareProfileTopologyIds(
+        db,
+        serverId,
+        parsed.update,
+        deployment
+      )
       if (topologyError) {
         return c.json(topologyError.body, topologyError.status)
       }
@@ -985,28 +1059,55 @@ type HardwareProfileValidationError = {
 }
 
 /**
- * Confirms a stable topology-id override (`nicSlot1DeviceId` /
- * `nicSlot2DeviceId` / `hostingFilesystemId`) in `update` matches a
- * device/filesystem id in the last topology generation this server reported
- * — never a live daemon round trip, so this works whether or not the daemon
- * is currently connected.
+ * Confirms a stable topology-id override (`hostingFilesystemId`, or every
+ * entry of `nicSlotDeviceIds`) in `update` matches a device/filesystem id
+ * in the last topology generation this server reported — and, for NIC
+ * slots, that each device is an `uplink` and the list fits the server's
+ * effective slot limit — never a live daemon round trip, so this works
+ * whether or not the daemon is currently connected.
  */
 async function validateHardwareProfileTopologyIds(
   db: NonNullable<ReturnType<typeof getDb>>,
   serverId: string,
-  update: ServerHardwareProfileUpdate
+  update: ServerHardwareProfileUpdate,
+  deployment: MetricsDeploymentKind
 ): Promise<HardwareProfileValidationError | null> {
   const latest = await getLatestTopologyGeneration(db, serverId)
-  const invalidField = findInvalidTopologyIdField(
-    update,
-    latest?.snapshot as TopologyIdValidationSnapshot | undefined
-  )
+  const snapshot = latest?.snapshot as TopologyIdValidationSnapshot | undefined
+  const invalidField = findInvalidTopologyIdField(update, snapshot)
+  if (invalidField === 'nicSlotDeviceIds') {
+    return {
+      status: 400,
+      body: {
+        error:
+          'nicSlotDeviceIds must only name physical uplinks from the recorded topology ' +
+          '(bond/bridge members, VLAN children, tunnels, and container bridges cannot be monitored)',
+      },
+    }
+  }
   if (invalidField) {
     return {
       status: 400,
       body: {
         error: `${invalidField} does not match a device/filesystem in the recorded topology`,
       },
+    }
+  }
+
+  if ((update.nicSlotDeviceIds?.length ?? 0) > 0) {
+    const { organizationId, serverOptions } = await loadServerHardwareProfile(db, serverId)
+    const orgOptions = await loadOrganizationOptions(db, organizationId)
+    const limitError = nicSlotLimitViolationV4(
+      update,
+      resolveNicSlotLimit({
+        latestSnapshot: latest?.snapshot,
+        orgOptions,
+        serverOptions,
+        deployment,
+      })
+    )
+    if (limitError) {
+      return { status: 400, body: { error: limitError } }
     }
   }
   return null

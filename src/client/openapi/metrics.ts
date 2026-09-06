@@ -1,8 +1,10 @@
 import {
   HARDWARE_PROFILE_NIC_KEYS,
+  HARDWARE_PROFILE_NIC_SLOT_LIST_KEY,
   HARDWARE_PROFILE_SENSOR_SLOT_KEYS,
   HARDWARE_PROFILE_TOPOLOGY_ID_KEYS,
 } from '../../lib/db/server-metadata.ts'
+import { MAX_NIC_SLOTS } from '../servers/topology-types.ts'
 import { clientErrorJson } from './shared.ts'
 
 const sensorSlotOrNullSchema = {
@@ -27,6 +29,14 @@ const topologyIdOrNullSchema = {
     'Opaque, daemon-derived stable topology device/filesystem id (never a raw interface name or path); `null` unassigns; omit to leave untouched. Validated against the server’s last recorded topology generation before it is saved.',
 }
 
+const nicSlotLimitSchema = {
+  type: 'integer',
+  minimum: 0,
+  maximum: MAX_NIC_SLOTS,
+  description:
+    'How many network interfaces this server may monitor (its effective capability plan’s NIC-slot count — 2 by default on the hosted platform, up to 8 self-hosted). The hardware-profile PUT rejects a longer nicSlotDeviceIds list.',
+}
+
 const sensorSlotProperties = Object.fromEntries(
   HARDWARE_PROFILE_SENSOR_SLOT_KEYS.map((key) => [key, sensorSlotOrNullSchema])
 )
@@ -39,6 +49,20 @@ const topologyIdProperties = Object.fromEntries(
   HARDWARE_PROFILE_TOPOLOGY_ID_KEYS.map((key) => [key, topologyIdOrNullSchema])
 )
 
+const nicSlotListSchema = {
+  type: 'array',
+  items: { type: 'string' },
+  maxItems: MAX_NIC_SLOTS,
+  description:
+    'Monitored network interfaces in slot order (slot 1 first): opaque, daemon-derived topology device ids of physical uplinks (never interface names). Absent/empty means auto — only the default-route uplink is monitored.',
+}
+
+const nicSlotListOrNullSchema = {
+  ...nicSlotListSchema,
+  type: ['array', 'null'],
+  description: `${nicSlotListSchema.description} Full replacement; \`null\` (or \`[]\`) returns the server to auto selection; omit to leave untouched. Every id must be an \`uplink\` in the server’s last recorded topology generation, and the list must fit the server’s effective NIC-slot limit (\`nicSlotLimit\` on /series and /summary).`,
+}
+
 /**
  * Fields {@link ServerHardwareProfile} carries once persisted — same slot/NIC/
  * topology-id shape as the update request, plus generation bookkeeping and
@@ -48,6 +72,7 @@ const hardwareProfileProperties = {
   ...sensorSlotProperties,
   ...nicProperties,
   ...topologyIdProperties,
+  [HARDWARE_PROFILE_NIC_SLOT_LIST_KEY]: nicSlotListSchema,
   hostingPath: { type: 'string' },
   drivetempEnabled: { type: 'boolean' },
   generation: {
@@ -249,7 +274,7 @@ export const metricsSchemas = {
         type: 'array',
         items: { type: 'object' },
         description:
-          '`{deviceId, name, kind, role, speedMbps?, mtu?}[]` — `role` is `normalNicSlot1`/`normalNicSlot2`/`fabric`/`other`; only `other` pages as a standalone `network` entity series (the rest are embedded in `host.*` metrics and rejected by `/series` if requested as an entity id).',
+          '`{deviceId, name, kind, role, slot?, speedMbps?, mtu?, defaultRoute?}[]` — `kind` is the daemon’s classification (`uplink`/`member`/`virtual`/`fabric`/`container-bridge`/`loopback`; only `uplink`s can be monitored), `role` is `nic` (a monitored slot — its 1-based `slot` rides alongside; slots 1/2 embed in host metrics, 3+ page as standalone `network` rows), `fabric` (embedded, never queryable as an entity), or `other` (enumerated but not sampled). `defaultRoute` marks the gateway uplink auto selection picks.',
       },
       filesystems: {
         type: 'array',
@@ -289,6 +314,7 @@ export const metricsSchemas = {
       'topologyGeneration',
       'cpuLimits',
       'temperatureUnit',
+      'nicSlotLimit',
     ],
     properties: {
       ok: { type: 'boolean', const: true },
@@ -326,6 +352,7 @@ export const metricsSchemas = {
       },
       cpuLimits: { $ref: '#/components/schemas/EffectiveCpuThermalLimits' },
       temperatureUnit: { type: 'string', enum: ['celsius', 'fahrenheit'] },
+      nicSlotLimit: nicSlotLimitSchema,
     },
   },
   HostSummaryChartResponse: {
@@ -341,6 +368,7 @@ export const metricsSchemas = {
       'latestAt',
       'cpuLimits',
       'temperatureUnit',
+      'nicSlotLimit',
     ],
     properties: {
       ok: { type: 'boolean', const: true },
@@ -353,6 +381,7 @@ export const metricsSchemas = {
       latestAt: { type: ['string', 'null'], format: 'date-time' },
       cpuLimits: { $ref: '#/components/schemas/EffectiveCpuThermalLimits' },
       temperatureUnit: { type: 'string', enum: ['celsius', 'fahrenheit'] },
+      nicSlotLimit: nicSlotLimitSchema,
     },
   },
   FleetServerUsageRecord: {
@@ -460,6 +489,7 @@ export const metricsSchemas = {
       ...sensorSlotProperties,
       ...nicProperties,
       ...topologyIdProperties,
+      [HARDWARE_PROFILE_NIC_SLOT_LIST_KEY]: nicSlotListOrNullSchema,
       hostingPath: {
         type: ['string', 'null'],
         description: 'Absolute path without whitespace; `null` clears it.',
@@ -676,7 +706,7 @@ export const metricsPaths: Record<string, unknown> = {
       tags: ['Servers'],
       summary: 'Set the operator-assigned hardware profile for a server',
       description:
-        'Persists sensor-slot/NIC assignments, stable topology-id pins, hosting path, drivetemp opt-in, and CPU TDP/Tjmax overrides. Assigning a topology-id pin (nicSlot1DeviceId/nicSlot2DeviceId/hostingFilesystemId) is validated against the server’s last recorded topology generation and does not require the daemon to be connected; sensor/NIC slot assignments and all other fields are persisted without validation.',
+        'Persists sensor-slot/NIC assignments, the monitored-NIC list (nicSlotDeviceIds), stable topology-id pins, hosting path, drivetemp opt-in, and CPU TDP/Tjmax overrides. Assigning a topology-id pin (hostingFilesystemId) or a monitored-NIC list is validated against the server’s last recorded topology generation — every listed device must be a physical uplink, and the list must fit the server’s effective NIC-slot limit — and does not require the daemon to be connected; sensor/NIC slot assignments and all other fields are persisted without validation.',
       security: [{ cookieAuth: [] }],
       parameters: [serverIdParam],
       requestBody: {

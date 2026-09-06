@@ -2079,7 +2079,12 @@ function parsePagedEntitySeriesRowsV4(
 // rows instead of the paged-family machinery above.
 // ---------------------------------------------------------------------------
 
-/** `slotMapping.normalNicSlot1`/`normalNicSlot2` -> 0/1, restricted to ids actually present in `entityIds`. */
+/**
+ * `slotMapping.normalNicSlots[0]`/`[1]` -> 0/1 (the two `host.io`-embedded
+ * slots — see `field-map-v4.ts`'s `HOST_IO_EMBEDDED_NIC_SLOT_COUNT`),
+ * restricted to ids actually present in `entityIds`. Slots 3+ are paged
+ * `network` rows and resolve via the paged path like any other entity.
+ */
 function embeddedNicSlotForEntityIdV4(
   entityIds: readonly string[],
   slotMapping: SlotMapping | undefined
@@ -2087,12 +2092,9 @@ function embeddedNicSlotForEntityIdV4(
   const bySlot = new Map<string, 0 | 1>()
   if (!slotMapping) return bySlot
   const requested = new Set(entityIds)
-  if (slotMapping.normalNicSlot1 && requested.has(slotMapping.normalNicSlot1)) {
-    bySlot.set(slotMapping.normalNicSlot1, 0)
-  }
-  if (slotMapping.normalNicSlot2 && requested.has(slotMapping.normalNicSlot2)) {
-    bySlot.set(slotMapping.normalNicSlot2, 1)
-  }
+  const [slot1, slot2] = slotMapping.normalNicSlots
+  if (slot1 && requested.has(slot1)) bySlot.set(slot1, 0)
+  if (slot2 && requested.has(slot2)) bySlot.set(slot2, 1)
   return bySlot
 }
 

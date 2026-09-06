@@ -6,6 +6,7 @@ import type { OrganizationOptions } from '../organization-options.ts'
 import { isExactCpuCatalogMatch, resolveCpuCatalogEntry } from '../hardware/cpu-catalog.ts'
 import {
   type MetricsCapabilityPlanOverrideV4,
+  type MetricsDeploymentKind,
   type MetricsCapabilityPlanV4,
   parseServerMetricsCapabilityPlanOverride,
   resolveMetricsCapabilityPlan,
@@ -220,17 +221,17 @@ export type ServerHardwareProfile = {
   /** Network interface name bound to the `nic2*` metric slot, or `null` when unassigned. */
   nic2?: string | null
   /**
-   * Stable topology device id bound to the `nic1*` metric slot, or `null`
-   * when unassigned. Opaque, daemon-derived — not an interface name (see
-   * {@link ServerHardwareProfile.nic1}).
+   * The operator's monitored-NIC list in slot order (slot 1 first): opaque,
+   * daemon-derived topology device ids, never interface names (see
+   * {@link ServerHardwareProfile.nic1}). Absent or empty means "auto" — only
+   * the default-route uplink is monitored. Deduplicated; the slot-mapping
+   * layer caps it at `MAX_NIC_SLOTS` and the effective capability plan's
+   * `normalNicSlots` bounds what actually gets stored. A profile written
+   * before this list existed carried `nicSlot1DeviceId`/`nicSlot2DeviceId`
+   * instead — {@link parseServerHardwareProfile} folds those in, and they are
+   * never written back.
    */
-  nicSlot1DeviceId?: string | null
-  /**
-   * Stable topology device id bound to the `nic2*` metric slot, or `null`
-   * when unassigned. Opaque, daemon-derived — not an interface name (see
-   * {@link ServerHardwareProfile.nic2}).
-   */
-  nicSlot2DeviceId?: string | null
+  nicSlotDeviceIds?: string[]
   /** Absolute path of the filesystem probed as hosting storage. */
   hostingPath?: string
   /**
@@ -1218,10 +1219,20 @@ export const HARDWARE_PROFILE_NIC_KEYS = [
  * bumps `generation`.
  */
 export const HARDWARE_PROFILE_TOPOLOGY_ID_KEYS = [
-  'nicSlot1DeviceId',
-  'nicSlot2DeviceId',
   'hostingFilesystemId',
 ] as const satisfies readonly (keyof ServerHardwareProfile)[]
+
+/**
+ * The monitored-NIC list key — identity-bearing like
+ * {@link HARDWARE_PROFILE_TOPOLOGY_ID_KEYS} (a change bumps `generation`),
+ * but list-valued, so it is parsed/merged on its own rather than through the
+ * scalar-id loops.
+ */
+export const HARDWARE_PROFILE_NIC_SLOT_LIST_KEY =
+  'nicSlotDeviceIds' as const satisfies keyof ServerHardwareProfile
+
+/** Pre-list NIC-slot pin keys — read from stored metadata and folded into `nicSlotDeviceIds`, never written. */
+const LEGACY_NIC_SLOT_KEYS = ['nicSlot1DeviceId', 'nicSlot2DeviceId'] as const
 
 /** Update payload for {@link mergeServerHardwareProfile}. */
 export type ServerHardwareProfileUpdate = {
@@ -1231,6 +1242,8 @@ export type ServerHardwareProfileUpdate = {
 } & {
   [K in (typeof HARDWARE_PROFILE_TOPOLOGY_ID_KEYS)[number]]?: string | null
 } & {
+  /** Full replacement of the monitored-NIC list; `null` (or `[]`) returns the server to auto selection. */
+  nicSlotDeviceIds?: string[] | null
   hostingPath?: string | null
   drivetempEnabled?: boolean | null
   /**
@@ -1297,6 +1310,40 @@ function applyHardwareProfileTopologyIdBindings(
   }
 }
 
+/** Trimmed, non-blank, deduplicated (first-seen order) id list; `undefined` when `value` is not an array. */
+function parseTopologyIdList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const ids: string[] = []
+  for (const entry of value) {
+    const id = optionalTrimmedString(entry)
+    if (id && !ids.includes(id)) ids.push(id)
+  }
+  return ids
+}
+
+/**
+ * `nicSlotDeviceIds` from stored metadata. A profile persisted before the
+ * list existed carries `nicSlot1DeviceId`/`nicSlot2DeviceId` — those fold
+ * into the list (slot 1 first) so a pinned server keeps its pins across the
+ * upgrade; the list, when present, always wins over legacy keys beside it.
+ */
+function applyHardwareProfileNicSlotList(
+  value: Record<string, unknown>,
+  profile: ServerHardwareProfile
+): void {
+  const list = parseTopologyIdList(value[HARDWARE_PROFILE_NIC_SLOT_LIST_KEY])
+  if (list !== undefined) {
+    profile.nicSlotDeviceIds = list
+    return
+  }
+  const legacy: string[] = []
+  for (const key of LEGACY_NIC_SLOT_KEYS) {
+    const id = optionalTrimmedString(value[key])
+    if (id && !legacy.includes(id)) legacy.push(id)
+  }
+  if (legacy.length > 0) profile.nicSlotDeviceIds = legacy
+}
+
 /** Shared by both nullable-override fields: `null` clears, a parse failure leaves it unset. */
 function applyParsedNullableOverride<V>(
   present: boolean,
@@ -1320,6 +1367,7 @@ export function parseServerHardwareProfile(value: unknown): ServerHardwareProfil
   applyHardwareProfileSensorSlots(value, profile)
   applyHardwareProfileNicBindings(value, profile)
   applyHardwareProfileTopologyIdBindings(value, profile)
+  applyHardwareProfileNicSlotList(value, profile)
 
   const hostingPath = optionalTrimmedString(value.hostingPath)
   if (hostingPath) profile.hostingPath = hostingPath
@@ -1444,6 +1492,28 @@ function applyTopologyIdBindingUpdates(
   return changed
 }
 
+/**
+ * Full replacement of the monitored-NIC list. `null`/`[]` returns the server
+ * to auto selection (stored as an absent key, the same "never configured"
+ * shape). Identity-bearing: any change in membership *or order* bumps
+ * `generation`, since slot position is what the stored series are keyed by.
+ */
+function applyNicSlotListUpdate(
+  existing: ServerHardwareProfile | undefined,
+  update: ServerHardwareProfileUpdate,
+  next: ServerHardwareProfile
+): boolean {
+  const incoming = update.nicSlotDeviceIds
+  if (incoming === undefined) return false
+  const value = parseTopologyIdList(incoming) ?? []
+  const previous = existing?.nicSlotDeviceIds ?? []
+  const changed =
+    value.length !== previous.length || value.some((id, index) => id !== previous[index])
+  if (value.length === 0) delete next.nicSlotDeviceIds
+  else next.nicSlotDeviceIds = value
+  return changed
+}
+
 function applyHostingPathUpdate(
   update: ServerHardwareProfileUpdate,
   next: ServerHardwareProfile
@@ -1500,7 +1570,9 @@ export function mergeServerHardwareProfile(
   const sensorSlotsChanged = applySensorSlotUpdates(existing, update, next)
   const nicBindingsChanged = applyNicBindingUpdates(existing, update, next)
   const topologyIdBindingsChanged = applyTopologyIdBindingUpdates(existing, update, next)
-  const identityChanged = sensorSlotsChanged || nicBindingsChanged || topologyIdBindingsChanged
+  const nicSlotListChanged = applyNicSlotListUpdate(existing, update, next)
+  const identityChanged =
+    sensorSlotsChanged || nicBindingsChanged || topologyIdBindingsChanged || nicSlotListChanged
 
   applyHostingPathUpdate(update, next)
   applyNullableUpdate(
@@ -1595,12 +1667,14 @@ export function resolveEffectiveCpuThermalLimits(
 export function resolveEffectiveMetricsCapabilityPlan(
   machineClass: ServerMachineClass,
   orgOptions: OrganizationOptions | undefined,
-  serverOptions: ServerOptions | undefined
+  serverOptions: ServerOptions | undefined,
+  deployment: MetricsDeploymentKind
 ): MetricsCapabilityPlanV4 {
   return resolveMetricsCapabilityPlan(
     machineClass,
     orgOptions?.metricsCapabilityPlan,
-    serverOptions?.metricsCapabilityPlan
+    serverOptions?.metricsCapabilityPlan,
+    deployment
   )
 }
 

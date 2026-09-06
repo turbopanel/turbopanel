@@ -139,8 +139,7 @@ function nic(deviceId: string, seed: number) {
 
 function emptySlotMapping(overrides: Partial<SlotMapping> = {}): SlotMapping {
   return {
-    normalNicSlot1: null,
-    normalNicSlot2: null,
+    normalNicSlots: [],
     fabricDeviceIds: [],
     rootFilesystemId: null,
     gpuPageOrder: [],
@@ -180,7 +179,7 @@ it("generation 1's host.io row embeds generation 1's own slot-mapped NIC", () =>
     },
     networks: [nic('eth0', 100)],
   })
-  const slotMappingGen1 = emptySlotMapping({ normalNicSlot1: 'eth0' })
+  const slotMappingGen1 = emptySlotMapping({ normalNicSlots: ['eth0'] })
   const point = hostIoPoint(buildMetricsDataPointsV4(sampleGen1, slotMappingGen1))
   assertEquals(point.doubles[NIC0_RX_DOUBLE_INDEX], 100)
 })
@@ -198,7 +197,7 @@ it("generation 2's host.io row embeds generation 2's own (replaced) slot-mapped 
     },
     networks: [nic('eth1', 300)],
   })
-  const slotMappingGen2 = emptySlotMapping({ normalNicSlot1: 'eth1' })
+  const slotMappingGen2 = emptySlotMapping({ normalNicSlots: ['eth1'] })
   const point = hostIoPoint(buildMetricsDataPointsV4(sampleGen2, slotMappingGen2))
   assertEquals(point.doubles[NIC0_RX_DOUBLE_INDEX], 300)
 })
@@ -216,7 +215,7 @@ it("decoding generation 2's sample with generation 1's mapping never finds the r
     },
     networks: [nic('eth1', 300)],
   })
-  const wrongGenerationMapping = emptySlotMapping({ normalNicSlot1: 'eth0' })
+  const wrongGenerationMapping = emptySlotMapping({ normalNicSlots: ['eth0'] })
   const point = hostIoPoint(buildMetricsDataPointsV4(sampleGen2, wrongGenerationMapping))
   // eth0 does not exist in this sample under the wrong (stale) mapping —
   // the slot goes missing rather than silently reading eth1's value under
@@ -232,12 +231,10 @@ it('the same raw sample decodes to different slot-1 values under a swapped mappi
     networks: [nic('eth0', 100), nic('eth1', 300)],
   })
   const mappingA = emptySlotMapping({
-    normalNicSlot1: 'eth0',
-    normalNicSlot2: 'eth1',
+    normalNicSlots: ['eth0', 'eth1'],
   })
   const mappingB = emptySlotMapping({
-    normalNicSlot1: 'eth1',
-    normalNicSlot2: 'eth0',
+    normalNicSlots: ['eth1', 'eth0'],
   })
   const pointA = hostIoPoint(buildMetricsDataPointsV4(sample, mappingA))
   const pointB = hostIoPoint(buildMetricsDataPointsV4(sample, mappingB))
@@ -480,7 +477,7 @@ it("queryHostSeries: topologyGenerations reports both generations across a reord
       networks: [nic('eth0', 100)],
     })
     fakeAe.setNow(gen1AtMs)
-    store.writeSample(gen1Sample, emptySlotMapping({ normalNicSlot1: 'eth0' }))
+    store.writeSample(gen1Sample, emptySlotMapping({ normalNicSlots: ['eth0'] }))
 
     // Generation 2: the reorder replaces eth0 with eth1 in the primary slot.
     const gen2AtMs = BASE_MS + INTERVAL_SECONDS * 1000
@@ -497,7 +494,7 @@ it("queryHostSeries: topologyGenerations reports both generations across a reord
       networks: [nic('eth1', 300)],
     })
     fakeAe.setNow(gen2AtMs)
-    store.writeSample(gen2Sample, emptySlotMapping({ normalNicSlot1: 'eth1' }))
+    store.writeSample(gen2Sample, emptySlotMapping({ normalNicSlots: ['eth1'] }))
 
     const hostSeries = await store.queryHostSeries({
       serverId: SERVER_ID,

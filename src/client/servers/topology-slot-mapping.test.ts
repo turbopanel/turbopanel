@@ -6,7 +6,7 @@
  */
 import { assertEquals } from '@std/assert'
 import { computeSlotMapping } from './topology-slot-mapping.ts'
-import { EMPTY_TOPOLOGY_OVERRIDES, type TopologySnapshot } from './topology-types.ts'
+import { EMPTY_TOPOLOGY_OVERRIDES, MAX_NIC_SLOTS, type TopologySnapshot } from './topology-types.ts'
 
 const test = Deno.test.bind(Deno)
 
@@ -108,10 +108,9 @@ function snapshot(overrides: Partial<TopologySnapshot> = {}): TopologySnapshot {
   }
 }
 
-test('computeSlotMapping: absent overrides fall back to the first two sorted uplinks, deterministic page orders', () => {
+test('computeSlotMapping: absent overrides monitor only the first sorted uplink when no default route is flagged, deterministic page orders', () => {
   const mapping = computeSlotMapping(snapshot(), EMPTY_TOPOLOGY_OVERRIDES)
-  assertEquals(mapping.normalNicSlot1, 'mac:a')
-  assertEquals(mapping.normalNicSlot2, 'mac:b')
+  assertEquals(mapping.normalNicSlots, ['mac:a'])
   assertEquals(mapping.fabricDeviceIds, ['virtual:fab1'])
   assertEquals(mapping.rootFilesystemId, 'fs:dev:/dev/sda1')
   assertEquals(mapping.gpuPageOrder, ['pci:1', 'pci:2'])
@@ -120,22 +119,65 @@ test('computeSlotMapping: absent overrides fall back to the first two sorted upl
   assertEquals(mapping.hardwareSignalPageOrder, ['sig:a', 'sig:b'])
 })
 
+test('computeSlotMapping: the default-route uplink is the auto primary even when it sorts later', () => {
+  const snap = snapshot()
+  snap.networks = snap.networks.map((device) =>
+    device.deviceId === 'mac:b' ? { ...device, defaultRoute: true } : device
+  )
+  const mapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
+  assertEquals(mapping.normalNicSlots, ['mac:b'])
+})
+
+test('computeSlotMapping: a default-route flag on a non-uplink device is ignored', () => {
+  const snap = snapshot()
+  snap.networks = [
+    ...snap.networks,
+    {
+      deviceId: 'virtual:vlan',
+      kind: 'virtual',
+      name: 'eth0.100',
+      identity: { virtualKey: 'vlan' },
+      defaultRoute: true,
+    },
+  ]
+  const mapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
+  assertEquals(mapping.normalNicSlots, ['mac:a'])
+})
+
+test('computeSlotMapping: no uplink at all yields no normal NIC slots', () => {
+  const snap = snapshot()
+  snap.networks = snap.networks.filter((device) => device.kind !== 'uplink')
+  const mapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
+  assertEquals(mapping.normalNicSlots, [])
+  assertEquals(mapping.fabricDeviceIds, ['virtual:fab1'])
+})
+
 test('computeSlotMapping: same snapshot and overrides produce identical output on repeated calls', () => {
   const first = computeSlotMapping(snapshot(), EMPTY_TOPOLOGY_OVERRIDES)
   const second = computeSlotMapping(snapshot(), EMPTY_TOPOLOGY_OVERRIDES)
   assertEquals(first, second)
 })
 
-test('computeSlotMapping: an override reassigns only its own slot, never reorders the rest', () => {
+test('computeSlotMapping: an operator list is the complete monitored set in slot order and never reorders the rest', () => {
   const withOverride = computeSlotMapping(snapshot(), {
     ...EMPTY_TOPOLOGY_OVERRIDES,
-    nicSlot1DeviceId: 'mac:b',
+    nicSlotDeviceIds: ['mac:b', 'mac:a'],
   })
-  assertEquals(withOverride.normalNicSlot1, 'mac:b')
-  assertEquals(withOverride.normalNicSlot2, 'mac:a')
+  assertEquals(withOverride.normalNicSlots, ['mac:b', 'mac:a'])
   assertEquals(withOverride.fabricDeviceIds, ['virtual:fab1'])
   assertEquals(withOverride.gpuPageOrder, ['pci:1', 'pci:2'])
   assertEquals(withOverride.blockPageOrder, ['disk:a', 'disk:b'])
+})
+
+test('computeSlotMapping: an operator list keeps a pinned id absent from this snapshot, drops duplicates and blanks, and caps at MAX_NIC_SLOTS', () => {
+  const ids = Array.from({ length: MAX_NIC_SLOTS + 2 }, (_, i) => `mac:x${i}`)
+  const mapping = computeSlotMapping(snapshot(), {
+    ...EMPTY_TOPOLOGY_OVERRIDES,
+    nicSlotDeviceIds: ['mac:gone', '', 'mac:gone', ...ids],
+  })
+  assertEquals(mapping.normalNicSlots.length, MAX_NIC_SLOTS)
+  assertEquals(mapping.normalNicSlots[0], 'mac:gone')
+  assertEquals(mapping.normalNicSlots[1], 'mac:x0')
 })
 
 test('computeSlotMapping: a hostingFilesystemId override pins that filesystem first in the page order', () => {

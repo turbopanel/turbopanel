@@ -52,7 +52,7 @@ allow it, see below), or both.
 | `host.io`                | single row: `storage` + `network` fields, plus embedded primary NIC(s) when `SlotMapping` resolves them (see below) | universal baseline — always emitted                                                                                                                                                                                      |
 | `network`                | one row per unaccounted-for network device                                                                          | presence-gated (only devices not embedded in `host.io` and not a fabric device page)                                                                                                                                     |
 | `filesystem`             | one row per filesystem beyond the root filesystem                                                                   | presence-gated + capability-gated (`extraFilesystemSlots`)                                                                                                                                                               |
-| `block`                  | one row per block device (per-disk detail)                                                                          | presence-gated + capability-gated (`detailedBlockDeviceSlots`, default 1 — same "base entitlement" pattern as `gpuSlots`; collector emits `isServiceDevice` devices only) |
+| `block`                  | one row per block device (per-disk detail)                                                                          | presence-gated + capability-gated (`detailedBlockDeviceSlots`, default 1 — same "base entitlement" pattern as `gpuSlots`; collector emits `isServiceDevice` devices only)                                                |
 | `gpu`                    | one row per GPU (2 GPUs/row, `gpuRows = ceil(gpus/2)`)                                                              | presence-gated + capability-gated (`gpuSlots`, default 1 — "the base entitlement includes one GPU slot; the GPU family is presence-gated": a plan can _entitle_ GPU reporting without a machine _emitting_ any GPU rows) |
 | `hardware.physical`      | one row per physical sensor signal (temp/power, never fan RPM/GPU)                                                  | presence-gated + capability-gated (`physicalHardwareSignalSlots`; virtual machines default to 0)                                                                                                                         |
 | `managed.ingress`        | one row per ingress source (Caddy/Traefik)                                                                          | presence-gated + capability-gated (`managedIngressEnabled`)                                                                                                                                                              |
@@ -157,10 +157,18 @@ reference these symbols outside `backends/cloudflare/`;
 **Identity-addressed slotting:** when a `SlotMapping` is available (resolved
 from the sample's `metadata.topologyGeneration` via `topology-slot-mapping.ts`'s
 `computeSlotMapping`), `host.io`'s otherwise- unused `double12`..`double17`
-embed the primary 1-2 NICs (`slotMapping.normalNicSlot1`/`normalNicSlot2`)
+embed the first two monitored NIC slots (`slotMapping.normalNicSlots[0..1]`)
 directly — so the common 1-NIC/2-NIC host never writes a `network` page at all —
-and TurboFabric mesh devices (`slotMapping.fabricDeviceIds`) never page as
-`network` rows either. `gpu`/`network`/`filesystem`/`block` pages order entities
+slots 3+ (self-hosted / higher-tier operators) page as `network` rows in slot
+order, and TurboFabric mesh devices (`slotMapping.fabricDeviceIds`) never page as
+`network` rows. `normalNicSlots` is an ordered array (slot 1 first, at most
+`MAX_NIC_SLOTS` = 8, mirrored from the daemon in `topology-types.ts`): the
+operator's `hardwareProfile.nicSlotDeviceIds` list wins outright, otherwise
+exactly the uplink the daemon flagged `defaultRoute` (the gateway NIC; first
+sorted uplink as fallback). `PUT /servers/:id/metrics/hardware-profile`
+validates every listed id as an `uplink` in the last recorded topology and
+rejects a list longer than the server's effective `normalNicSlots`
+(`nicSlotLimit` on `/series` and `/summary` tells the UI that limit). `gpu`/`network`/`filesystem`/`block` pages order entities
 by the matching `*PageOrder` list (new-since-recorded-generation entities append
 in sample order). No recorded generation yet (first sample, resync pending)
 degrades gracefully to pre-topology positional packing — never a dropped sample.
@@ -331,7 +339,16 @@ s; ≤6 h → 300 s; ≤24 h → 900 s; ≤7 d → 3600 s; ≤30 d → 21600 s; 
 enforced **once**, at ingest (`resolveEffectiveMetricsCapabilityPlan` →
 `truncateSampleToCapabilityPlanV4`, both before the sample ever reaches a store)
 — query routes never re-check capability, they only ever see already-truncated
-data. `MetricsCapabilityPlanV4` fields: baseline/live interval seconds,
+data (the hardware-profile PUT re-resolves it only to reject an over-limit
+`nicSlotDeviceIds` list up front). `networks` truncation keeps the slot-mapped
+NICs within `normalNicSlots` (slot order) plus fabric devices when
+`turboFabricEnabled`; without a resolved mapping the first `normalNicSlots`
+entries survive positionally. `normalNicSlots` defaults by **deployment**
+(`MetricsDeploymentKind`, from the runtime passed to `registerDaemonApiRoutes` /
+`registerServerMetricsRoutes` — never inferred from `typeof Deno`): 2 on the
+hosted platform (Workers; more will need a licensing tier later), `MAX_NIC_SLOTS`
+(8) self-hosted (Deno); org/server overrides are clamped to 8.
+`MetricsCapabilityPlanV4` fields: baseline/live interval seconds,
 `normalNicSlots`, `turboFabricEnabled`, `extraFilesystemSlots`,
 `detailedBlockDeviceSlots`, `gpuSlots`, `gpuInterconnectEnabled`,
 `physicalHardwareSignalSlots`, `cpuDetailEnabled`, `cpuLiveCoreSlots`,

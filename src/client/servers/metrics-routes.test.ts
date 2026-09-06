@@ -1059,7 +1059,7 @@ it('GET /servers/:id/metrics/series allows a slot-mapped NIC as a standalone net
 
   await withMetricsFixtures(
     async ({ db, app, serverId, cookie }) => {
-      // eth0 is the sole uplink, so it resolves to normalNicSlot1 — no longer
+      // eth0 is the sole uplink, so it resolves to NIC slot 1 — no longer
       // rejected: Cloudflare reconstructs its rx/tx from host.io, and DuckDB
       // already stored the full row (see EntitySeriesQueryV4's doc comment).
       await recordTopologyGeneration(db, serverId, {
@@ -1098,7 +1098,7 @@ it('GET /servers/:id/metrics/series allows a slot-mapped NIC as a standalone net
       assertEquals(body.ok, true)
       assertEquals(body.entities?.[0]?.entities?.[0]?.entityId, 'eth0')
       assertEquals(fakeStore.entityCalls.length, 1)
-      assertEquals(fakeStore.entityCalls[0]!.slotMapping?.normalNicSlot1, 'eth0')
+      assertEquals(fakeStore.entityCalls[0]!.slotMapping?.normalNicSlots, ['eth0'])
       assertEquals(fakeStore.entityCalls[0]!.topologyGeneration, 1)
     },
     undefined,
@@ -1904,7 +1904,10 @@ it('PUT /servers/:id/metrics/hardware-profile rejects a topology-id pin not pres
       generation: 0,
       bootGeneration: 0,
       snapshot: {
-        networks: [{ deviceId: 'mac:aa:bb:cc:dd:ee:ff' }],
+        networks: [
+          { deviceId: 'mac:aa:bb:cc:dd:ee:ff', kind: 'uplink' },
+          { deviceId: 'mac:port', kind: 'member' },
+        ],
         filesystems: [{ filesystemId: 'fs:dev:/dev/sda1' }],
       },
       appliedAt: new Date().toISOString(),
@@ -1913,11 +1916,22 @@ it('PUT /servers/:id/metrics/hardware-profile rejects a topology-id pin not pres
     const res = await app.request(`/servers/${serverId}/metrics/hardware-profile`, {
       method: 'PUT',
       headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ nicSlot1DeviceId: 'mac:not-recorded' }),
+      body: JSON.stringify({ nicSlotDeviceIds: ['mac:not-recorded'] }),
     })
     assertEquals(res.status, 400)
     const body = (await res.json()) as { error?: string }
-    assertEquals(body.error?.includes('nicSlot1DeviceId'), true)
+    assertEquals(body.error?.includes('nicSlotDeviceIds'), true)
+
+    // A recorded device that is not an uplink (a bond/bridge member) is
+    // rejected the same way — only physical uplinks can be monitored.
+    const member = await app.request(`/servers/${serverId}/metrics/hardware-profile`, {
+      method: 'PUT',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ nicSlotDeviceIds: ['mac:aa:bb:cc:dd:ee:ff', 'mac:port'] }),
+    })
+    assertEquals(member.status, 400)
+    const memberBody = (await member.json()) as { error?: string }
+    assertEquals(memberBody.error?.includes('nicSlotDeviceIds'), true)
   })
 })
 
@@ -1927,7 +1941,7 @@ it('PUT /servers/:id/metrics/hardware-profile persists a topology-id pin that ma
       generation: 0,
       bootGeneration: 0,
       snapshot: {
-        networks: [{ deviceId: 'mac:aa:bb:cc:dd:ee:ff' }],
+        networks: [{ deviceId: 'mac:aa:bb:cc:dd:ee:ff', kind: 'uplink' }],
         filesystems: [{ filesystemId: 'fs:dev:/dev/sda1' }],
       },
       appliedAt: new Date().toISOString(),
@@ -1937,7 +1951,7 @@ it('PUT /servers/:id/metrics/hardware-profile persists a topology-id pin that ma
       method: 'PUT',
       headers: { cookie, 'content-type': 'application/json' },
       body: JSON.stringify({
-        nicSlot1DeviceId: 'mac:aa:bb:cc:dd:ee:ff',
+        nicSlotDeviceIds: ['mac:aa:bb:cc:dd:ee:ff'],
         hostingFilesystemId: 'fs:dev:/dev/sda1',
       }),
     })
@@ -1947,7 +1961,7 @@ it('PUT /servers/:id/metrics/hardware-profile persists a topology-id pin that ma
       profile?: Record<string, unknown>
     }
     assertEquals(body.ok, true)
-    assertEquals(body.profile?.nicSlot1DeviceId, 'mac:aa:bb:cc:dd:ee:ff')
+    assertEquals(body.profile?.nicSlotDeviceIds, ['mac:aa:bb:cc:dd:ee:ff'])
     assertEquals(body.profile?.hostingFilesystemId, 'fs:dev:/dev/sda1')
 
     const rows = await db
@@ -1958,7 +1972,7 @@ it('PUT /servers/:id/metrics/hardware-profile persists a topology-id pin that ma
     const metadata = rows[0]!.metadata as {
       hardwareProfile?: Record<string, unknown>
     }
-    assertEquals(metadata.hardwareProfile?.nicSlot1DeviceId, 'mac:aa:bb:cc:dd:ee:ff')
+    assertEquals(metadata.hardwareProfile?.nicSlotDeviceIds, ['mac:aa:bb:cc:dd:ee:ff'])
   })
 })
 

@@ -224,8 +224,8 @@ export type HostSummaryResultV4 = {
  * Cloudflare backend reconstructs `receiveBytesPerSecond`/
  * `transmitBytesPerSecond` (the only two individually-addressable embedded
  * fields — see `field-map-v4.ts`'s `HOST_IO_EMBEDDED_NIC_FIELDS`) from
- * `host.io`'s own rows when `slotMapping` identifies the entity as
- * `normalNicSlot1`/`normalNicSlot2`. Any other requested `network` field
+ * `host.io`'s own rows when `slotMapping` identifies the entity as one of
+ * the first two `normalNicSlots`. Any other requested `network` field
  * resolves to `null` for those two entities on Cloudflare, never a
  * fabricated split of the combined problem-packets rate `host.io` actually
  * carries. A device in `slotMapping.fabricDeviceIds` has no reconstruction
@@ -243,8 +243,8 @@ export type EntitySeriesQueryV4 = {
   resolutionSeconds?: number
   /**
    * Current topology's `SlotMapping`, consulted only for `family: "network"`
-   * — identifies which of `entityIds` (if any) are `normalNicSlot1`/
-   * `normalNicSlot2` so the Cloudflare backend can reconstruct their series
+   * — identifies which of `entityIds` (if any) are the first two
+   * `normalNicSlots` so the Cloudflare backend can reconstruct their series
    * from `host.io` instead of the (nonexistent) paged `network` rows. `undefined`
    * on a backend/caller that doesn't resolve one (e.g. no recorded topology
    * generation yet) — every requested entity is then treated as independently
@@ -255,8 +255,8 @@ export type EntitySeriesQueryV4 = {
    * The topology generation `slotMapping` was computed for. `host.io` rows
    * carry no per-row NIC identity (unlike a paged `network` row's blob10), so
    * the embedded-NIC reconstruction scopes its `host.io` scan to this exact
-   * generation — otherwise a slot reassignment (an operator moving
-   * `nicSlot1DeviceId` to a different device) would relabel older `host.io`
+   * generation — otherwise a slot reassignment (an operator changing
+   * `nicSlotDeviceIds`) would relabel older `host.io`
    * history as the new device. `null`/`undefined` (no recorded generation)
    * means the reconstruction finds no in-range rows rather than guessing.
    */

@@ -4,39 +4,57 @@
  * `topology-slot-mapping.test.ts` (mirrors the daemon's own test cases). No
  * I/O, so the daemon and control plane can reconstruct the identical
  * `SlotMapping` from the same `(TopologySnapshot, TopologyOverrides)` pair —
- * the shared contract later packer/query-reconstruction work depends on.
+ * the shared contract the packer/query-reconstruction layer depends on.
+ *
+ * Normal-NIC slot rule: an operator list (`overrides.nicSlotDeviceIds`) wins
+ * outright — the complete monitored set in slot order, deduplicated, capped
+ * at `MAX_NIC_SLOTS`, ids kept even when absent from this snapshot. Otherwise
+ * exactly one slot: the `uplink` flagged `defaultRoute`, falling back to the
+ * first uplink by sorted id. Nothing else is monitored by default.
  *
  * Keep in sync with the daemon source: a divergence here would let historical
  * slot reinterpretation drift between daemon generation assignment and
  * control-plane reconstruction.
  */
-import type { SlotMapping, TopologyOverrides, TopologySnapshot } from './topology-types.ts'
+import {
+  MAX_NIC_SLOTS,
+  type SlotMapping,
+  type TopologyOverrides,
+  type TopologySnapshot,
+} from './topology-types.ts'
 
 function byId(a: string, b: string): number {
   return a.localeCompare(b)
 }
 
-/** Explicit override wins outright; otherwise the first sorted uplink not already claimed by the other slot. */
-function resolveNicSlot(
-  overrideId: string | null,
-  uplinkIdsSorted: string[],
-  claimedByOtherSlot: string | null
-): string | null {
-  if (overrideId) return overrideId
-  return uplinkIdsSorted.find((id) => id !== claimedByOtherSlot) ?? null
+/** Operator list, deduplicated in first-seen order and capped at `MAX_NIC_SLOTS`. */
+function normalizeNicSlotList(ids: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of ids) {
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+    if (out.length >= MAX_NIC_SLOTS) break
+  }
+  return out
+}
+
+/** The auto-selected primary: the default-route uplink, else the first uplink by sorted id. */
+function resolveDefaultNicSlots(networks: TopologySnapshot['networks']): string[] {
+  const uplinks = networks.filter((device) => device.kind === 'uplink')
+  const gateway = uplinks.find((device) => device.defaultRoute === true)
+  if (gateway) return [gateway.deviceId]
+  const sorted = uplinks.map((device) => device.deviceId).sort(byId)
+  return sorted.length > 0 ? [sorted[0]!] : []
 }
 
 export function computeSlotMapping(
   snapshot: TopologySnapshot,
   overrides: TopologyOverrides
 ): SlotMapping {
-  const uplinkIdsSorted = snapshot.networks
-    .filter((device) => device.kind === 'uplink')
-    .map((device) => device.deviceId)
-    .sort(byId)
-
-  const normalNicSlot1 = resolveNicSlot(overrides.nicSlot1DeviceId, uplinkIdsSorted, null)
-  const normalNicSlot2 = resolveNicSlot(overrides.nicSlot2DeviceId, uplinkIdsSorted, normalNicSlot1)
+  const explicit = normalizeNicSlotList(overrides.nicSlotDeviceIds)
+  const normalNicSlots = explicit.length > 0 ? explicit : resolveDefaultNicSlots(snapshot.networks)
 
   const fabricDeviceIds = snapshot.networks
     .filter((device) => device.kind === 'fabric')
@@ -60,8 +78,7 @@ export function computeSlotMapping(
     .sort(byId)
 
   return {
-    normalNicSlot1,
-    normalNicSlot2,
+    normalNicSlots,
     fabricDeviceIds,
     rootFilesystemId,
     gpuPageOrder,

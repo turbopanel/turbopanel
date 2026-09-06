@@ -778,28 +778,45 @@ test('mergeServerHardwareProfile sets and clears cpu overrides without bumping g
   assertEquals(cleared.profile?.cpuTjMaxCelsiusOverride, 95)
 })
 
-test('parseServerHardwareProfile parses topology-id fields', () => {
+test('parseServerHardwareProfile parses topology-id fields and the monitored-NIC list', () => {
   assertEquals(
     parseServerHardwareProfile({
-      nicSlot1DeviceId: '  eth-topo-1  ',
-      nicSlot2DeviceId: null,
+      nicSlotDeviceIds: ['  eth-topo-1  ', 'eth-topo-2', '', 'eth-topo-1', 7],
       hostingFilesystemId: 'fs-topo-1',
     }),
     {
-      nicSlot1DeviceId: 'eth-topo-1',
-      nicSlot2DeviceId: null,
+      nicSlotDeviceIds: ['eth-topo-1', 'eth-topo-2'],
       hostingFilesystemId: 'fs-topo-1',
     }
   )
+  assertEquals(parseServerHardwareProfile({ nicSlotDeviceIds: 'eth-topo-1' }), undefined)
 })
 
-test('mergeServerHardwareProfile bumps generation when topology-id fields change', () => {
+test('parseServerHardwareProfile folds pre-list nicSlot1DeviceId/nicSlot2DeviceId into nicSlotDeviceIds, slot 1 first', () => {
+  assertEquals(
+    parseServerHardwareProfile({
+      nicSlot1DeviceId: '  eth-topo-1  ',
+      nicSlot2DeviceId: 'eth-topo-2',
+    }),
+    { nicSlotDeviceIds: ['eth-topo-1', 'eth-topo-2'] }
+  )
+  assertEquals(
+    parseServerHardwareProfile({ nicSlot1DeviceId: null, nicSlot2DeviceId: 'eth-topo-2' }),
+    { nicSlotDeviceIds: ['eth-topo-2'] }
+  )
+  // The list, when present, wins over legacy keys beside it.
+  assertEquals(
+    parseServerHardwareProfile({ nicSlotDeviceIds: [], nicSlot1DeviceId: 'eth-topo-1' }),
+    { nicSlotDeviceIds: [] }
+  )
+})
+
+test('mergeServerHardwareProfile bumps generation when topology-id fields or the monitored-NIC list change', () => {
   const now = '2026-01-01T00:00:00.000Z'
   const set = mergeServerHardwareProfile(
     undefined,
     {
-      nicSlot1DeviceId: 'eth-topo-1',
-      nicSlot2DeviceId: 'eth-topo-2',
+      nicSlotDeviceIds: ['eth-topo-1', 'eth-topo-2'],
       hostingFilesystemId: 'fs-topo-1',
     },
     now
@@ -807,22 +824,38 @@ test('mergeServerHardwareProfile bumps generation when topology-id fields change
   assertEquals(set.identityChanged, true)
   assertEquals(set.profile?.generation, 1)
   assertEquals(set.profile?.generationAppliedAt, now)
-  assertEquals(set.profile?.nicSlot1DeviceId, 'eth-topo-1')
-  assertEquals(set.profile?.nicSlot2DeviceId, 'eth-topo-2')
+  assertEquals(set.profile?.nicSlotDeviceIds, ['eth-topo-1', 'eth-topo-2'])
   assertEquals(set.profile?.hostingFilesystemId, 'fs-topo-1')
 
-  const later = '2026-01-02T00:00:00.000Z'
-  const unassigned = mergeServerHardwareProfile(
+  // Same membership, same order — idempotent.
+  const same = mergeServerHardwareProfile(
     set.profile,
-    {
-      nicSlot1DeviceId: null,
-    },
-    later
+    { nicSlotDeviceIds: ['eth-topo-1', 'eth-topo-2'] },
+    '2026-01-01T12:00:00.000Z'
   )
-  assertEquals(unassigned.identityChanged, true)
-  assertEquals(unassigned.profile?.generation, 2)
-  assertEquals(unassigned.profile?.generationAppliedAt, later)
-  assertEquals(unassigned.profile?.nicSlot1DeviceId, null)
+  assertEquals(same.identityChanged, false)
+  assertEquals(same.profile?.generation, 1)
+
+  // Reordering is an identity change: slot position keys the stored series.
+  const reordered = mergeServerHardwareProfile(
+    set.profile,
+    { nicSlotDeviceIds: ['eth-topo-2', 'eth-topo-1'] },
+    '2026-01-01T13:00:00.000Z'
+  )
+  assertEquals(reordered.identityChanged, true)
+  assertEquals(reordered.profile?.generation, 2)
+
+  const later = '2026-01-02T00:00:00.000Z'
+  const auto = mergeServerHardwareProfile(reordered.profile, { nicSlotDeviceIds: null }, later)
+  assertEquals(auto.identityChanged, true)
+  assertEquals(auto.profile?.generation, 3)
+  assertEquals(auto.profile?.generationAppliedAt, later)
+  assertEquals('nicSlotDeviceIds' in (auto.profile ?? {}), false)
+
+  // Clearing an already-auto server is a no-op.
+  const stillAuto = mergeServerHardwareProfile(auto.profile, { nicSlotDeviceIds: [] }, later)
+  assertEquals(stillAuto.identityChanged, false)
+  assertEquals(stillAuto.profile?.generation, 3)
 })
 
 test('mergeServerHardwareProfile does not bump generation for hostingPath/drivetempEnabled (topology-id case alongside)', () => {

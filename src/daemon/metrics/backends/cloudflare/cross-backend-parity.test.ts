@@ -39,8 +39,7 @@ const INTERVAL_SECONDS = 60
 
 function emptySlotMapping(overrides: Partial<SlotMapping> = {}): SlotMapping {
   return {
-    normalNicSlot1: null,
-    normalNicSlot2: null,
+    normalNicSlots: [],
     fabricDeviceIds: [],
     rootFilesystemId: null,
     gpuPageOrder: [],
@@ -152,9 +151,14 @@ it('cross-backend parity: DuckDB and Cloudflare AE agree on host series, entity 
   const aeStore = new CloudflareAnalyticsEngineServerMetricsStoreV4(fakeAe.dataset, {
     sql: fakeAe.sqlConfig,
   })
-  const plan = resolveMetricsCapabilityPlan('virtual', undefined, {
-    gpuSlots: 2,
-  })
+  const plan = resolveMetricsCapabilityPlan(
+    'virtual',
+    undefined,
+    {
+      gpuSlots: 2,
+    },
+    'hosted'
+  )
   try {
     // Tick 1: generation 1, one GPU.
     const tick1Input = inputForTick({
@@ -180,8 +184,7 @@ it('cross-backend parity: DuckDB and Cloudflare AE agree on host series, entity 
       receivedAt: tick1Input.metadata.sampledAt,
     }
     const tick1SlotMapping = emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       gpuPageOrder: ['gpu0'],
     })
     await duckStore.writeSample(tick1Sample)
@@ -206,8 +209,7 @@ it('cross-backend parity: DuckDB and Cloudflare AE agree on host series, entity 
       receivedAt: tick2Input.metadata.sampledAt,
     }
     const tick2SlotMapping = emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       gpuPageOrder: ['gpu0', 'gpu1'],
     })
     await duckStore.writeSample(tick2Sample)

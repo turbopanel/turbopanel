@@ -15,14 +15,17 @@
  * see {@link buildMetricsDataPointsV4}'s `slotMapping` parameter and
  * `types-v4.ts`'s `ServerMetricsStoreV4.writeSample` doc comment):
  *
- *  - `host.io`'s otherwise-unused double12..double17 embed
- *    `slotMapping.normalNicSlot1` / `normalNicSlot2` (looked up by
+ *  - `host.io`'s otherwise-unused double12..double17 embed the first two
+ *    `slotMapping.normalNicSlots` entries (slot 1 / slot 2, looked up by
  *    `deviceId` in `sample.networks`) so the common 1-NIC/2-NIC host reports
  *    its primary NIC(s) without ever writing a `network` page. Devices in
  *    `slotMapping.fabricDeviceIds` never page as `network` rows either —
  *    a 2-NIC host with a TurboFabric mesh interface stays at 2 rows
- *    (`host.system` + `host.io`), never 3. Only a genuinely-unaccounted-for
- *    device (neither a normal NIC slot nor a known fabric device) pages.
+ *    (`host.system` + `host.io`), never 3. Slots 3+ (a self-hosted or
+ *    higher-tier operator monitoring more uplinks) page as `network` rows in
+ *    slot order, followed by any genuinely-unaccounted-for device (neither a
+ *    slot nor a known fabric device — normally already dropped at ingest by
+ *    `capability-plan.ts`).
  *  - `gpu` / `network` / `filesystem` / `block` pages order their entities by
  *    `slotMapping`'s matching `*PageOrder` list (entities the mapping
  *    doesn't know about yet — new since the topology generation was
@@ -348,15 +351,19 @@ function packHostIoDoubles(
   return doubles
 }
 
+/** How many `normalNicSlots` entries `host.io` embeds — slots 1 and 2; every later slot pages. */
+export const HOST_IO_EMBEDDED_NIC_SLOT_COUNT = 2
+
 /**
  * Resolve which `networks[]` entries embed in `host.io` (slots 1/2) versus
  * page as standalone `network` rows, given an optional `SlotMapping`.
  *
- * With a mapping: slot1/slot2 are looked up by `deviceId` (never by array
+ * With a mapping: slot 1/slot 2 are looked up by `deviceId` (never by array
  * position — a topology reorder must not silently reinterpret a slot), and
  * any device listed in `fabricDeviceIds` is excluded from paging entirely —
- * this is what keeps a 2-NIC-plus-fabric host at 2 rows instead of 3. Only a
- * device that is neither a normal-NIC slot nor a known fabric device pages.
+ * this is what keeps a 2-NIC-plus-fabric host at 2 rows instead of 3. Slots
+ * 3+ page first, in slot order, then any device that is neither a slot nor a
+ * known fabric device (arrival order).
  *
  * Without a mapping (generation not recorded yet): falls back to this
  * module's original positional behavior — `networks[0]`/`networks[1]` embed,
@@ -375,12 +382,24 @@ function resolveNetworkSlots(
     return { nic0: networks[0], nic1: networks[1], paged: networks.slice(2) }
   }
   const byId = new Map(networks.map((device) => [device.deviceId, device]))
-  const nic0 = slotMapping.normalNicSlot1 ? byId.get(slotMapping.normalNicSlot1) : undefined
-  const nic1 = slotMapping.normalNicSlot2 ? byId.get(slotMapping.normalNicSlot2) : undefined
-  const excluded = new Set<string>(slotMapping.fabricDeviceIds)
-  if (slotMapping.normalNicSlot1) excluded.add(slotMapping.normalNicSlot1)
-  if (slotMapping.normalNicSlot2) excluded.add(slotMapping.normalNicSlot2)
-  const paged = networks.filter((device) => !excluded.has(device.deviceId))
+  const [slot1, slot2] = slotMapping.normalNicSlots
+  const nic0 = slot1 ? byId.get(slot1) : undefined
+  const nic1 = slot2 ? byId.get(slot2) : undefined
+  const excluded = new Set<string>([
+    ...slotMapping.fabricDeviceIds,
+    ...slotMapping.normalNicSlots.slice(0, HOST_IO_EMBEDDED_NIC_SLOT_COUNT),
+  ])
+  const pagedSlots = slotMapping.normalNicSlots
+    .slice(HOST_IO_EMBEDDED_NIC_SLOT_COUNT)
+    .map((id) => byId.get(id))
+    .filter((device): device is NetworkDeviceSampleV4 => device !== undefined)
+  const pagedSlotIds = new Set(pagedSlots.map((device) => device.deviceId))
+  const paged = [
+    ...pagedSlots,
+    ...networks.filter(
+      (device) => !excluded.has(device.deviceId) && !pagedSlotIds.has(device.deviceId)
+    ),
+  ]
   return { nic0, nic1, paged }
 }
 
@@ -1054,7 +1073,7 @@ export const HOST_IO_EMBEDDED_NIC_FIELDS = [
 
 /**
  * 0-based `host.io` double index for slot-mapped NIC `slot` (`0` =
- * `SlotMapping.normalNicSlot1`, `1` = `normalNicSlot2`)'s `field` — one of
+ * `SlotMapping.normalNicSlots[0]`, `1` = `normalNicSlots[1]`)'s `field` — one of
  * {@link HOST_IO_EMBEDDED_NIC_FIELDS}. Mirrors `packHostIoDoubles`'s embed
  * layout (`embedBase + slot * 3` for receive, `+ 1` for transmit; `+ 2` is
  * the combined problem-packets rate, not individually addressable here).

@@ -394,6 +394,7 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
     secretsConfig,
     restLimiter: daemonRestLimiter,
     metricsLimiter: daemonMetricsLimiter,
+    runtime: 'deno',
   })
   // Unversioned, session-free surface: mounted on the top-level app next to the
   // daemon API rather than under CLIENT_API_PREFIX, and authenticating itself.

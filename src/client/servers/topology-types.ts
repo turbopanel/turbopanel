@@ -17,7 +17,18 @@ export type FilesystemId = string // NOSONAR typescript:S6564 — opaque stable 
 export type GpuId = string // NOSONAR typescript:S6564 — opaque stable identity, never a PCI/kernel name
 export type SignalId = string // NOSONAR typescript:S6564 — opaque stable identity, never a hwmon label
 
-export type NetworkDeviceKind = 'uplink' | 'fabric' | 'container-bridge' | 'loopback'
+/**
+ * Mirrors the daemon's `NetworkDeviceKind` — `uplink` (a hardware-backed NIC
+ * or the topmost bond/bridge/team stacked on one; the only kind eligible as a
+ * NIC slot), `member` (a port/nested aggregate under such an aggregate),
+ * `virtual` (VLAN/macvlan children, tunnels — traffic rolls into an uplink),
+ * `fabric`, `container-bridge`, `loopback`.
+ */
+export type NetworkDeviceKind =
+  'uplink' | 'member' | 'virtual' | 'fabric' | 'container-bridge' | 'loopback'
+
+/** Mirrors the daemon's `MAX_NIC_SLOTS` — the hard ceiling on monitored NIC slots per server. */
+export const MAX_NIC_SLOTS = 8
 
 export type NetworkDeviceIdentity = {
   mac?: string
@@ -32,6 +43,8 @@ export type NetworkDeviceTopology = {
   identity: NetworkDeviceIdentity
   speedMbps?: number
   mtu?: number
+  /** `true` on the one `uplink` carrying the host's default route; absent elsewhere and on pre-field snapshots. */
+  defaultRoute?: boolean
 }
 
 export type FilesystemRole = 'root' | 'hosting' | 'docker' | 'application' | 'custom'
@@ -114,23 +127,30 @@ export type TopologySnapshot = {
 
 /** Operator overrides projected into topology identity space — mirrors the daemon's `TopologyOverrides`. */
 export type TopologyOverrides = {
-  nicSlot1DeviceId: TopologyDeviceId | null
-  nicSlot2DeviceId: TopologyDeviceId | null
+  /**
+   * The operator's monitored-NIC list in slot order (slot 1 first). Empty
+   * means "auto" — only the default-route uplink is monitored. Non-empty is
+   * the complete monitored set, deduplicated and capped at {@link MAX_NIC_SLOTS}.
+   */
+  nicSlotDeviceIds: TopologyDeviceId[]
   hostingFilesystemId: FilesystemId | null
   drivetempEnabled: boolean
 }
 
 export const EMPTY_TOPOLOGY_OVERRIDES: TopologyOverrides = {
-  nicSlot1DeviceId: null,
-  nicSlot2DeviceId: null,
+  nicSlotDeviceIds: [],
   hostingFilesystemId: null,
   drivetempEnabled: false,
 }
 
 /** Pure slot-mapping output — see `./topology-slot-mapping.ts`. */
 export type SlotMapping = {
-  normalNicSlot1: TopologyDeviceId | null
-  normalNicSlot2: TopologyDeviceId | null
+  /**
+   * Monitored normal-NIC slots in slot order (index 0 = slot 1), at most
+   * {@link MAX_NIC_SLOTS}, no holes. Cloudflare embeds the first two in
+   * `host.io`; any further slot pages as a standalone `network` row.
+   */
+  normalNicSlots: TopologyDeviceId[]
   fabricDeviceIds: TopologyDeviceId[]
   rootFilesystemId: FilesystemId | null
   gpuPageOrder: GpuId[]

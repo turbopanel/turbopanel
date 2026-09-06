@@ -85,18 +85,40 @@ function snapshot(overrides: Partial<TopologySnapshot> = {}): TopologySnapshot {
   }
 }
 
-test('buildTopologyInventoryV4: network role reflects SlotMapping (slot1/slot2/fabric/other)', () => {
+test('buildTopologyInventoryV4: network role/slot reflects SlotMapping (nic slot n / fabric / other)', () => {
   const snap = snapshot()
-  const slotMapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
+  const slotMapping = computeSlotMapping(snap, {
+    ...EMPTY_TOPOLOGY_OVERRIDES,
+    nicSlotDeviceIds: ['mac:b', 'mac:a'],
+  })
   const inventory = buildTopologyInventoryV4(snap, slotMapping)
 
   const byId = new Map(inventory.networks.map((n) => [n.deviceId, n]))
-  assertEquals(byId.get('mac:a')?.role, 'normalNicSlot1')
-  assertEquals(byId.get('mac:b')?.role, 'normalNicSlot2')
+  assertEquals(byId.get('mac:b')?.role, 'nic')
+  assertEquals(byId.get('mac:b')?.slot, 1)
+  assertEquals(byId.get('mac:a')?.role, 'nic')
+  assertEquals(byId.get('mac:a')?.slot, 2)
   assertEquals(byId.get('virtual:fab1')?.role, 'fabric')
+  assertEquals(byId.get('virtual:fab1')?.slot, undefined)
   assertEquals(byId.get('mac:c')?.role, 'other')
   assertEquals(byId.get('mac:a')?.speedMbps, 1000)
   assertEquals(byId.get('mac:b')?.speedMbps, undefined)
+})
+
+test('buildTopologyInventoryV4: auto selection marks only the default-route uplink as a nic, and mirrors the defaultRoute flag', () => {
+  const snap = snapshot()
+  snap.networks = snap.networks.map((device) =>
+    device.deviceId === 'mac:c' ? { ...device, defaultRoute: true } : device
+  )
+  const slotMapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
+  const inventory = buildTopologyInventoryV4(snap, slotMapping)
+  const byId = new Map(inventory.networks.map((n) => [n.deviceId, n]))
+  assertEquals(byId.get('mac:c')?.role, 'nic')
+  assertEquals(byId.get('mac:c')?.slot, 1)
+  assertEquals(byId.get('mac:c')?.defaultRoute, true)
+  assertEquals(byId.get('mac:a')?.role, 'other')
+  assertEquals(byId.get('mac:a')?.defaultRoute, undefined)
+  assertEquals(byId.get('mac:b')?.role, 'other')
 })
 
 test('buildTopologyInventoryV4: filesystem isRoot matches SlotMapping.rootFilesystemId', () => {

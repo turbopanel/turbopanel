@@ -23,6 +23,8 @@ import {
 } from './metrics/validation-v4.ts'
 import {
   type MetricsCapabilityPlanV4,
+  type MetricsDeploymentKind,
+  metricsDeploymentKindForRuntime,
   resolveDefaultMetricsCapabilityPlanV4,
   type ServerMachineClass,
   truncateSampleToCapabilityPlanV4,
@@ -503,8 +505,7 @@ function resolveSlotMappingForIngest(
     )
     const overrides: TopologyOverrides = {
       ...EMPTY_TOPOLOGY_OVERRIDES,
-      nicSlot1DeviceId: hardwareProfile?.nicSlot1DeviceId ?? null,
-      nicSlot2DeviceId: hardwareProfile?.nicSlot2DeviceId ?? null,
+      nicSlotDeviceIds: hardwareProfile?.nicSlotDeviceIds ?? [],
       hostingFilesystemId: hardwareProfile?.hostingFilesystemId ?? null,
       drivetempEnabled: hardwareProfile?.drivetempEnabled ?? false,
     }
@@ -542,7 +543,8 @@ type IngestPlanAndTopology = {
 async function resolveIngestPlanAndReconcileTopology(
   db: Db,
   serverId: string,
-  sample: AuthenticatedMetricsSampleV4
+  sample: AuthenticatedMetricsSampleV4,
+  deployment: MetricsDeploymentKind
 ): Promise<IngestPlanAndTopology> {
   try {
     const [topologyMatch, latestTopology, serverRows] = await Promise.all([
@@ -576,7 +578,12 @@ async function resolveIngestPlanAndReconcileTopology(
     const serverOptions = parseServerOptions(row?.serverOptions) ?? undefined
     const orgOptions: OrganizationOptions = parseOrganizationOptions(row?.orgOptions)
 
-    const plan = resolveEffectiveMetricsCapabilityPlan(machineClass, orgOptions, serverOptions)
+    const plan = resolveEffectiveMetricsCapabilityPlan(
+      machineClass,
+      orgOptions,
+      serverOptions,
+      deployment
+    )
 
     const slotMapping = resolveSlotMappingForIngest(
       serverId,
@@ -596,7 +603,7 @@ async function resolveIngestPlanAndReconcileTopology(
       console.warn(`metrics capability plan resolution failed for ${serverId}: ${String(err)}`)
     })
     return {
-      plan: resolveDefaultMetricsCapabilityPlanV4(),
+      plan: resolveDefaultMetricsCapabilityPlanV4(deployment),
       slotMapping: undefined,
     }
   }
@@ -627,10 +634,20 @@ export function registerDaemonApiRoutes<E extends Env>(
     secretsConfig?: SecretsConfig
     restLimiter?: RateLimiter
     metricsLimiter?: RateLimiter
+    /**
+     * Which runtime hosts this instance — decides the metrics capability
+     * plan's deployment defaults (`metricsDeploymentKindForRuntime`: a
+     * self-hosted Deno instance is not NIC-metered). Defaults to the hosted
+     * (`'workers'`) behavior so a caller that doesn't say never silently
+     * unlocks the self-hosted ceiling — production registrars pass it
+     * explicitly.
+     */
+    runtime?: 'workers' | 'deno'
   } = {}
 ) {
   const daemon = new Hono<DaemonApiEnv>()
   const { secrets, challengeSigningSecrets, secretsConfig } = options
+  const deployment = metricsDeploymentKindForRuntime(options.runtime ?? 'workers')
   const restLimiter = options.restLimiter ?? createNoopRateLimiter()
   const metricsLimiter = options.metricsLimiter ?? createNoopRateLimiter()
   const enrollStore = challengeSigningSecrets
@@ -1174,9 +1191,9 @@ export function registerDaemonApiRoutes<E extends Env>(
       // `resolveIngestPlanAndReconcileTopology`).
       const db = getDb(c)
       const { plan, slotMapping } = db
-        ? await resolveIngestPlanAndReconcileTopology(db, serverId, result.sample)
+        ? await resolveIngestPlanAndReconcileTopology(db, serverId, result.sample, deployment)
         : {
-            plan: resolveDefaultMetricsCapabilityPlanV4(),
+            plan: resolveDefaultMetricsCapabilityPlanV4(deployment),
             slotMapping: undefined,
           }
 

@@ -756,8 +756,7 @@ it('queryEntitySeriesViaSqlApiV4 (paged family): a requested entity absent from 
 })
 
 const EMPTY_SLOT_MAPPING = {
-  normalNicSlot1: null,
-  normalNicSlot2: null,
+  normalNicSlots: [],
   fabricDeviceIds: [],
   rootFilesystemId: null,
   gpuPageOrder: [],
@@ -811,7 +810,7 @@ it("queryEntitySeriesViaSqlApiV4 (network family): reconstructs a slot-mapped NI
       metrics: ['receiveBytesPerSecond', 'transmitBytesPerSecond'],
       from: '2026-01-01T00:00:00.000Z',
       to: '2026-01-01T00:05:00.000Z',
-      slotMapping: { ...EMPTY_SLOT_MAPPING, normalNicSlot1: 'eth0' },
+      slotMapping: { ...EMPTY_SLOT_MAPPING, normalNicSlots: ['eth0'] },
       topologyGeneration: 7,
     }
   )
@@ -855,7 +854,7 @@ it('queryEntitySeriesViaSqlApiV4 (network family): a field with no embedded-slot
       metrics: ['receiveBytesPerSecond', 'receiveErrorsPerSecond'],
       from: '2026-01-01T00:00:00.000Z',
       to: '2026-01-01T00:05:00.000Z',
-      slotMapping: { ...EMPTY_SLOT_MAPPING, normalNicSlot1: 'eth0' },
+      slotMapping: { ...EMPTY_SLOT_MAPPING, normalNicSlots: ['eth0'] },
       topologyGeneration: 7,
     }
   )
@@ -883,7 +882,7 @@ it('queryEntitySeriesViaSqlApiV4 (network family): an embedded NIC with no resol
       metrics: ['receiveBytesPerSecond'],
       from: '2026-01-01T00:00:00.000Z',
       to: '2026-01-01T00:05:00.000Z',
-      slotMapping: { ...EMPTY_SLOT_MAPPING, normalNicSlot1: 'eth0' },
+      slotMapping: { ...EMPTY_SLOT_MAPPING, normalNicSlots: ['eth0'] },
     }
   )
 

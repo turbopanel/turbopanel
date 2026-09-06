@@ -119,8 +119,7 @@ function baseInput(overrides: Partial<MetricsSampleV4Input> = {}): MetricsSample
 
 function emptySlotMapping(overrides: Partial<SlotMapping> = {}): SlotMapping {
   return {
-    normalNicSlot1: null,
-    normalNicSlot2: null,
+    normalNicSlots: [],
     fabricDeviceIds: [],
     rootFilesystemId: null,
     gpuPageOrder: [],
@@ -135,7 +134,7 @@ function plan(
   machineClass: ServerMachineClass,
   overrides: MetricsCapabilityPlanOverrideV4 = {}
 ): MetricsCapabilityPlanV4 {
-  return resolveMetricsCapabilityPlan(machineClass, undefined, overrides)
+  return resolveMetricsCapabilityPlan(machineClass, undefined, overrides, 'hosted')
 }
 
 function nic(deviceId: string, seed = 1) {
@@ -281,7 +280,7 @@ function oneNicVm(): RepresentativeMachineFixture {
     name: '1-nic-vm',
     input: baseInput({ networks: [nic('eth0')] }),
     plan: plan('virtual'),
-    slotMapping: emptySlotMapping({ normalNicSlot1: 'eth0' }),
+    slotMapping: emptySlotMapping({ normalNicSlots: ['eth0'] }),
     expectedFamilies: [...HOST_BASE_FAMILIES],
     expectedRowCount: 2,
   }
@@ -297,8 +296,7 @@ function twoNicVm(): RepresentativeMachineFixture {
     input: baseInput({ networks: [nic('eth0'), nic('eth1', 2)] }),
     plan: plan('virtual'),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES],
     expectedRowCount: 2,
@@ -317,8 +315,7 @@ function twoNicFabricVm(): RepresentativeMachineFixture {
     }),
     plan: plan('virtual', { turboFabricEnabled: true }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       fabricDeviceIds: ['fabric0'],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES],
@@ -339,8 +336,7 @@ function oneGpuVm(): RepresentativeMachineFixture {
     }),
     plan: plan('virtual', { gpuSlots: 1 }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       gpuPageOrder: ['gpu0'],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, 'gpu'],
@@ -361,8 +357,7 @@ function webVm(): RepresentativeMachineFixture {
     }),
     plan: plan('virtual', { managedIngressEnabled: true }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, 'managed.ingress'],
     expectedRowCount: 3,
@@ -383,8 +378,7 @@ function webGpuVm(): RepresentativeMachineFixture {
     }),
     plan: plan('virtual', { gpuSlots: 1, managedIngressEnabled: true }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       gpuPageOrder: ['gpu0'],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, 'gpu', 'managed.ingress'],
@@ -402,8 +396,7 @@ function dbOnlyVm(): RepresentativeMachineFixture {
     input: baseInput({ networks: [nic('eth0'), nic('eth1', 2)] }),
     plan: plan('virtual', { databaseProxyMetricsEnabled: true }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES],
     expectedRowCount: 2,
@@ -423,8 +416,7 @@ function dbProxySqlVm(): RepresentativeMachineFixture {
     }),
     plan: plan('virtual', { databaseProxyMetricsEnabled: true }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, 'managed.database_proxy'],
     expectedRowCount: 3,
@@ -445,8 +437,7 @@ function bareMetalLowSignals(): RepresentativeMachineFixture {
     }),
     plan: plan('physical'),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       hardwareSignalPageOrder: [...signalIds].sort((a, b) => a.localeCompare(b)),
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, 'hardware.physical'],
@@ -469,8 +460,7 @@ function bareMetalGpu(): RepresentativeMachineFixture {
     }),
     plan: plan('physical', { gpuSlots: 1 }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       gpuPageOrder: ['gpu0'],
       hardwareSignalPageOrder: [...signalIds].sort((a, b) => a.localeCompare(b)),
     }),
@@ -480,7 +470,9 @@ function bareMetalGpu(): RepresentativeMachineFixture {
 }
 
 // ---------------------------------------------------------------------------
-// 11. 4-NIC host (2 embedded + 2 paged -> 1 network page)
+// 11. 4-NIC host, all four monitored on a 4-slot plan (2 embedded + 2 paged
+//     -> 1 network page). An unmonitored NIC never reaches the store at all
+//     (`truncateSampleToCapabilityPlanV4`), so only monitored slots page.
 // ---------------------------------------------------------------------------
 
 function fourNic(): RepresentativeMachineFixture {
@@ -490,10 +482,9 @@ function fourNic(): RepresentativeMachineFixture {
     input: baseInput({
       networks: [nic('eth0'), nic('eth1', 2), ...extra.map((id, i) => nic(id, 10 + i))],
     }),
-    plan: plan('virtual'),
+    plan: plan('virtual', { normalNicSlots: 4 }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1', ...extra],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, 'network'],
     expectedRowCount: 3,
@@ -501,7 +492,8 @@ function fourNic(): RepresentativeMachineFixture {
 }
 
 // ---------------------------------------------------------------------------
-// 12. 8-NIC host (2 embedded + 6 paged -> 2 network pages)
+// 12. 8-NIC host, all eight monitored on an 8-slot (self-hosted ceiling) plan
+//     (2 embedded + 6 paged -> 2 network pages)
 // ---------------------------------------------------------------------------
 
 function eightNic(): RepresentativeMachineFixture {
@@ -511,10 +503,9 @@ function eightNic(): RepresentativeMachineFixture {
     input: baseInput({
       networks: [nic('eth0'), nic('eth1', 2), ...extra.map((id, i) => nic(id, 10 + i))],
     }),
-    plan: plan('virtual'),
+    plan: plan('virtual', { normalNicSlots: 8 }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1', ...extra],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, 'network', 'network'],
     expectedRowCount: 4,
@@ -535,8 +526,7 @@ function sixteenGpu(): RepresentativeMachineFixture {
     }),
     plan: plan('physical', { gpuSlots: 16 }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       gpuPageOrder: [...gpuIds].sort((a, b) => a.localeCompare(b)),
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, ...new Array(8).fill('gpu')],
@@ -558,8 +548,7 @@ function twentyFourBlockDevices(): RepresentativeMachineFixture {
     }),
     plan: plan('physical', { detailedBlockDeviceSlots: 24 }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       blockPageOrder: [...deviceIds].sort((a, b) => a.localeCompare(b)),
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, ...new Array(12).fill('block')],
@@ -581,8 +570,7 @@ function twelveExtraFilesystems(): RepresentativeMachineFixture {
     }),
     plan: plan('virtual', { extraFilesystemSlots: 12 }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
       filesystemPageOrder: [...filesystemIds].sort((a, b) => a.localeCompare(b)),
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, 'filesystem', 'filesystem'],
@@ -607,8 +595,7 @@ function largeCpuRam(): RepresentativeMachineFixture {
       memoryDetailEnabled: true,
     }),
     slotMapping: emptySlotMapping({
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0', 'eth1'],
     }),
     expectedFamilies: [...HOST_BASE_FAMILIES, 'cpu.detail', 'memory.detail'],
     expectedRowCount: 4,

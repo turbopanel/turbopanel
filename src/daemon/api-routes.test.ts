@@ -2108,8 +2108,10 @@ test('POST /metrics through a real CloudflareAnalyticsEngineServerMetricsStoreV4
     },
     body: JSON.stringify(
       buildValidMetricsFrameV4({
-        // Default (virtual) plan: normalNicSlots=2 (networks[0]/[1] embed into
-        // host.io), gpuSlots=1, managedIngress/databaseProxy/events enabled.
+        // Default hosted (virtual) plan: normalNicSlots=2 — with no recorded
+        // topology the first two embed into host.io positionally and eth2 is
+        // dropped by the plan before it reaches the store; gpuSlots=1,
+        // managedIngress/databaseProxy/events enabled.
         networks: [{ deviceId: 'eth0' }, { deviceId: 'eth1' }, { deviceId: 'eth2' }],
         gpus: [{ gpuId: 'gpu0' }],
         ingressSources: [
@@ -2135,7 +2137,7 @@ test('POST /metrics through a real CloudflareAnalyticsEngineServerMetricsStoreV4
   const family = (kind: string) => points.filter((p) => p.blobs[AE_V4_BLOB_FAMILY_INDEX] === kind)
   assertEquals(family('host.system').length, 1)
   assertEquals(family('host.io').length, 1)
-  assertEquals(family('network').length, 1) // eth0/eth1 embed, eth2 pages
+  assertEquals(family('network').length, 0) // eth0/eth1 embed; eth2 exceeds the 2-slot hosted plan
   assertEquals(family('gpu').length, 1)
 
   const ingressRows = family('managed.ingress')
@@ -2276,9 +2278,10 @@ test('POST /metrics resolves a SlotMapping from a full recorded topology snapsho
     assertEquals(response.status, 202)
     assertEquals(writes.length, 1)
     assertEquals(slotMappings.length, 1)
+    // No operator list and no default-route flag: auto selection monitors
+    // only the first uplink by sorted id — eth1 stays unmonitored.
     assertEquals(slotMappings[0], {
-      normalNicSlot1: 'eth0',
-      normalNicSlot2: 'eth1',
+      normalNicSlots: ['eth0'],
       fabricDeviceIds: ['fabric0'],
       rootFilesystemId: null,
       gpuPageOrder: [],

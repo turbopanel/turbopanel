@@ -18,7 +18,7 @@
  */
 
 import { isHardwareHealthEventKindV4, type MetricsSampleV4 } from './contract-v4.ts'
-import type { SlotMapping } from '../../client/servers/topology-types.ts'
+import { MAX_NIC_SLOTS, type SlotMapping } from '../../client/servers/topology-types.ts'
 
 // ---------------------------------------------------------------------------
 // Plan shape
@@ -29,7 +29,7 @@ export type MetricsCapabilityPlanV4 = {
   baselineIntervalSeconds: number
   /** Fastest cadence a "live" on-demand session may request, seconds. */
   liveMinIntervalSeconds: number
-  /** Number of `networks` entries billed as "normal" NIC slots. */
+  /** Monitored normal-NIC slots a server may store (`SlotMapping.normalNicSlots` is truncated to this at ingest); never above `MAX_NIC_SLOTS`. */
   normalNicSlots: number
   /** Whether TurboFabric mesh interfaces may report beyond the normal NIC slots. */
   turboFabricEnabled: boolean
@@ -90,12 +90,39 @@ const METRICS_CAPABILITY_PLAN_FIELD_ORDER = [
 export type ServerMachineClass = 'physical' | 'virtual'
 
 /**
- * Platform fallback applied when neither org nor server override a field.
+ * Which deployment resolves the plan: the hosted platform (Cloudflare
+ * Workers — every server gets the platform default until licensing tiers
+ * arrive) or a self-hosted instance (Deno), which is not metered and gets the
+ * self-hosted ceiling instead. Derived from the runtime by
+ * {@link metricsDeploymentKindForRuntime}; never inferred from globals, so a
+ * test running under Deno still exercises hosted behavior unless it asks
+ * for the other.
+ */
+export type MetricsDeploymentKind = 'hosted' | 'self-hosted'
+
+export function metricsDeploymentKindForRuntime(
+  runtime: 'workers' | 'deno'
+): MetricsDeploymentKind {
+  return runtime === 'workers' ? 'hosted' : 'self-hosted'
+}
+
+/**
+ * Self-hosted NIC-slot default — the ceiling itself (`MAX_NIC_SLOTS`): a
+ * self-hosted instance is not metered, so an operator may monitor as many
+ * physical uplinks as the topology offers, up to the hard cap.
+ */
+export const SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS = MAX_NIC_SLOTS
+
+/**
+ * Platform fallback applied when neither org nor server override a field —
+ * the **hosted** baseline. `normalNicSlots` is the hosted default (2 — one
+ * gateway NIC plus one extra; more will need a higher tier later) and
  * `physicalHardwareSignalSlots` reflects the `"physical"` baseline — use
  * {@link platformDefaultMetricsCapabilityPlan} (or
- * {@link resolveMetricsCapabilityPlan}) to get the per-machine-class default,
- * since a virtual machine has no host-level fan/voltage/PSU/etc. sensors to
- * report.
+ * {@link resolveMetricsCapabilityPlan}) to get the per-machine-class,
+ * per-deployment default, since a virtual machine has no host-level fan/
+ * voltage/PSU/etc. sensors to report and a self-hosted instance is not
+ * NIC-metered.
  */
 export const PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN: MetricsCapabilityPlanV4 = {
   baselineIntervalSeconds: 60,
@@ -117,16 +144,23 @@ export const PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN: MetricsCapabilityPlanV4 =
 }
 
 /**
- * Platform default plan for a given {@link ServerMachineClass} — every field
- * matches {@link PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN} except
- * `physicalHardwareSignalSlots`, which is `19` only for `"physical"` and `0`
- * for `"virtual"`.
+ * Platform default plan for a given {@link ServerMachineClass} and
+ * {@link MetricsDeploymentKind} — every field matches
+ * {@link PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN} except
+ * `physicalHardwareSignalSlots` (`19` only for `"physical"`, `0` for
+ * `"virtual"`) and `normalNicSlots` (`SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS`
+ * for a self-hosted instance).
  */
 export function platformDefaultMetricsCapabilityPlan(
-  machineClass: ServerMachineClass
+  machineClass: ServerMachineClass,
+  deployment: MetricsDeploymentKind
 ): MetricsCapabilityPlanV4 {
   return {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
+    normalNicSlots:
+      deployment === 'self-hosted'
+        ? SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS
+        : PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN.normalNicSlots,
     physicalHardwareSignalSlots:
       machineClass === 'physical'
         ? PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN.physicalHardwareSignalSlots
@@ -195,6 +229,11 @@ export function parseMetricsCapabilityPlanOverride(
   for (const key of BOOLEAN_FIELDS) {
     if (typeof value[key] === 'boolean') override[key] = value[key] as boolean
   }
+  // The slot-mapping layer, the daemon, and the UI all stop at MAX_NIC_SLOTS
+  // — an override above it would promise slots nothing can fill.
+  if (override.normalNicSlots !== undefined && override.normalNicSlots > MAX_NIC_SLOTS) {
+    override.normalNicSlots = MAX_NIC_SLOTS
+  }
   return override
 }
 
@@ -225,10 +264,11 @@ export function parseServerMetricsCapabilityPlanOverride(
 export function resolveMetricsCapabilityPlan(
   machineClass: ServerMachineClass,
   orgOverride: MetricsCapabilityPlanOverrideV4 | undefined,
-  serverOverride: MetricsCapabilityPlanOverrideV4 | undefined
+  serverOverride: MetricsCapabilityPlanOverrideV4 | undefined,
+  deployment: MetricsDeploymentKind
 ): MetricsCapabilityPlanV4 {
   return {
-    ...platformDefaultMetricsCapabilityPlan(machineClass),
+    ...platformDefaultMetricsCapabilityPlan(machineClass, deployment),
     ...orgOverride,
     ...serverOverride,
   }
@@ -279,9 +319,14 @@ export async function computeMetricsCapabilityPlanHash(
  *   `hardwareHealthEventsEnabled` is false; every other kind (OS/kernel,
  *   filesystem, fabric, clock-sync, topology/boot generation) is unrelated
  *   operational history and always survives.
- * - `networks` is intentionally untouched here — `normalNicSlots` /
- *   `turboFabricEnabled` inform the topology *packer* in a later phase, not
- *   sample truncation.
+ * - `networks` keeps, in slot order, the `slotMapping.normalNicSlots` devices
+ *   within `normalNicSlots`, then every `fabricDeviceIds` device when
+ *   `turboFabricEnabled` — anything else the daemon sent (an unmonitored
+ *   device, a slot beyond the plan) is dropped before it reaches a store.
+ *   Without a resolved mapping (generation not recorded yet) the first
+ *   `normalNicSlots` entries survive positionally, matching the packer's own
+ *   positional fallback, and fabric devices cannot be told apart so nothing
+ *   beyond that count is kept.
  */
 /**
  * Conservative fallback plan resolution — platform defaults only, always
@@ -291,8 +336,35 @@ export async function computeMetricsCapabilityPlanHash(
  * back to this only when no DB is available for the request or the real
  * resolution itself fails — never as the default path.
  */
-export function resolveDefaultMetricsCapabilityPlanV4(): MetricsCapabilityPlanV4 {
-  return resolveMetricsCapabilityPlan('virtual', undefined, undefined)
+export function resolveDefaultMetricsCapabilityPlanV4(
+  deployment: MetricsDeploymentKind
+): MetricsCapabilityPlanV4 {
+  return resolveMetricsCapabilityPlan('virtual', undefined, undefined, deployment)
+}
+
+/**
+ * `networks` truncation — see {@link truncateSampleToCapabilityPlanV4}'s doc
+ * comment. Identity-addressed when a `slotMapping` is available (a device is
+ * kept because of *which* device it is, never its array position), ordered
+ * slots-first so the positional packer fallback still embeds slot 1/2.
+ */
+function truncateNetworksToPlanV4(
+  networks: MetricsSampleV4['networks'],
+  plan: MetricsCapabilityPlanV4,
+  slotMapping: SlotMapping | undefined
+): MetricsSampleV4['networks'] {
+  if (!slotMapping) return networks.slice(0, plan.normalNicSlots)
+  const byId = new Map(networks.map((device) => [device.deviceId, device]))
+  const keepIds = [
+    ...slotMapping.normalNicSlots.slice(0, plan.normalNicSlots),
+    ...(plan.turboFabricEnabled ? slotMapping.fabricDeviceIds : []),
+  ]
+  const kept: MetricsSampleV4['networks'] = []
+  for (const id of keepIds) {
+    const device = byId.get(id)
+    if (device && !kept.includes(device)) kept.push(device)
+  }
+  return kept
 }
 
 export function truncateSampleToCapabilityPlanV4(
@@ -305,6 +377,7 @@ export function truncateSampleToCapabilityPlanV4(
     : sample.filesystems
   const truncated: MetricsSampleV4 = {
     ...sample,
+    networks: truncateNetworksToPlanV4(sample.networks, plan, slotMapping),
     gpus: sample.gpus.slice(0, plan.gpuSlots),
     blockDevices: sample.blockDevices.slice(0, plan.detailedBlockDeviceSlots),
     filesystems: nonRootFilesystems.slice(0, plan.extraFilesystemSlots),

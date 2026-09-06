@@ -2,14 +2,16 @@ import { assertEquals, assertNotEquals } from '@std/assert'
 import {
   computeMetricsCapabilityPlanHash,
   type MetricsCapabilityPlanV4,
+  metricsDeploymentKindForRuntime,
   parseMetricsCapabilityPlanOverride,
   PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
   platformDefaultMetricsCapabilityPlan,
   resolveMetricsCapabilityPlan,
+  SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS,
   truncateSampleToCapabilityPlanV4,
 } from './capability-plan.ts'
 import type { MetricsSampleV4 } from './contract-v4.ts'
-import type { SlotMapping } from '../../client/servers/topology-types.ts'
+import { MAX_NIC_SLOTS, type SlotMapping } from '../../client/servers/topology-types.ts'
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -24,18 +26,23 @@ const test = Deno.test.bind(Deno)
 // ---------------------------------------------------------------------------
 
 test('resolveMetricsCapabilityPlan with no overrides returns the physical platform default', () => {
-  const resolved = resolveMetricsCapabilityPlan('physical', undefined, undefined)
+  const resolved = resolveMetricsCapabilityPlan('physical', undefined, undefined, 'hosted')
   assertEquals(resolved, PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN)
 })
 
 test('resolveMetricsCapabilityPlan: org override wins over platform default', () => {
-  const resolved = resolveMetricsCapabilityPlan('physical', { gpuSlots: 4 }, undefined)
+  const resolved = resolveMetricsCapabilityPlan('physical', { gpuSlots: 4 }, undefined, 'hosted')
   assertEquals(resolved.gpuSlots, 4)
   assertEquals(resolved.normalNicSlots, PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN.normalNicSlots)
 })
 
 test('resolveMetricsCapabilityPlan: server override wins over org override', () => {
-  const resolved = resolveMetricsCapabilityPlan('physical', { gpuSlots: 4 }, { gpuSlots: 8 })
+  const resolved = resolveMetricsCapabilityPlan(
+    'physical',
+    { gpuSlots: 4 },
+    { gpuSlots: 8 },
+    'hosted'
+  )
   assertEquals(resolved.gpuSlots, 8)
 })
 
@@ -43,25 +50,26 @@ test('resolveMetricsCapabilityPlan: server override only touches fields it sets'
   const resolved = resolveMetricsCapabilityPlan(
     'physical',
     { gpuSlots: 4, managedIngressEnabled: false },
-    { gpuSlots: 8 }
+    { gpuSlots: 8 },
+    'hosted'
   )
   assertEquals(resolved.gpuSlots, 8)
   assertEquals(resolved.managedIngressEnabled, false)
 })
 
 test('resolveMetricsCapabilityPlan: virtual machine resolves physicalHardwareSignalSlots=0 with no overrides', () => {
-  const resolved = resolveMetricsCapabilityPlan('virtual', undefined, undefined)
+  const resolved = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'hosted')
   assertEquals(resolved.physicalHardwareSignalSlots, 0)
 })
 
 test('resolveMetricsCapabilityPlan: physical machine resolves physicalHardwareSignalSlots=19 with no overrides', () => {
-  const resolved = resolveMetricsCapabilityPlan('physical', undefined, undefined)
+  const resolved = resolveMetricsCapabilityPlan('physical', undefined, undefined, 'hosted')
   assertEquals(resolved.physicalHardwareSignalSlots, 19)
 })
 
 test('resolveMetricsCapabilityPlan: virtual and physical machines otherwise share the same defaults', () => {
-  const virtual = resolveMetricsCapabilityPlan('virtual', undefined, undefined)
-  const physical = resolveMetricsCapabilityPlan('physical', undefined, undefined)
+  const virtual = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'hosted')
+  const physical = resolveMetricsCapabilityPlan('physical', undefined, undefined, 'hosted')
   assertEquals(
     { ...virtual, physicalHardwareSignalSlots: 0 },
     { ...physical, physicalHardwareSignalSlots: 0 }
@@ -69,17 +77,53 @@ test('resolveMetricsCapabilityPlan: virtual and physical machines otherwise shar
 })
 
 test('resolveMetricsCapabilityPlan: an explicit override still wins over the machine-class default', () => {
-  const resolved = resolveMetricsCapabilityPlan('virtual', undefined, {
-    physicalHardwareSignalSlots: 5,
-  })
+  const resolved = resolveMetricsCapabilityPlan(
+    'virtual',
+    undefined,
+    {
+      physicalHardwareSignalSlots: 5,
+    },
+    'hosted'
+  )
   assertEquals(resolved.physicalHardwareSignalSlots, 5)
 })
 
 test('platformDefaultMetricsCapabilityPlan matches PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN for physical machines', () => {
   assertEquals(
-    platformDefaultMetricsCapabilityPlan('physical'),
+    platformDefaultMetricsCapabilityPlan('physical', 'hosted'),
     PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN
   )
+})
+
+test('platformDefaultMetricsCapabilityPlan: hosted servers get 2 NIC slots, self-hosted the MAX_NIC_SLOTS ceiling, nothing else differs', () => {
+  const hosted = platformDefaultMetricsCapabilityPlan('virtual', 'hosted')
+  const selfHosted = platformDefaultMetricsCapabilityPlan('virtual', 'self-hosted')
+  assertEquals(hosted.normalNicSlots, 2)
+  assertEquals(selfHosted.normalNicSlots, SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS)
+  assertEquals(SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS, MAX_NIC_SLOTS)
+  assertEquals({ ...hosted, normalNicSlots: 0 }, { ...selfHosted, normalNicSlots: 0 })
+  assertEquals(metricsDeploymentKindForRuntime('workers'), 'hosted')
+  assertEquals(metricsDeploymentKindForRuntime('deno'), 'self-hosted')
+})
+
+test('resolveMetricsCapabilityPlan: an org/server normalNicSlots override still wins over the deployment default', () => {
+  assertEquals(
+    resolveMetricsCapabilityPlan('virtual', { normalNicSlots: 4 }, undefined, 'self-hosted')
+      .normalNicSlots,
+    4
+  )
+  assertEquals(
+    resolveMetricsCapabilityPlan('virtual', undefined, { normalNicSlots: 1 }, 'hosted')
+      .normalNicSlots,
+    1
+  )
+})
+
+test('parseMetricsCapabilityPlanOverride clamps normalNicSlots to MAX_NIC_SLOTS', () => {
+  assertEquals(parseMetricsCapabilityPlanOverride({ normalNicSlots: 99 }), {
+    normalNicSlots: MAX_NIC_SLOTS,
+  })
+  assertEquals(parseMetricsCapabilityPlanOverride({ normalNicSlots: 3 }), { normalNicSlots: 3 })
 })
 
 // ---------------------------------------------------------------------------
@@ -549,8 +593,7 @@ test('truncateSampleToCapabilityPlanV4: a root-tagged filesystem entry is droppe
     { filesystemId: 'fs-data', availableBytes: null, freeInodes: null },
   ]
   const slotMapping: SlotMapping = {
-    normalNicSlot1: null,
-    normalNicSlot2: null,
+    normalNicSlots: [],
     fabricDeviceIds: [],
     rootFilesystemId: 'fs-root',
     gpuPageOrder: [],
@@ -690,5 +733,99 @@ test('truncateSampleToCapabilityPlanV4: hardwareHealthEventsEnabled=true keeps e
   assertEquals(
     truncated.events.map((event) => event.eventId),
     ['evt-hw', 'evt-oom']
+  )
+})
+
+// ---------------------------------------------------------------------------
+// networks truncation
+// ---------------------------------------------------------------------------
+
+function makeNetwork(deviceId: string): MetricsSampleV4['networks'][number] {
+  return {
+    deviceId,
+    receiveBytesPerSecond: 1,
+    transmitBytesPerSecond: 1,
+    receiveErrorsPerSecond: 0,
+    transmitErrorsPerSecond: 0,
+    receiveDropsPerSecond: 0,
+    transmitDropsPerSecond: 0,
+  }
+}
+
+function emptySlotMappingForNetworks(overrides: Partial<SlotMapping> = {}): SlotMapping {
+  return {
+    normalNicSlots: [],
+    fabricDeviceIds: [],
+    rootFilesystemId: null,
+    gpuPageOrder: [],
+    blockPageOrder: [],
+    filesystemPageOrder: [],
+    hardwareSignalPageOrder: [],
+    ...overrides,
+  }
+}
+
+test('truncateSampleToCapabilityPlanV4: networks keeps the slot-mapped NICs within normalNicSlots (slot order) plus fabric, and drops everything else', () => {
+  const sample: MetricsSampleV4 = {
+    ...emptySample(),
+    // Deliberately out of slot order, with an unmonitored device mixed in.
+    networks: ['veth9', 'eth2', 'tp0', 'eth0', 'eth1'].map(makeNetwork),
+  }
+  const plan = resolveMetricsCapabilityPlan('virtual', undefined, { normalNicSlots: 2 }, 'hosted')
+  const mapping = emptySlotMappingForNetworks({
+    normalNicSlots: ['eth0', 'eth1', 'eth2'],
+    fabricDeviceIds: ['tp0'],
+  })
+  const kept = truncateSampleToCapabilityPlanV4(sample, plan, mapping).networks.map(
+    (n) => n.deviceId
+  )
+  assertEquals(kept, ['eth0', 'eth1', 'tp0'])
+
+  const selfHosted = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'self-hosted')
+  assertEquals(
+    truncateSampleToCapabilityPlanV4(sample, selfHosted, mapping).networks.map((n) => n.deviceId),
+    ['eth0', 'eth1', 'eth2', 'tp0']
+  )
+
+  const noFabric = resolveMetricsCapabilityPlan(
+    'virtual',
+    undefined,
+    { turboFabricEnabled: false },
+    'self-hosted'
+  )
+  assertEquals(
+    truncateSampleToCapabilityPlanV4(sample, noFabric, mapping).networks.map((n) => n.deviceId),
+    ['eth0', 'eth1', 'eth2']
+  )
+})
+
+test('truncateSampleToCapabilityPlanV4: a slot-mapped NIC absent from the sample is simply missing — no other device takes its slot', () => {
+  const sample: MetricsSampleV4 = {
+    ...emptySample(),
+    networks: ['eth1', 'eth5'].map(makeNetwork),
+  }
+  const plan = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'hosted')
+  const mapping = emptySlotMappingForNetworks({ normalNicSlots: ['eth0', 'eth1'] })
+  assertEquals(
+    truncateSampleToCapabilityPlanV4(sample, plan, mapping).networks.map((n) => n.deviceId),
+    ['eth1']
+  )
+})
+
+test('truncateSampleToCapabilityPlanV4: without a slot mapping, networks fall back to the first normalNicSlots entries positionally', () => {
+  const sample: MetricsSampleV4 = {
+    ...emptySample(),
+    networks: ['eth0', 'eth1', 'eth2', 'tp0'].map(makeNetwork),
+  }
+  const hosted = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'hosted')
+  assertEquals(
+    truncateSampleToCapabilityPlanV4(sample, hosted).networks.map((n) => n.deviceId),
+    ['eth0', 'eth1']
+  )
+  const selfHosted = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'self-hosted')
+  assertEquals(selfHosted.normalNicSlots, MAX_NIC_SLOTS)
+  assertEquals(
+    truncateSampleToCapabilityPlanV4(sample, selfHosted).networks.map((n) => n.deviceId),
+    ['eth0', 'eth1', 'eth2', 'tp0']
   )
 })

@@ -88,8 +88,7 @@ const EMPTY_HOST_INPUT = {
 }
 
 const EMPTY_SLOT_MAPPING: SlotMapping = {
-  normalNicSlot1: null,
-  normalNicSlot2: null,
+  normalNicSlots: [],
   fabricDeviceIds: [],
   rootFilesystemId: null,
   gpuPageOrder: [],
@@ -268,7 +267,7 @@ it('orphan network row (DuckDB): an orphan row with no real sample in range yiel
  * entirely, so no `host.system`/`host.io` row exists for this timestamp) —
  * the AE analogue of `insertOrphanNetworkRow`'s direct DuckDB table insert.
  * Built via the real `buildMetricsDataPointsV4` packer (on a sample that
- * declares one NIC not assigned to `normalNicSlot1`/`normalNicSlot2` — a NIC
+ * declares one NIC not assigned to the first two `normalNicSlots` — a NIC
  * in either of those slots gets embedded directly into the `host.io` row
  * instead of paging as its own `network`-family row, per this module's doc
  * comment) so the row's blob/double layout is exactly what production would

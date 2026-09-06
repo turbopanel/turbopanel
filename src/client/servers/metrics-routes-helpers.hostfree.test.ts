@@ -26,6 +26,9 @@ import {
   fabricNetworkSelectionErrorV4,
   findFabricNetworkEntityId,
   findInvalidTopologyIdField,
+  findUnmonitorableNicSlotId,
+  machineClassFromTopologySnapshotV4,
+  nicSlotLimitViolationV4,
   FLEET_HOST_METRICS_V4,
   fleetHostCapacitiesFromSnapshotV4,
   hardwareProfileUpdateNeedsTopologyValidation,
@@ -41,6 +44,7 @@ import {
   type TopologyIdValidationSnapshot,
   topologyOverridesFromHardwareProfile,
 } from './metrics-routes-helpers.ts'
+import { MAX_NIC_SLOTS } from './topology-types.ts'
 import type { TopologyInventoryV4 } from './topology-inventory.ts'
 
 /**
@@ -153,6 +157,7 @@ test('buildHostSummaryPayload and metricsQueryErrorMessage', () => {
       envelope: {
         cpuLimits: { tdpWatts: null, tjMaxCelsius: null, source: 'none' },
         temperatureUnit: 'celsius',
+        nicSlotLimit: 2,
       },
     }),
     {
@@ -166,6 +171,7 @@ test('buildHostSummaryPayload and metricsQueryErrorMessage', () => {
       latestAt: null,
       cpuLimits: { tdpWatts: null, tjMaxCelsius: null, source: 'none' },
       temperatureUnit: 'celsius',
+      nicSlotLimit: 2,
     }
   )
   assertEquals(metricsQueryErrorMessage(new Error('down')), 'down')
@@ -178,19 +184,22 @@ test('buildCpuLimitsEnvelope resolves thermal limits and temperature unit from r
       { cpuModel: 'AMD EPYC 7763' },
       {
         temperatureUnit: 'fahrenheit',
-      }
+      },
+      8
     ),
     {
       cpuLimits: { tdpWatts: 280, tjMaxCelsius: 95, source: 'catalog-exact' },
       temperatureUnit: 'fahrenheit',
+      nicSlotLimit: 8,
     }
   )
 })
 
 test('buildCpuLimitsEnvelope falls back cleanly when nothing is resolved', () => {
-  assertEquals(buildCpuLimitsEnvelope(undefined, undefined), {
+  assertEquals(buildCpuLimitsEnvelope(undefined, undefined, 2), {
     cpuLimits: { tdpWatts: null, tjMaxCelsius: null, source: 'none' },
     temperatureUnit: 'celsius',
+    nicSlotLimit: 2,
   })
 })
 
@@ -235,46 +244,58 @@ test('parseHardwareProfileBody rejects cpuTjMaxCelsiusOverride out of the plausi
   })
 })
 
-test('parseHardwareProfileBody accepts stable topology-id pins, and null clears them', () => {
+test('parseHardwareProfileBody accepts stable topology-id pins and the monitored-NIC list, and null clears them', () => {
   const accepted = parseHardwareProfileBody({
-    nicSlot1DeviceId: 'mac:aa:bb:cc:dd:ee:ff',
-    nicSlot2DeviceId: 'pci:0000:01:00.0',
+    nicSlotDeviceIds: ['mac:aa:bb:cc:dd:ee:ff', ' pci:0000:01:00.0 ', 'mac:aa:bb:cc:dd:ee:ff'],
     hostingFilesystemId: 'fs:dev:/dev/sdb1',
   })
   assertEquals(accepted, {
     ok: true,
     update: {
-      nicSlot1DeviceId: 'mac:aa:bb:cc:dd:ee:ff',
-      nicSlot2DeviceId: 'pci:0000:01:00.0',
+      nicSlotDeviceIds: ['mac:aa:bb:cc:dd:ee:ff', 'pci:0000:01:00.0'],
       hostingFilesystemId: 'fs:dev:/dev/sdb1',
     },
   })
 
   const cleared = parseHardwareProfileBody({
-    nicSlot1DeviceId: null,
-    nicSlot2DeviceId: null,
+    nicSlotDeviceIds: null,
     hostingFilesystemId: null,
   })
   assertEquals(cleared, {
     ok: true,
     update: {
-      nicSlot1DeviceId: null,
-      nicSlot2DeviceId: null,
+      nicSlotDeviceIds: null,
       hostingFilesystemId: null,
     },
   })
+  assertEquals(parseHardwareProfileBody({ nicSlotDeviceIds: [] }), {
+    ok: true,
+    update: { nicSlotDeviceIds: [] },
+  })
 })
 
-test('parseHardwareProfileBody rejects a blank or non-string topology-id pin', () => {
-  assertEquals(parseHardwareProfileBody({ nicSlot1DeviceId: '   ' }).ok, false)
+test('parseHardwareProfileBody rejects a blank or non-string topology-id pin, a malformed NIC list, and a list over MAX_NIC_SLOTS', () => {
+  assertEquals(parseHardwareProfileBody({ hostingFilesystemId: '   ' }).ok, false)
   assertEquals(parseHardwareProfileBody({ hostingFilesystemId: 42 }).ok, false)
+  assertEquals(parseHardwareProfileBody({ nicSlotDeviceIds: 'mac:a' }).ok, false)
+  assertEquals(parseHardwareProfileBody({ nicSlotDeviceIds: ['mac:a', null] }).ok, false)
+  assertEquals(parseHardwareProfileBody({ nicSlotDeviceIds: ['mac:a', '  '] }).ok, false)
+  assertEquals(
+    parseHardwareProfileBody({
+      nicSlotDeviceIds: Array.from({ length: MAX_NIC_SLOTS + 1 }, (_, i) => `mac:${i}`),
+    }).ok,
+    false
+  )
+  // The pre-list keys are no longer accepted through the PUT body.
+  assertEquals(parseHardwareProfileBody({ nicSlot1DeviceId: 'mac:a' }).ok, false)
 })
 
 test('hardwareProfileUpdateNeedsTopologyValidation only fires for topology-id assignments', () => {
   assertEquals(hardwareProfileUpdateNeedsTopologyValidation({}), false)
   assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nic1: 'eth0' }), false)
-  assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nicSlot1DeviceId: null }), false)
-  assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nicSlot1DeviceId: 'mac:a' }), true)
+  assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nicSlotDeviceIds: null }), false)
+  assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nicSlotDeviceIds: [] }), false)
+  assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nicSlotDeviceIds: ['mac:a'] }), true)
   assertEquals(
     hardwareProfileUpdateNeedsTopologyValidation({
       hostingFilesystemId: 'fs:dev:/dev/sda1',
@@ -283,22 +304,40 @@ test('hardwareProfileUpdateNeedsTopologyValidation only fires for topology-id as
   )
 })
 
-test('findInvalidTopologyIdField matches assigned ids against the recorded topology', () => {
+test('findInvalidTopologyIdField matches assigned ids against the recorded topology, and NIC slots must be uplinks', () => {
   const snapshot = {
-    networks: [{ deviceId: 'mac:a' }, { deviceId: 'mac:b' }],
+    networks: [
+      { deviceId: 'mac:a', kind: 'uplink' },
+      { deviceId: 'mac:b', kind: 'uplink' },
+      { deviceId: 'mac:port', kind: 'member' },
+      { deviceId: 'virtual:vlan', kind: 'virtual' },
+    ],
     filesystems: [{ filesystemId: 'fs:dev:/dev/sda1' }],
   } as unknown as TopologyIdValidationSnapshot
 
   assertEquals(findInvalidTopologyIdField({}, snapshot), null)
-  assertEquals(findInvalidTopologyIdField({ nicSlot1DeviceId: 'mac:a' }, snapshot), null)
+  assertEquals(findInvalidTopologyIdField({ nicSlotDeviceIds: ['mac:a', 'mac:b'] }, snapshot), null)
   assertEquals(
-    findInvalidTopologyIdField({ nicSlot1DeviceId: 'mac:stale' }, snapshot),
-    'nicSlot1DeviceId'
+    findInvalidTopologyIdField({ nicSlotDeviceIds: ['mac:a', 'mac:stale'] }, snapshot),
+    'nicSlotDeviceIds'
   )
   assertEquals(
-    findInvalidTopologyIdField({ nicSlot2DeviceId: 'mac:stale' }, snapshot),
-    'nicSlot2DeviceId'
+    findInvalidTopologyIdField({ nicSlotDeviceIds: ['mac:port'] }, snapshot),
+    'nicSlotDeviceIds'
   )
+  assertEquals(
+    findInvalidTopologyIdField({ nicSlotDeviceIds: ['virtual:vlan'] }, snapshot),
+    'nicSlotDeviceIds'
+  )
+  assertEquals(findUnmonitorableNicSlotId(['mac:a', 'mac:port'], snapshot), 'mac:port')
+  assertEquals(nicSlotLimitViolationV4({ nicSlotDeviceIds: ['mac:a', 'mac:b'] }, 2), null)
+  assertEquals(
+    typeof nicSlotLimitViolationV4({ nicSlotDeviceIds: ['mac:a', 'mac:b'] }, 1),
+    'string'
+  )
+  assertEquals(machineClassFromTopologySnapshotV4(undefined), 'virtual')
+  assertEquals(machineClassFromTopologySnapshotV4({ hardwareSignals: [] }), 'virtual')
+  assertEquals(machineClassFromTopologySnapshotV4({ hardwareSignals: [{}] }), 'physical')
   assertEquals(
     findInvalidTopologyIdField({ hostingFilesystemId: 'fs:dev:/dev/sdb1' }, snapshot),
     'hostingFilesystemId'
@@ -309,8 +348,8 @@ test('findInvalidTopologyIdField matches assigned ids against the recorded topol
   )
   // No recorded topology yet — every assignment is stale.
   assertEquals(
-    findInvalidTopologyIdField({ nicSlot1DeviceId: 'mac:a' }, undefined),
-    'nicSlot1DeviceId'
+    findInvalidTopologyIdField({ nicSlotDeviceIds: ['mac:a'] }, undefined),
+    'nicSlotDeviceIds'
   )
 })
 
@@ -432,13 +471,15 @@ test('findFabricNetworkEntityId rejects only a fabric device — a slot-mapped N
       deviceId: 'eth0',
       name: 'eth0',
       kind: 'ethernet',
-      role: 'normalNicSlot1',
+      role: 'nic',
+      slot: 1,
     },
     {
       deviceId: 'eth1',
       name: 'eth1',
       kind: 'ethernet',
-      role: 'normalNicSlot2',
+      role: 'nic',
+      slot: 2,
     },
     { deviceId: 'fab0', name: 'fab0', kind: 'ethernet', role: 'fabric' },
     { deviceId: 'eth2', name: 'eth2', kind: 'ethernet', role: 'other' },
@@ -472,7 +513,8 @@ test('fabricNetworkSelectionErrorV4 rejects only a fabric network selector', () 
       deviceId: 'eth0',
       name: 'eth0',
       kind: 'ethernet',
-      role: 'normalNicSlot1',
+      role: 'nic',
+      slot: 1,
     },
     { deviceId: 'fab0', name: 'fab0', kind: 'ethernet', role: 'fabric' },
   ] as unknown as TopologyInventoryV4['networks'])
@@ -623,7 +665,7 @@ test('querySeriesResultsV4 forwards slotMapping/topologyGeneration for the netwo
   })
   requireSeriesQueryOk(outcome)
   assertEquals(seen?.family, 'network')
-  assertEquals(seen?.slotMapping?.normalNicSlot1, 'eth0')
+  assertEquals(seen?.slotMapping?.normalNicSlots, ['eth0'])
   assertEquals(seen?.topologyGeneration, 5)
 })
 
@@ -748,18 +790,16 @@ test('querySeriesResultsV4 does not attach slotMapping for a non-network family'
 
 test('topologyOverridesFromHardwareProfile: unset profile fields default null/false, set fields pass through', () => {
   const empty = topologyOverridesFromHardwareProfile(undefined)
-  assertEquals(empty.nicSlot1DeviceId, null)
-  assertEquals(empty.nicSlot2DeviceId, null)
+  assertEquals(empty.nicSlotDeviceIds, [])
   assertEquals(empty.hostingFilesystemId, null)
   assertEquals(empty.drivetempEnabled, false)
 
   const assigned = topologyOverridesFromHardwareProfile({
-    nicSlot1DeviceId: 'mac:a',
+    nicSlotDeviceIds: ['mac:a'],
     hostingFilesystemId: 'fs:dev:/dev/sda1',
     drivetempEnabled: true,
   })
-  assertEquals(assigned.nicSlot1DeviceId, 'mac:a')
-  assertEquals(assigned.nicSlot2DeviceId, null)
+  assertEquals(assigned.nicSlotDeviceIds, ['mac:a'])
   assertEquals(assigned.hostingFilesystemId, 'fs:dev:/dev/sda1')
   assertEquals(assigned.drivetempEnabled, true)
 })
@@ -829,8 +869,9 @@ test('buildTopologyContextV4 builds inventory/slotMapping/capacities from a usab
     undefined
   )
   assertEquals(context.topologyGeneration, 5)
-  assertEquals(context.slotMapping?.normalNicSlot1, 'eth0')
-  assertEquals(context.inventory?.networks[0]?.role, 'normalNicSlot1')
+  assertEquals(context.slotMapping?.normalNicSlots, ['eth0'])
+  assertEquals(context.inventory?.networks[0]?.role, 'nic')
+  assertEquals(context.inventory?.networks[0]?.slot, 1)
   assertEquals(context.capacities.memoryTotalBytes, 16_000_000_000)
   assertEquals(context.capacities.swapTotalBytes, 2_000_000_000)
   assertEquals(context.capacities.rootFilesystemTotalBytes, 100_000_000_000)
@@ -840,6 +881,7 @@ test('buildSeriesRouteResponseV4 is unavailable only when host or some requested
   const envelope = {
     cpuLimits: { tdpWatts: null, tjMaxCelsius: null, source: 'none' as const },
     temperatureUnit: 'celsius' as const,
+    nicSlotLimit: 2,
   }
   const context = buildTopologyContextV4(undefined, undefined)
 

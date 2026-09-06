@@ -20,16 +20,26 @@ import type {
   TopologySnapshot,
 } from './topology-types.ts'
 
-export type NetworkEntityRoleV4 = 'normalNicSlot1' | 'normalNicSlot2' | 'fabric' | 'other'
+/**
+ * A device's role per the current `SlotMapping`: `nic` is a monitored
+ * normal-NIC slot (its 1-based `slot` rides alongside), `fabric` a TurboFabric
+ * mesh device, `other` everything the daemon enumerates but never samples
+ * (members, VLAN children, tunnels, container bridges, loopback — or an
+ * uplink the operator hasn't added to the monitored list).
+ */
+export type NetworkEntityRoleV4 = 'nic' | 'fabric' | 'other'
 
 export type NetworkInventoryEntryV4 = {
   deviceId: string
   name: string
   kind: NetworkDeviceKind
-  /** This device's role per the current `SlotMapping` — `'other'` means it pages as a standalone `network` entity (see `field-map-v4.ts`'s module doc comment). */
   role: NetworkEntityRoleV4
+  /** 1-based NIC slot when `role === 'nic'` — slots 1/2 embed in `host.io` on Cloudflare, 3+ page as `network` rows. */
+  slot?: number
   speedMbps?: number
   mtu?: number
+  /** Mirrors the snapshot's `defaultRoute` flag — the gateway uplink the auto slot selection would pick. */
+  defaultRoute?: boolean
 }
 
 export type FilesystemInventoryEntryV4 = {
@@ -72,11 +82,14 @@ export type TopologyInventoryV4 = {
   hardwareSignals: HardwareSignalInventoryEntryV4[]
 }
 
-function networkRole(deviceId: string, slotMapping: SlotMapping): NetworkEntityRoleV4 {
-  if (deviceId === slotMapping.normalNicSlot1) return 'normalNicSlot1'
-  if (deviceId === slotMapping.normalNicSlot2) return 'normalNicSlot2'
-  if (slotMapping.fabricDeviceIds.includes(deviceId)) return 'fabric'
-  return 'other'
+function networkRole(
+  deviceId: string,
+  slotMapping: SlotMapping
+): { role: NetworkEntityRoleV4; slot?: number } {
+  const slotIndex = slotMapping.normalNicSlots.indexOf(deviceId)
+  if (slotIndex !== -1) return { role: 'nic', slot: slotIndex + 1 }
+  if (slotMapping.fabricDeviceIds.includes(deviceId)) return { role: 'fabric' }
+  return { role: 'other' }
 }
 
 /** Build every family's inventory from one topology snapshot + its slot mapping. */
@@ -88,9 +101,10 @@ export function buildTopologyInventoryV4(
     deviceId: device.deviceId,
     name: device.name,
     kind: device.kind,
-    role: networkRole(device.deviceId, slotMapping),
+    ...networkRole(device.deviceId, slotMapping),
     ...(device.speedMbps !== undefined ? { speedMbps: device.speedMbps } : {}),
     ...(device.mtu !== undefined ? { mtu: device.mtu } : {}),
+    ...(device.defaultRoute === true ? { defaultRoute: true } : {}),
   }))
 
   const filesystems: FilesystemInventoryEntryV4[] = snapshot.filesystems.map((fs) => ({
