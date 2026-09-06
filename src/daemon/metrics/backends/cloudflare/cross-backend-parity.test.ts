@@ -107,6 +107,7 @@ function inputForTick(opts: {
         maxCoreBusyPercent: null,
         procsRunning: null,
         procsBlocked: null,
+        processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {

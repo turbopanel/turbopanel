@@ -25,6 +25,7 @@ const HOST_CPU_FIELDS = [
   'maxCoreBusyPercent',
   'procsRunning',
   'procsBlocked',
+  'processCount',
 ]
 const HOST_KERNEL_FIELDS = ['fileHandlesUsedPercent', 'conntrackUsedPercent']
 const HOST_MEMORY_FIELDS = [

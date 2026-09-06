@@ -348,6 +348,8 @@ const HOST_CPU_DESCRIPTORS: Record<keyof HostCpuMetricsV4, HostMetricsMetricDesc
   maxCoreBusyPercent: percent('maxCoreBusyPercent', 'host.cpu', 'host.system'),
   procsRunning: countGauge('procsRunning', 'host.cpu', 'host.system'),
   procsBlocked: countGauge('procsBlocked', 'host.cpu', 'host.system'),
+  // Packed on the host.io AE row (spare double18) — host.system's 19 slots are full.
+  processCount: countGauge('processCount', 'host.cpu', 'host.io'),
 }
 
 const HOST_KERNEL_DESCRIPTORS: Record<keyof HostKernelMetricsV4, HostMetricsMetricDescriptorV4> = {

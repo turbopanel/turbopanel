@@ -60,6 +60,7 @@ function zeroHost(): MetricsSampleV4Input['host'] {
       maxCoreBusyPercent: 0,
       procsRunning: 0,
       procsBlocked: 0,
+      processCount: 0,
     },
     kernel: { fileHandlesUsedPercent: 0, conntrackUsedPercent: 0 },
     memory: {

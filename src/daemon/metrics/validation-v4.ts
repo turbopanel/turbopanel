@@ -342,6 +342,7 @@ const HOST_CPU_NUMERIC_FIELDS = [
   'maxCoreBusyPercent',
   'procsRunning',
   'procsBlocked',
+  'processCount',
 ] as const
 
 const HOST_KERNEL_NUMERIC_FIELDS = ['fileHandlesUsedPercent', 'conntrackUsedPercent'] as const

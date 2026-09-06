@@ -146,6 +146,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/bindings/impact.test.ts \
   src/client/display-name-uniqueness.test.ts \
   src/client/docker-run/routes-helpers.hostfree.test.ts \
+  src/client/docker-run/routes.hostfree.test.ts \
   src/client/environments/deploy-prepare.test.ts \
   src/client/environments/deploy-layers.test.ts \
   src/client/environments/merge-deploy-principal-runtimes.test.ts \
@@ -162,6 +163,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/environments/site-releases.hostfree.test.ts \
   src/client/environments/reconcile-services.test.ts \
   src/client/environments/reconcile-services.hostfree.test.ts \
+  src/client/environments/reconcile-hostings.hostfree.test.ts \
   src/client/environments/allocate-containers.test.ts \
   src/client/environments/routes.test.ts \
   src/client/environments/tcp-udp-ingress.test.ts \
@@ -200,6 +202,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/managed/serialize.test.ts \
   src/client/openapi/hostings.test.ts \
   src/client/openapi/index.test.ts \
+  src/client/openapi/shared.test.ts \
   src/client/openapi/licenses.test.ts \
   src/client/openapi/metrics.test.ts \
   src/client/openapi/servers.test.ts \
@@ -318,6 +321,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/daemon/metrics/backends/duckdb/parquet.test.ts \
   src/daemon/metrics/backends/duckdb/schema.test.ts \
   src/daemon/metrics/backends/duckdb/store.test.ts \
+  src/daemon/metrics/active-store.test.ts \
   src/daemon/metrics/capability-plan.test.ts \
   src/daemon/metrics/contract-v4.test.ts \
   src/daemon/metrics/counter-reset-end-to-end.test.ts \
@@ -328,7 +332,9 @@ deno test -A --coverage=coverage/deno-profile \
   src/daemon/metrics/status-events.test.ts \
   src/daemon/metrics/topology-generation-guard.test.ts \
   src/daemon/metrics/query/cache.test.ts \
+  src/daemon/metrics/query/derived-metrics-v4.test.ts \
   src/daemon/metrics/query/resolution.test.ts \
+  src/daemon/metrics/query/series-response-v4.test.ts \
   src/daemon/metrics/query/uptime.test.ts \
   src/daemon/metrics/store-selection.test.ts \
   src/daemon/metrics/validation-v4.deno.test.ts \
@@ -361,6 +367,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/developer/drizzle-studio-bind.test.ts \
   src/developer/drizzle-studio-helpers.hostfree.test.ts \
   src/developer/local-console-auth.test.ts \
+  src/developer/metrics-duckdb-ui-routes.hostfree.test.ts \
   src/developer/routes-core-helpers.hostfree.test.ts \
   src/developer/routes.hostfree.test.ts \
   src/developer/system-routes.hostfree.test.ts \
@@ -439,7 +446,10 @@ deno test -A --coverage=coverage/deno-profile \
   src/lib/db/principal-alias-records.test.ts \
   src/lib/docker-network-name.test.ts \
   src/lib/docker-run/import.test.ts \
+  src/lib/docker-run/lexer.test.ts \
   src/lib/docker-run/option-registry.test.ts \
+  src/lib/docker-run/parse.test.ts \
+  src/lib/docker-run/to-compose.test.ts \
   src/lib/email/mailgun/deno-mailgun-queue.test.ts \
   src/lib/email/mailgun/send.test.ts \
   src/lib/email/mailgun/workers-queue.test.ts \
@@ -493,10 +503,12 @@ deno test -A --coverage=coverage/deno-profile \
   src/lib/settings/email-settings.deno.test.ts \
   src/lib/settings/resolver.deno.test.ts \
   src/lib/settings/resolver.hostfree.test.ts \
+  src/lib/settings/server-metrics-settings.hostfree.test.ts \
   src/lib/timezones.test.ts \
   src/lib/tls/ \
   src/lib/update/manifest.test.ts \
   src/lib/update/constants.test.ts \
+  src/lib/update/prepare.test.ts \
   src/log-compat.test.ts \
   src/node-path.test.ts \
   src/query-cache/cached-query.test.ts \

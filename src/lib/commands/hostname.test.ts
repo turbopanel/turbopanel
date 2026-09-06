@@ -48,3 +48,9 @@ it('assertValidHostname throws for unsafe values', () => {
   assertThrows(() => assertValidHostname('a b'), Error, 'Invalid hostname')
   assertValidHostname('web-01')
 })
+
+it('isValidHostname rejects non-string values', () => {
+  assertEquals(isValidHostname(12), false)
+  assertEquals(isValidHostname(null), false)
+  assertEquals(isValidHostname(undefined), false)
+})

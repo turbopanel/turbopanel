@@ -14,6 +14,7 @@ import {
   resolveServerMetricsStoreV4,
   UnavailableServerMetricsStoreV4,
 } from './store-selection.ts'
+import { resolveServerMetricsStoreV4 as resolveWorkersServerMetricsStoreV4 } from './store-selection-workers.ts'
 
 it('resolveServerMetricsStoreV4 workers + AE → AnalyticsEngine store', () => {
   resetMetricsStoreSelectionWarningsForTests()
@@ -116,6 +117,20 @@ it('resolveServerMetricsStoreV4 deno construction failure → reads reject as un
   } finally {
     console.warn = originalWarn
     Deno.removeSync(blocker)
+  }
+})
+
+it('Workers store selection rejects a non-workers runtime', () => {
+  resetMetricsStoreSelectionWarningsForTests()
+  try {
+    resolveWorkersServerMetricsStoreV4({ runtime: 'deno' })
+    throw new TypeError('expected Workers store selection to reject deno runtime')
+  } catch (error) {
+    assertInstanceOf(error, TypeError)
+    assertEquals(
+      error.message,
+      'Workers metrics store selection requires runtime: workers',
+    )
   }
 })
 
@@ -232,6 +247,7 @@ function buildV4HostSample(overrides: {
         maxCoreBusyPercent: null,
         procsRunning: null,
         procsBlocked: null,
+        processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {

@@ -55,8 +55,8 @@ it('entityMetricColumnName maps camelCase fields to snake_case', () => {
   assertEquals(entityMetricColumnName('queueDepth'), 'queue_depth')
 })
 
-it('HOST_METRIC_FIELD_REFS has exactly 30 entries covering every host group, no duplicates', () => {
-  assertEquals(HOST_METRIC_FIELD_REFS.length, 30)
+it('HOST_METRIC_FIELD_REFS has exactly 31 entries covering every host group, no duplicates', () => {
+  assertEquals(HOST_METRIC_FIELD_REFS.length, 31)
   const columns = HOST_METRIC_FIELD_REFS.map((ref) => hostMetricColumnName(ref.group, ref.field))
   assertEquals(new Set(columns).size, columns.length)
   for (const column of columns) {
@@ -87,6 +87,7 @@ it('every leaf metric of a real v4 sample maps to a known host column', () => {
         maxCoreBusyPercent: 1,
         procsRunning: 1,
         procsBlocked: 1,
+        processCount: 1,
       },
       kernel: { fileHandlesUsedPercent: 1, conntrackUsedPercent: 1 },
       memory: {
@@ -251,6 +252,7 @@ it('hostSamplesInsertColumns lists common metadata then every host metric column
     'boot_generation',
   ])
   assertEquals(columns.includes('cpu_busy_percent'), true)
+  assertEquals(columns.includes('cpu_process_count'), true)
   assertEquals(columns.includes('memory_pressure_some_percent'), true)
   assertEquals(columns.includes('cpu_detail_average_frequency_m_hz'), true)
   assertEquals(columns.includes('cpu_detail_cpu_irq_percent'), true)

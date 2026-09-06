@@ -49,6 +49,7 @@ const HOST_CPU_FIELDS = [
   'maxCoreBusyPercent',
   'procsRunning',
   'procsBlocked',
+  'processCount',
 ]
 const HOST_KERNEL_FIELDS = ['fileHandlesUsedPercent', 'conntrackUsedPercent']
 const HOST_MEMORY_FIELDS = [
@@ -254,6 +255,7 @@ it('host.system doubles: exact field order double1..double19, double20 = interva
         maxCoreBusyPercent: 8,
         procsRunning: 9,
         procsBlocked: 10,
+        processCount: 20,
       },
       kernel: { fileHandlesUsedPercent: 11, conntrackUsedPercent: 12 },
       memory: {
@@ -279,10 +281,13 @@ it('host.system doubles: exact field order double1..double19, double20 = interva
   assertEquals(point.blobs[AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX], '')
 })
 
-it('host.io doubles: 11 descriptor slots + 6 NIC-embedded slots + 2 reserved + interval', () => {
+it('host.io doubles: 11 descriptor slots + 6 NIC-embedded slots + processCount + 1 reserved + interval', () => {
   const sample = buildSample({
     host: {
-      cpu: zeroFields(HOST_CPU_FIELDS) as MetricsSampleV4Input['host']['cpu'],
+      cpu: {
+        ...zeroFields(HOST_CPU_FIELDS),
+        processCount: 218,
+      } as MetricsSampleV4Input['host']['cpu'],
       kernel: zeroFields(HOST_KERNEL_FIELDS) as MetricsSampleV4Input['host']['kernel'],
       memory: zeroFields(HOST_MEMORY_FIELDS) as MetricsSampleV4Input['host']['memory'],
       storage: {
@@ -325,7 +330,7 @@ it('host.io doubles: 11 descriptor slots + 6 NIC-embedded slots + 2 reserved + i
   assertEquals(point.doubles.slice(11, 14), [100, 200, 10])
   // NIC1: receive=300, transmit=400, problem=0
   assertEquals(point.doubles.slice(14, 17), [300, 400, 0])
-  assertEquals(point.doubles[17], AE_V4_MISSING_METRIC_SENTINEL)
+  assertEquals(point.doubles[17], 218)
   assertEquals(point.doubles[18], AE_V4_MISSING_METRIC_SENTINEL)
   assertEquals(point.doubles[AE_V4_DOUBLE_INTERVAL_INDEX], 60)
 })

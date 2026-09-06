@@ -251,6 +251,9 @@ const HOST_CPU_FIELD_ORDER = [
   'procsBlocked',
 ] as const
 
+/** Packed on host.io's first reserved double so host.system stays 19 slots. */
+const HOST_CPU_IO_OVERFLOW_FIELD_ORDER = ['processCount'] as const
+
 const HOST_KERNEL_FIELD_ORDER = ['fileHandlesUsedPercent', 'conntrackUsedPercent'] as const
 
 const HOST_MEMORY_FIELD_ORDER = [
@@ -302,6 +305,9 @@ const HOST_IO_FIELD_ORDER: readonly HostFieldRef[] = [
  * the first two `networks[]` entries — see the module doc comment.
  */
 const HOST_IO_NIC_EMBED_SLOT_COUNT = 6
+/** First reserved host.io double after descriptor + NIC-embed slots (double18 today). */
+const HOST_IO_PROCESS_COUNT_DOUBLE_INDEX =
+  HOST_IO_FIELD_ORDER.length + HOST_IO_NIC_EMBED_SLOT_COUNT
 
 function hostFieldValue(sample: MetricsSampleV4, ref: HostFieldRef): number | null {
   const groupKey = ref.scope.slice('host.'.length) as keyof MetricsSampleV4['host']
@@ -340,6 +346,8 @@ function packHostIoDoubles(
   HOST_IO_FIELD_ORDER.forEach((ref, i) => {
     doubles[i] = hostFieldValue(sample, ref) ?? AE_V4_MISSING_METRIC_SENTINEL
   })
+  doubles[HOST_IO_PROCESS_COUNT_DOUBLE_INDEX] =
+    sample.host.cpu.processCount ?? AE_V4_MISSING_METRIC_SENTINEL
   const embedBase = HOST_IO_FIELD_ORDER.length
   doubles[embedBase] = nic0?.receiveBytesPerSecond ?? AE_V4_MISSING_METRIC_SENTINEL
   doubles[embedBase + 1] = nic0?.transmitBytesPerSecond ?? AE_V4_MISSING_METRIC_SENTINEL
@@ -954,7 +962,10 @@ function assertFieldOrderInvariantsV4(): void {
     throw new TypeError('AE_V4_DOUBLE_INTERVAL_INDEX must be 19 (double20)')
   }
 
-  assertFieldOrderMatchesDescriptors('host.cpu', 'host.cpu', HOST_CPU_FIELD_ORDER)
+  assertFieldOrderMatchesDescriptors('host.cpu', 'host.cpu', [
+    ...HOST_CPU_FIELD_ORDER,
+    ...HOST_CPU_IO_OVERFLOW_FIELD_ORDER,
+  ])
   assertFieldOrderMatchesDescriptors('host.kernel', 'host.kernel', HOST_KERNEL_FIELD_ORDER)
   assertFieldOrderMatchesDescriptors('host.memory', 'host.memory', HOST_MEMORY_FIELD_ORDER)
   if (HOST_SYSTEM_FIELD_ORDER.length !== AE_V4_METRIC_DOUBLE_SLOT_COUNT) {
@@ -969,6 +980,11 @@ function assertFieldOrderInvariantsV4(): void {
   if (hostIoTotalSlots >= AE_V4_DOUBLE_INTERVAL_INDEX) {
     throw new TypeError(
       `host.io consumes ${hostIoTotalSlots} slots, colliding with the reserved interval slot (double20)`
+    )
+  }
+  if (HOST_IO_PROCESS_COUNT_DOUBLE_INDEX >= AE_V4_DOUBLE_INTERVAL_INDEX) {
+    throw new TypeError(
+      `host.cpu.processCount slot ${HOST_IO_PROCESS_COUNT_DOUBLE_INDEX} collides with the reserved interval slot (double20)`
     )
   }
 
@@ -1126,6 +1142,9 @@ export function doubleIndexForHostField(
   const ioIndex = HOST_IO_FIELD_ORDER.findIndex((ref) => ref.scope === scope && ref.field === field)
   if (ioIndex !== -1) {
     return { family: 'host.io', doubleIndex: ioIndex }
+  }
+  if (scope === 'host.cpu' && field === 'processCount') {
+    return { family: 'host.io', doubleIndex: HOST_IO_PROCESS_COUNT_DOUBLE_INDEX }
   }
   if (scope === 'cpuDetail') {
     const scalarIndex = CPU_DETAIL_SCALAR_FIELD_ORDER.indexOf(

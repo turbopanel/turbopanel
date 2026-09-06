@@ -53,6 +53,7 @@ const ENTITY_FIELD_SPECS: EntityFieldSpec[] = [
       'maxCoreBusyPercent',
       'procsRunning',
       'procsBlocked',
+      'processCount',
     ] satisfies (keyof HostCpuMetricsV4)[],
   },
   {

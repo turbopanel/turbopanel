@@ -99,6 +99,7 @@ function sampleV4(overrides: {
         maxCoreBusyPercent: null,
         procsRunning: null,
         procsBlocked: null,
+        processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {

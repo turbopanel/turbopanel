@@ -44,6 +44,8 @@ export type HostCpuMetricsV4 = {
   maxCoreBusyPercent: number | null
   procsRunning: number | null
   procsBlocked: number | null
+  /** Total `/proc` PID directories — not the run-queue `procs_running` gauge. */
+  processCount: number | null
 }
 
 export type HostKernelMetricsV4 = {
@@ -527,6 +529,7 @@ function sanitizeHostCpu(raw: RawInput<HostCpuMetricsV4>): HostCpuMetricsV4 {
     maxCoreBusyPercent: clampPercent(sanitizeFinite(raw.maxCoreBusyPercent)),
     procsRunning: sanitizeFinite(raw.procsRunning),
     procsBlocked: sanitizeFinite(raw.procsBlocked),
+    processCount: sanitizeFinite(raw.processCount),
   }
 }
 

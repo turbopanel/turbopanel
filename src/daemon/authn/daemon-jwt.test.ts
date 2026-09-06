@@ -228,6 +228,22 @@ test("verifyDaemonJwt rejects invalid signature", async () => {
   assertEquals(await verifyDaemonJwt(`${header}.${payload}.${badSig}`, keyring), null);
 });
 
+test("verifyDaemonJwt returns null when a JWT part is not JSON", async () => {
+  const keyring = await createKeyring();
+  const notJson = base64urlEncode(encoder.encode("not-json"));
+  assertEquals(await verifyDaemonJwt(`${notJson}.payload.sig`, keyring), null);
+});
+
+test("verifyDaemonJwt returns null when signature bytes cannot be decoded", async () => {
+  const keyring = await createKeyring();
+  const issued = await issueDaemonJwt(
+    { sub: "server-1", kid: "key-1" },
+    keyring,
+  );
+  const [header, payload] = issued.token.split(".");
+  assertEquals(await verifyDaemonJwt(`${header}.${payload}.!!!!`, keyring), null);
+});
+
 test("issueDaemonJwt expiresAt matches exp claim", async () => {
   const keyring = await createKeyring();
   const nowMs = Date.parse("2026-08-05T12:00:00.000Z");

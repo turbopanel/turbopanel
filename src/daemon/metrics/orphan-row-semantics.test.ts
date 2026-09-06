@@ -61,7 +61,8 @@ const EMPTY_HOST_INPUT = {
     pressureSomePercent: null,
     maxCoreBusyPercent: null,
     procsRunning: null,
-    procsBlocked: null,
+        procsBlocked: null,
+        processCount: null,
   },
   kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
   memory: {

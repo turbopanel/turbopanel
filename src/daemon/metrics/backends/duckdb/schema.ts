@@ -60,20 +60,11 @@ export const METRIC_EVENTS_TABLE = 'server_metric_events'
 export const STATUS_EVENTS_TABLE = 'server_status_events'
 
 /**
- * Bumped whenever the physical DuckDB layout changes in a way existing rows
- * can't satisfy — DuckDB has no in-place schema-migration path here, so
- * `database.ts` compares this against a sidecar marker file on open and
- * wipes + rebuilds the store on mismatch rather than attempting to migrate
- * old rows in place. v4 wipes the entire v3 layout (single wide table →
- * multi-table) — pre-MVP, no data survives the cutover.
+ * Sidecar version written after a successful open. Pre-MVP: `openDuckDb`
+ * only runs `CREATE TABLE IF NOT EXISTS` for the current layout — it does
+ * not migrate or wipe older files. Bump when the layout changes so support
+ * can tell a stale local store from a current one.
  */
-// Bumped again (4 -> 5) for the `sample_sequence` -> `sequence` column
-// rename: a local dev store already opened under marker 4 has the old
-// column name and must be wiped, not mistaken for current.
-// Bumped again (5 -> 6) for the cpu/memory "detail families" phase: new
-// `server_cpu_hotspot_samples` / `server_cpu_core_samples` /
-// `server_memory_detail_samples` tables plus new host-global
-// `cpu_detail_*` columns on `server_host_samples`.
 export const DUCKDB_SCHEMA_MARKER_VERSION = 6
 
 // ---------------------------------------------------------------------------
@@ -111,6 +102,7 @@ const HOST_CPU_FIELDS: Record<keyof HostCpuMetricsV4, true> = {
   maxCoreBusyPercent: true,
   procsRunning: true,
   procsBlocked: true,
+  processCount: true,
 }
 
 const HOST_KERNEL_FIELDS: Record<keyof HostKernelMetricsV4, true> = {
@@ -154,8 +146,8 @@ const HOST_GROUP_FIELD_RECORDS: Record<HostMetricGroupV4, Record<string, true>> 
 }
 
 /**
- * Every `HostMetricsV4` leaf field, in declared group order — 30 entries
- * (10 + 2 + 7 + 9 + 2). Group coverage is compile-time exhaustive
+ * Every `HostMetricsV4` leaf field, in declared group order — 31 entries
+ * (11 + 2 + 7 + 9 + 2). Group coverage is compile-time exhaustive
  * (`HOST_GROUP_MARKERS` above is typed `Record<keyof HostMetricsV4, true>`);
  * field coverage within each group is compile-time exhaustive via that
  * group's own `Record<keyof T, true>` literal (`HOST_CPU_FIELDS` etc.) — a
@@ -575,12 +567,15 @@ export function buildSchemaStatements(): string[] {
 // single source of truth `store.ts` builds its parameterized INSERTs from.
 // ---------------------------------------------------------------------------
 
-export function hostSamplesInsertColumns(): string[] {
+function hostSamplesDoubleColumnNames(): string[] {
   return [
-    ...COMMON_METADATA_COLUMNS,
     ...HOST_METRIC_FIELD_REFS.map((ref) => hostMetricColumnName(ref.group, ref.field)),
     ...HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST.map(cpuDetailHostColumnName),
   ]
+}
+
+export function hostSamplesInsertColumns(): string[] {
+  return [...COMMON_METADATA_COLUMNS, ...hostSamplesDoubleColumnNames()]
 }
 
 export function networkSamplesInsertColumns(): string[] {

@@ -1016,15 +1016,16 @@ async function queryHostSeriesForRouteV4(
         }),
       }
     }
+    const hostResult = await store.queryHostSeries({
+      serverId: input.serverId,
+      metrics: input.selectors.hostCanonicalNames,
+      from: input.fromIso,
+      to: input.toIso,
+      resolutionSeconds: input.resolutionSeconds,
+    })
     return {
       ok: true,
-      hostResult: await store.queryHostSeries({
-        serverId: input.serverId,
-        metrics: input.selectors.hostCanonicalNames,
-        from: input.fromIso,
-        to: input.toIso,
-        resolutionSeconds: input.resolutionSeconds,
-      }),
+      hostResult,
     }
   } catch (err) {
     const message = metricsQueryErrorMessage(err)

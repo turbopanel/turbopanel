@@ -1,5 +1,6 @@
 import { assertEquals } from '@std/assert'
 import {
+  composeSourceDigest,
   parseContainerNamingInput,
   parseDefaultServerIdInput,
   parseProjectOptions,
@@ -36,6 +37,19 @@ test('parseProjectOptions drops invalid containerNaming and defaultServerId', ()
   assertEquals(parseProjectOptions({ defaultServerId: 'not-a-uuid' }), {})
   assertEquals(parseProjectOptions({ defaultServerId: null }), {})
   assertEquals(parseProjectOptions(null), {})
+})
+
+test('parseProjectOptions keeps a valid composeSource and drops a failed parse', async () => {
+  const sourceId = '00000000-0000-4000-8000-000000000001'
+  const seededDigest = await composeSourceDigest('services: {}\n')
+  const composeSource = {
+    sourceId,
+    path: 'compose.yaml',
+    seededCommitSha: 'a'.repeat(40),
+    seededDigest,
+  }
+  assertEquals(parseProjectOptions({ composeSource }).composeSource, composeSource)
+  assertEquals(parseProjectOptions({ composeSource: { sourceId: '' } }), {})
 })
 
 test('parseContainerNamingInput accepts uuid and custom only', () => {

@@ -97,6 +97,33 @@ test('enqueuePlatformCaTrustReconcile is a no-op when the fleet is empty', async
   assertEquals(envelopes, [])
 })
 
+test('enqueuePlatformCaTrustReconcileBestEffort logs when no servers are connected', async () => {
+  const { queue } = recordingQueue()
+  await enqueuePlatformCaTrustReconcileBestEffort({
+    db: unusedDb,
+    commandQueue: queue,
+    actorId: ACTOR,
+    readBundle: sampleBundle,
+    listServerIds: async () => [],
+    createCommand: async () => {
+      throw new TypeError('must not create a command without servers')
+    },
+  })
+})
+
+test('enqueuePlatformCaTrustReconcileBestEffort swallows non-Error throws', async () => {
+  const { queue } = recordingQueue()
+  await enqueuePlatformCaTrustReconcileBestEffort({
+    db: unusedDb,
+    commandQueue: queue,
+    actorId: ACTOR,
+    readBundle: async () => {
+      throw 'bundle missing'
+    },
+    listServerIds: async () => [SERVER_A],
+  })
+})
+
 test('enqueuePlatformCaTrustReconcileBestEffort swallows fan-out failures', async () => {
   const { queue } = recordingQueue()
   await enqueuePlatformCaTrustReconcileBestEffort({

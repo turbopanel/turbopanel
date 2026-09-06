@@ -183,6 +183,7 @@ it('no-sentinel: a sample with every host metric explicitly null never surfaces 
         maxCoreBusyPercent: null,
         procsRunning: null,
         procsBlocked: null,
+        processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {

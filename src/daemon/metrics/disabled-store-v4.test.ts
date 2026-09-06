@@ -1,4 +1,4 @@
-import { assertEquals } from '@std/assert'
+import { assertEquals, assertRejects } from '@std/assert'
 import { it } from '@std/testing/bdd'
 import { buildMetricsSampleV4 } from './contract-v4.ts'
 import { DisabledServerMetricsStoreV4 } from './disabled-store-v4.ts'
@@ -16,7 +16,8 @@ const NULL_HOST = {
     pressureSomePercent: null,
     maxCoreBusyPercent: null,
     procsRunning: null,
-    procsBlocked: null,
+        procsBlocked: null,
+        processCount: null,
   },
   kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
   memory: {
@@ -100,4 +101,39 @@ it('UnavailableServerMetricsStoreV4 writeStatusEvent is a no-op', () => {
 it('UnavailableServerMetricsStoreV4 carries its reason', () => {
   const store = new UnavailableServerMetricsStoreV4('DuckDB failed to open')
   assertEquals(store.reason, 'DuckDB failed to open')
+})
+
+it('UnavailableServerMetricsStoreV4 query methods reject with the store reason', async () => {
+  const store = new UnavailableServerMetricsStoreV4('backend down')
+  const range = {
+    from: '2026-01-01T00:00:00.000Z',
+    to: '2026-01-01T01:00:00.000Z',
+  }
+  await assertRejects(
+    () =>
+      store.queryEntitySeries({
+        serverId: 'srv-1',
+        family: 'network',
+        entityIds: ['eth0'],
+        metrics: ['receiveBytesPerSecond'],
+        ...range,
+      }),
+    Error,
+    'backend down',
+  )
+  await assertRejects(
+    () =>
+      store.queryEntityIdsSeen({
+        serverId: 'srv-1',
+        family: 'network',
+        ...range,
+      }),
+    Error,
+    'backend down',
+  )
+  await assertRejects(
+    () => store.queryMetricEvents({ serverId: 'srv-1', ...range }),
+    Error,
+    'backend down',
+  )
 })

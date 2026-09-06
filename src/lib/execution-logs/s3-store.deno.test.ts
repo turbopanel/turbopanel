@@ -107,6 +107,173 @@ describe('S3ExecutionLogStore', () => {
       fake.restore()
     }
   })
+
+  it('addresses objects virtual-hosted when forcePathStyle is false', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: Request[] = []
+    globalThis.fetch = (input: URL | RequestInfo, init?: RequestInit) => {
+      const request = new Request(input as RequestInfo, init)
+      requests.push(request)
+      return Promise.resolve(new Response(null, { status: 200 }))
+    }
+    try {
+      await new S3ExecutionLogStore({
+        ...CONFIG,
+        forcePathStyle: false,
+      }).appendChunk('cmd-vhost', {
+        seq: 0,
+        bytes: new TextEncoder().encode('a'),
+      })
+      const put = requests.find((request) => request.method === 'PUT')
+      assert(put)
+      const url = new URL(put.url)
+      assertEquals(url.host, 'transcripts.s3.example.test')
+      assert(url.pathname.startsWith('/execution-logs/'))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('throws when PUT is rejected', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (input: URL | RequestInfo, init?: RequestInit) => {
+      const request = new Request(input as RequestInfo, init)
+      if (request.method === 'PUT') {
+        return Promise.resolve(new Response('denied', { status: 403 }))
+      }
+      return Promise.resolve(new Response('missing', { status: 404 }))
+    }
+    try {
+      let failed = false
+      try {
+        await new S3ExecutionLogStore(CONFIG).appendChunk('cmd-put', {
+          seq: 0,
+          bytes: new TextEncoder().encode('a'),
+        })
+      } catch (error) {
+        failed = error instanceof Error && error.message.includes('S3 PUT')
+      }
+      assertEquals(failed, true)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('throws when GET is rejected after a successful write', async () => {
+    const fake = installFakeS3()
+    try {
+      const store = new S3ExecutionLogStore(CONFIG)
+      await store.appendChunk('cmd-get', {
+        seq: 0,
+        bytes: new TextEncoder().encode('a'),
+      })
+      const original = globalThis.fetch
+      globalThis.fetch = () => Promise.resolve(new Response('boom', { status: 500 }))
+      try {
+        let failed = false
+        try {
+          await store.exists('cmd-get')
+        } catch (error) {
+          failed = error instanceof Error && error.message.includes('S3 GET')
+        }
+        assertEquals(failed, true)
+      } finally {
+        globalThis.fetch = original
+      }
+    } finally {
+      fake.restore()
+    }
+  })
+
+  it('throws when LIST is rejected', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = () => Promise.resolve(new Response('down', { status: 503 }))
+    try {
+      let failed = false
+      try {
+        await new S3ExecutionLogStore(CONFIG).sweepExpired({
+          now: new Date('2020-01-01T00:00:00.000Z'),
+          retentionDays: 1,
+          limit: 1,
+        })
+      } catch (error) {
+        failed = error instanceof Error && error.message.includes('S3 LIST')
+      }
+      assertEquals(failed, true)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('throws when DELETE is rejected for a stored transcript', async () => {
+    const fake = installFakeS3()
+    try {
+      const store = new S3ExecutionLogStore(CONFIG)
+      await store.appendChunk('cmd-del', {
+        seq: 0,
+        bytes: new TextEncoder().encode('a'),
+      })
+      const original = globalThis.fetch
+      globalThis.fetch = (input: URL | RequestInfo, init?: RequestInit) => {
+        const request = new Request(input as RequestInfo, init)
+        if (request.method === 'DELETE') {
+          return Promise.resolve(new Response('busy', { status: 409 }))
+        }
+        return original(input as RequestInfo, init)
+      }
+      try {
+        let failed = false
+        try {
+          await store.delete('cmd-del')
+        } catch (error) {
+          failed = error instanceof Error && error.message.includes('S3 DELETE')
+        }
+        assertEquals(failed, true)
+      } finally {
+        globalThis.fetch = original
+      }
+    } finally {
+      fake.restore()
+    }
+  })
+
+  it('follows ListObjectsV2 continuation tokens until the page ends', async () => {
+    const originalFetch = globalThis.fetch
+    let listCalls = 0
+    globalThis.fetch = (input: URL | RequestInfo, init?: RequestInit) => {
+      const request = new Request(input as RequestInfo, init)
+      const url = new URL(request.url)
+      if (request.method === 'GET' && url.searchParams.get('list-type') === '2') {
+        listCalls += 1
+        if (url.searchParams.get('continuation-token') === 'page-2') {
+          return Promise.resolve(
+            new Response(
+              '<ListBucketResult><Contents><Key>b</Key></Contents></ListBucketResult>',
+              { status: 200 },
+            ),
+          )
+        }
+        return Promise.resolve(
+          new Response(
+            '<ListBucketResult><Contents><Key>a</Key></Contents>' +
+              '<NextContinuationToken>page-2</NextContinuationToken></ListBucketResult>',
+            { status: 200 },
+          ),
+        )
+      }
+      return Promise.resolve(new Response(null, { status: 200 }))
+    }
+    try {
+      await new S3ExecutionLogStore(CONFIG).sweepExpired({
+        now: new Date('2020-01-01T00:00:00.000Z'),
+        retentionDays: 1,
+        limit: 10,
+      })
+      assertEquals(listCalls >= 2, true)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })
 
 describe('parseS3ListKeys', () => {
@@ -124,5 +291,14 @@ describe('parseS3ListKeys', () => {
     const parsed = parseS3ListKeys('<ListBucketResult></ListBucketResult>')
     assertEquals(parsed.keys, [])
     assertEquals(parsed.nextContinuationToken, null)
+  })
+
+  it('decodes the remaining XML entities in keys and tokens', () => {
+    const parsed = parseS3ListKeys(
+      '<ListBucketResult><Contents><Key>a&lt;b&gt;c&quot;d&apos;e</Key></Contents>' +
+        '<NextContinuationToken>t&amp;ok</NextContinuationToken></ListBucketResult>',
+    )
+    assertEquals(parsed.keys, ['a<b>c"d\'e'])
+    assertEquals(parsed.nextContinuationToken, 't&ok')
   })
 })

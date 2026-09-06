@@ -10,8 +10,9 @@ logical id per entity, every leaf value is `number | null` (missing is always
 `null`, never coerced to `0`), and no value's presence is inferred from
 bitmask/part membership.
 
-Root context: `../../../AGENTS.md`. Daemon cell: `../cell/AGENTS.md`. Human
-docs + AE cost model:
+Root context: `../../../AGENTS.md`. Daemon cell: `../cell/AGENTS.md`. Operator
+glossary (what each console chart means):
+`../../../../website/docs/metrics/`. Human docs + AE cost model:
 `../../../../website/docs/architecture/server-metrics.mdx`.
 
 **v3 is fully retired.** The v3 contract (`contract.ts`, `validation.ts`,
@@ -48,8 +49,8 @@ allow it, see below), or both.
 
 | Family                   | Shape                                                                                                               | Gating                                                                                                                                                                                                                   |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `host.system`            | single row: `cpu` + `kernel` + `memory` fields                                                                      | universal baseline — always emitted                                                                                                                                                                                      |
-| `host.io`                | single row: `storage` + `network` fields, plus embedded primary NIC(s) when `SlotMapping` resolves them (see below) | universal baseline — always emitted                                                                                                                                                                                      |
+| `host.system`            | single row: `cpu` + `kernel` + `memory` fields (except `host.cpu.processCount`)                                      | universal baseline — always emitted                                                                                                                                                                                      |
+| `host.io`                | single row: `storage` + `network` fields, plus embedded primary NIC(s) when `SlotMapping` resolves them, plus `host.cpu.processCount` in the first reserved double (host.system's 19 slots are full) | universal baseline — always emitted                                                                                                                                                                                      |
 | `network`                | one row per unaccounted-for network device                                                                          | presence-gated (only devices not embedded in `host.io` and not a fabric device page)                                                                                                                                     |
 | `filesystem`             | one row per filesystem beyond the root filesystem                                                                   | presence-gated + capability-gated (`extraFilesystemSlots`)                                                                                                                                                               |
 | `block`                  | one row per block device (per-disk detail)                                                                          | presence-gated + capability-gated (`detailedBlockDeviceSlots`, default 1 — same "base entitlement" pattern as `gpuSlots`; collector emits `isServiceDevice` devices only)                                                |
@@ -261,13 +262,14 @@ column) — missing is a real SQL `NULL`, never a sentinel or a part-membership
 flag. Entity tables carry arbitrary cardinality per sample (one row per reported
 entity), unlike v3's fixed-width part tables.
 
-**Schema-version marker + wipe-on-stale** (`database.ts`): DuckDB has no
-in-place migration path for a breaking layout change, so `openDuckDb` compares
-`DUCKDB_SCHEMA_MARKER_VERSION` against a sidecar `schema-version` file on every
-open. A missing database is a fresh install (never wiped); an existing database
-with a missing/mismatched marker wipes `metrics.duckdb` (+ `.wal`) and the whole
-`parquet/` tree together, then rebuilds from scratch. The marker is written only
-after a fully successful open.
+**Schema on open** (`database.ts`): `CREATE TABLE IF NOT EXISTS` /
+`CREATE INDEX IF NOT EXISTS` for the current layout. Pre-MVP: no in-place
+column migration and no boot-time wipe. Delete `metrics.duckdb` (and
+`parquet/` for a clean archive) when a local file predates the current
+columns. Configured retention still prunes expired points
+(`TURBOPANEL_SERVER_METRICS_RETENTION_DAYS`, default 90). Analytics Engine
+has no SQL `DELETE`; hosted points age out after Cloudflare's ~3-month
+retention. The sidecar marker is written after a successful open.
 
 **Daily Parquet archive**, partitioned per family
 (`parquet/<family-table>/year=YYYY/month=MM/day=DD/*.parquet`; timer armed by
@@ -359,7 +361,8 @@ platform default → org (`organization.options.metricsCapabilityPlan`) → serv
 (`server.options.metricsCapabilityPlan`), mirroring
 `resolveEffectiveCpuThermalLimits`.
 
-UI charts: **`../ui/AGENTS.md`** (Server metrics). Human docs + AE cost model:
+UI charts: **`../ui/AGENTS.md`** (Server metrics). Operator glossary:
+**`../website/docs/metrics/`**. Human docs + AE cost model:
 **`../website/docs/architecture/server-metrics.mdx`**.
 
 ## Durable invariants

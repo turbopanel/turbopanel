@@ -76,6 +76,7 @@ function fixtureInput(): MetricsSampleV4Input {
         maxCoreBusyPercent: 99,
         procsRunning: 3,
         procsBlocked: 0,
+        processCount: 42,
       },
       kernel: {
         fileHandlesUsedPercent: 12,
@@ -159,6 +160,7 @@ test('buildMetricsSampleV4 sanitizes the shared cross-repo fixture', () => {
   assertEquals(sample.type, 'metrics')
   assertEquals(sample.metadata.version, 4)
   assertEquals(sample.host.cpu.pressureSomePercent, 100)
+  assertEquals(sample.host.cpu.processCount, 42)
   assertEquals(sample.host.kernel.conntrackUsedPercent, null)
   assertEquals(sample.host.memory.swapInBytesPerSecond, null)
   assertEquals(sample.host.memory.swapOutBytesPerSecond, null)

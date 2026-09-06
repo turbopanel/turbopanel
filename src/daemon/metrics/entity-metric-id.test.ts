@@ -18,6 +18,11 @@ const ROUND_TRIP_CASES: {
     id: 'host.cpu.busyPercent',
   },
   {
+    name: 'host.cpu processCount singleton',
+    selector: { scope: 'host.cpu', field: 'processCount' },
+    id: 'host.cpu.processCount',
+  },
+  {
     name: 'host.memory singleton',
     selector: { scope: 'host.memory', field: 'swapUsedBytes' },
     id: 'host.memory.swapUsedBytes',

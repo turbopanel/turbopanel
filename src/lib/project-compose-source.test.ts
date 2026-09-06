@@ -95,3 +95,15 @@ test('parseComposeSourceInput scopes the source to the organization', async () =
   assertEquals(parseComposeSourceInput(base, new Set(['other'])).ok, false)
   assertEquals(parseComposeSourceInput(base, new Set([base.sourceId])).ok, true)
 })
+
+test('parseComposeSourceInput rejects an empty sourceId and an oversized ref', async () => {
+  const base = await seeded()
+  assertEquals(
+    parseComposeSourceInput({ ...base, sourceId: '' }).ok,
+    false,
+  )
+  assertEquals(
+    parseComposeSourceInput({ ...base, ref: 'x'.repeat(256) }).ok,
+    false,
+  )
+})

@@ -20,6 +20,8 @@ import {
   MAX_DAEMON_WS_REPO_READ_ENTRIES,
   MAX_DAEMON_WS_REPO_READ_PATHS,
   MAX_DAEMON_WS_RESULT_JSON_BYTES,
+  MAX_DAEMON_WS_TOPOLOGY_REPORT_JSON_BYTES,
+  type DaemonInboundEnvelope,
   outboundEnvelopeToWireMessage,
   parseDaemonBuildInfo,
   parseDaemonMessage,
@@ -1476,3 +1478,238 @@ it('validateDaemonInboundEnvelope accepts a metrics-live-start-result', () => {
   })
   assertEquals(okResult.ok, true)
 })
+
+it('validateDaemonInboundFrame accepts a topology-report', () => {
+  const result = validateDaemonInboundFrame(
+    JSON.stringify({
+      type: 'topology-report',
+      at: VALID_AT,
+      generation: 1,
+      bootGeneration: 0,
+      snapshot: { devices: [] },
+    }),
+  )
+  assertEquals(result.ok, true)
+})
+
+it('validateDaemonInboundFrame rejects topology-report field shapes', () => {
+  const base = {
+    type: 'topology-report',
+    at: VALID_AT,
+    generation: 1,
+    bootGeneration: 0,
+    snapshot: {},
+  }
+  assertEquals(
+    validateDaemonInboundFrame(JSON.stringify({ ...base, at: 'not-a-timestamp' })).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(JSON.stringify({ ...base, generation: -1 })).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(JSON.stringify({ ...base, bootGeneration: 1.5 })).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        ...base,
+        snapshot: { pad: 'x'.repeat(MAX_DAEMON_WS_TOPOLOGY_REPORT_JSON_BYTES + 1) },
+      }),
+    ).ok,
+    false,
+  )
+})
+
+it('validateDaemonInboundFrame rejects remaining result-envelope edges', () => {
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: 'managed-logs-result',
+        id: 'req-1',
+        at: VALID_AT,
+        logs: 12,
+      }),
+    ).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: 'repo-read-result',
+        id: 'req-1',
+        at: 'not-a-timestamp',
+        ok: true,
+        files: [],
+      }),
+    ).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: 'repo-read-result',
+        id: 'req-1',
+        at: VALID_AT,
+        ok: 'yes',
+        files: [],
+      }),
+    ).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: 'repo-default-branch-result',
+        id: 'req-1',
+        at: VALID_AT,
+        ok: 'yes',
+      }),
+    ).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: 'repo-default-branch-result',
+        id: 'req-1',
+        at: VALID_AT,
+        ok: true,
+        defaultBranch: 12,
+      }),
+    ).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: 'managed-ha-event',
+        managedId: '00000000-0000-4000-8000-000000000001',
+        at: 'not-a-timestamp',
+      }),
+    ).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: 'fabric-paths-result',
+        id: 'req-1',
+        at: VALID_AT,
+        paths: [42],
+      }),
+    ).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: 'fabric-paths-result',
+        id: 'req-1',
+        at: VALID_AT,
+        paths: [{ publicKey: 'not-a-key', health: 'healthy' }],
+      }),
+    ).ok,
+    false,
+  )
+})
+
+it('validateDaemonInboundEnvelope rejects forged result and unknown kinds', () => {
+  const circular: Record<string, unknown> = {}
+  circular.self = circular
+  assertEquals(
+    validateDaemonInboundEnvelope({
+      kind: 'command-outcome',
+      requestId: 'req-1',
+      at: VALID_AT,
+      ok: true,
+      result: circular,
+    }).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundEnvelope({
+      kind: 'command-outcome',
+      requestId: 'req-1',
+      at: VALID_AT,
+      ok: true,
+      result: () => {},
+    }).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundEnvelope({
+      kind: 'command-outcome',
+      requestId: 'req-1',
+      at: VALID_AT,
+      ok: true,
+      error: 12,
+    } as unknown as Parameters<typeof validateDaemonInboundEnvelope>[0]).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundEnvelope({
+      kind: 'command-ack',
+      requestId: 'req-1',
+      at: VALID_AT,
+      daemonReceivedAt: 'bad',
+    }).ok,
+    false,
+  )
+  const oversized = 'x'.repeat(MAX_DAEMON_WS_REPO_READ_BYTES + 1)
+  assertEquals(
+    validateDaemonInboundEnvelope({
+      kind: 'repo-read-result',
+      requestId: 'req-1',
+      at: VALID_AT,
+      ok: true,
+      files: [{ path: 'compose.yaml', found: true, content: oversized }],
+    }).ok,
+    false,
+  )
+  const extraEntries = Array.from(
+    { length: MAX_DAEMON_WS_REPO_READ_ENTRIES + 1 },
+    (_, i) => ({ path: `file-${i}`, kind: 'file' as const }),
+  )
+  assertEquals(
+    validateDaemonInboundEnvelope({
+      kind: 'repo-read-result',
+      requestId: 'req-1',
+      at: VALID_AT,
+      ok: true,
+      files: [],
+      entries: extraEntries,
+    }).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundEnvelope({
+      kind: 'repo-default-branch-result',
+      requestId: 'req-1',
+      at: VALID_AT,
+      ok: true,
+      error: 'x'.repeat(MAX_DAEMON_WS_ERROR_CHARS + 1),
+    }).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundEnvelope({
+      kind: 'unknown-kind',
+      requestId: 'req-1',
+      at: VALID_AT,
+    } as unknown as DaemonInboundEnvelope).ok,
+    false,
+  )
+  assertEquals(
+    validateDaemonInboundEnvelope({
+      kind: 'fabric-paths-result',
+      requestId: 'req-1',
+      at: VALID_AT,
+      paths: [{ publicKey: 'not-a-key', health: 'healthy' }],
+    }).ok,
+    false,
+  )
+})
+

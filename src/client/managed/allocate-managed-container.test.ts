@@ -2,7 +2,10 @@ import { assertEquals, assertRejects } from '@std/assert'
 import type { Db } from '../../db.ts'
 import { managedContainerName } from '../../lib/naming.ts'
 import {
+  deleteManagedContainerAllocation,
   ensureManagedContainerAllocation,
+  findManagedEngineServiceId,
+  pruneManagedContainerOrdinals,
   pruneManagedContainersOutsideMemberSet,
 } from './allocate-managed-container.ts'
 
@@ -565,4 +568,70 @@ test('ensureManagedContainerAllocation rejects non-positive ordinal', async () =
     TypeError,
     'Invalid managed container ordinal',
   )
+})
+
+test('pruneManagedContainersOutsideMemberSet is a no-op for an empty ordinal set', async () => {
+  const db = {
+    delete: () => {
+      throw new TypeError('should not delete when no ordinals remain')
+    },
+  } as unknown as Db
+  await pruneManagedContainersOutsideMemberSet(db, 'svc-1', [])
+})
+
+test('deleteManagedContainerAllocation deletes the pending replica row', async () => {
+  let deleted = false
+  const db = {
+    delete: () => ({
+      where: () => {
+        deleted = true
+        return Promise.resolve()
+      },
+    }),
+  } as unknown as Db
+  await deleteManagedContainerAllocation(db, { serviceId: 'svc-1', ordinal: 2 })
+  assertEquals(deleted, true)
+})
+
+test('findManagedEngineServiceId returns the matching service or null', async () => {
+  const found = {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: () => Promise.resolve([{ id: 'svc-engine' }]),
+        }),
+      }),
+    }),
+  } as unknown as Db
+  assertEquals(
+    await findManagedEngineServiceId(found, 'env-1', 'postgres'),
+    'svc-engine',
+  )
+
+  const missing = {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: () => Promise.resolve([]),
+        }),
+      }),
+    }),
+  } as unknown as Db
+  assertEquals(await findManagedEngineServiceId(missing, 'env-1', 'postgres'), null)
+})
+
+test('pruneManagedContainerOrdinals deletes listed pending ordinals', async () => {
+  let deleted = false
+  const db = {
+    delete: () => ({
+      where: () => {
+        deleted = true
+        return Promise.resolve()
+      },
+    }),
+  } as unknown as Db
+  await pruneManagedContainerOrdinals(db, 'svc-1', [])
+  assertEquals(deleted, false)
+  await pruneManagedContainerOrdinals(db, 'svc-1', [1, 2])
+  assertEquals(deleted, true)
 })
