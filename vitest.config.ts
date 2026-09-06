@@ -16,8 +16,7 @@ export default defineConfig({
       miniflare: {
         isolatedStorage: false,
         bindings: {
-          TURBOPANEL_SECRETS:
-            '1:aa_daemon_cell_vitest_secret_value_aaaa_b_pad_abcdefghij0',
+          TURBOPANEL_SECRETS: '1:aa_daemon_cell_vitest_secret_value_aaaa_b_pad_abcdefghij0',
           // Construct-time DO binding — runtime `env.TURBOPANEL_DAEMON_DEBUG = …`
           // in tests does not update the Durable Object's env snapshot.
           TURBOPANEL_DAEMON_DEBUG: '1',
@@ -32,7 +31,7 @@ export default defineConfig({
     alias: {
       '@turbopanel/email/smtp-sender': path.resolve(
         rootDir,
-        './src/lib/email/smtp/smtp-sender-shim.ts',
+        './src/lib/email/smtp/smtp-sender-shim.ts'
       ),
     },
   },
@@ -48,7 +47,7 @@ export default defineConfig({
       'src/client/authn/signup-validation.test.ts',
       'src/client/authn/data-encryption.test.ts',
       'src/client/authn/password.test.ts',
-      'src/daemon/metrics/validation.test.ts',
+      'src/daemon/metrics/validation-v4.test.ts',
       'mailer/rate-limiter.test.ts',
       // Hyperdrive fresh-per-request / close guards (Istanbul covers workers-bindings.ts).
       // Keep out of scripts/test-coverage.sh Deno LCOV — Workers-pool only.

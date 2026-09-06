@@ -1,10 +1,9 @@
 import { assertEquals, assertStringIncludes } from '@std/assert'
+import { METRIC_EVENT_KINDS_V4, METRICS_SCHEMA_VERSION_V4 } from '../metrics/contract-v4.ts'
 import {
-  HOST_METRIC_KEYS,
-  METRIC_PARTS,
-  METRICS_SCHEMA_VERSION,
-  type HostMetricsDimensions,
-} from '../metrics/contract.ts'
+  HOST_METRICS_METRIC_DESCRIPTORS_V4,
+  type MetricEntityScopeV4,
+} from '../metrics/metric-descriptors-v4.ts'
 import { metricsPaths, metricsSchemas } from './metrics.ts'
 
 /**
@@ -15,95 +14,157 @@ import { metricsPaths, metricsSchemas } from './metrics.ts'
  */
 const test = Deno.test.bind(Deno)
 
-/**
- * Every wire dimension the daemon can send. `satisfies` makes this fail to
- * compile when `HostMetricsDimensions` gains or loses a field, so the OpenAPI
- * document cannot drift from the contract silently.
- */
-const DIMENSION_KEYS = {
-  schemaVersion: true,
-  collectionMode: true,
-  runtimeMode: true,
-  hardwareProfileGeneration: true,
-  trafficSources: true,
-} as const satisfies Record<keyof HostMetricsDimensions, true>
+type PropertySchema = {
+  required?: string[]
+  properties: Record<string, { const?: unknown; enum?: unknown[] }>
+  additionalProperties?: boolean
+}
 
-type FrameSchema = {
+type SampleSchema = {
   required: string[]
   properties: {
-    version: { const: number }
-    parts: { items: { enum: string[] } }
-    metrics: { required?: string[]; properties: Record<string, unknown> }
-    dimensions: {
-      required: string[]
-      properties: Record<
-        string,
-        {
-          const?: number
-          enum?: string[]
-          required?: string[]
-          properties?: Record<string, unknown>
-        }
-      >
+    type: { const: string }
+    metadata: PropertySchema
+    host: PropertySchema & {
+      properties: Record<string, { properties: Record<string, unknown> }>
     }
+    networks: { items: PropertySchema }
+    filesystems: { items: PropertySchema }
+    blockDevices: { items: PropertySchema }
+    gpus: { items: PropertySchema }
+    hardwareSignals: { items: PropertySchema }
+    ingressSources: { items: PropertySchema }
+    databaseProxies: { items: PropertySchema }
+    events: { items: { $ref: string } }
+    cpuDetail: PropertySchema & {
+      properties: { hotspots: { items: PropertySchema } }
+    }
+    memoryDetail: PropertySchema
+    cpuCoreLive: { items: PropertySchema }
   }
 }
 
-const frame = metricsSchemas.DaemonHostMetricsFrame as unknown as FrameSchema
+const sample = metricsSchemas.DaemonMetricsSampleV4 as unknown as SampleSchema
+const event = metricsSchemas.DaemonMetricEventV4 as unknown as PropertySchema
 
-test('DaemonHostMetricsFrame documents the v3 wire version', () => {
-  assertEquals(METRICS_SCHEMA_VERSION, 3)
-  assertEquals(frame.properties.version.const, METRICS_SCHEMA_VERSION)
+function fieldNamesForScope(scope: MetricEntityScopeV4): string[] {
+  return Object.values(HOST_METRICS_METRIC_DESCRIPTORS_V4)
+    .filter((descriptor) => descriptor.entityScope === scope)
+    .map((descriptor) => descriptor.fieldName)
+    .sort()
+}
+
+test('DaemonMetricsSampleV4 documents the v4 wire version and required top-level fields', () => {
+  assertEquals(METRICS_SCHEMA_VERSION_V4, 4)
+  assertEquals(sample.properties.type.const, 'metrics')
+  assertEquals(sample.properties.metadata.properties.version!.const, METRICS_SCHEMA_VERSION_V4)
+  assertEquals(sample.required.includes('metadata'), true)
+  assertEquals(sample.required.includes('host'), true)
   assertEquals(
-    frame.properties.dimensions.properties.schemaVersion!.const,
-    METRICS_SCHEMA_VERSION,
+    [
+      'networks',
+      'filesystems',
+      'blockDevices',
+      'gpus',
+      'hardwareSignals',
+      'ingressSources',
+      'databaseProxies',
+      'events',
+    ].every((field) => sample.required.includes(field)),
+    true
+  )
+  // Never a v3-shaped field.
+  assertEquals('parts' in sample.properties, false)
+  assertEquals('dimensions' in sample.properties, false)
+})
+
+test('DaemonMetricsSampleV4 host groups match the v4 entity-scope descriptor set exactly', () => {
+  const groups: Record<string, MetricEntityScopeV4> = {
+    cpu: 'host.cpu',
+    kernel: 'host.kernel',
+    memory: 'host.memory',
+    storage: 'host.storage',
+    network: 'host.network',
+  }
+  for (const [group, scope] of Object.entries(groups)) {
+    assertEquals(
+      Object.keys(sample.properties.host.properties[group]!.properties).sort(),
+      fieldNamesForScope(scope)
+    )
+  }
+})
+
+test('ingressSources / databaseProxies entities are keyed by sourceId, not sourceKind', () => {
+  assertEquals(sample.properties.ingressSources.items.required, ['sourceId', 'sourceKind'])
+  assertEquals(sample.properties.databaseProxies.items.required, ['sourceId', 'sourceKind'])
+  assertEquals(
+    Object.keys(sample.properties.ingressSources.items.properties).sort(),
+    ['sourceId', 'sourceKind', ...fieldNamesForScope('ingress')].sort()
+  )
+  assertEquals(
+    Object.keys(sample.properties.databaseProxies.items.properties).sort(),
+    ['sourceId', 'sourceKind', ...fieldNamesForScope('databaseProxy')].sort()
   )
 })
 
-test('DaemonHostMetricsFrame requires `parts` and documents every declarable part', () => {
-  assertEquals(frame.required.includes('parts'), true)
+test('per-entity array items match their v4 entity-scope descriptor set exactly', () => {
+  const cases: [keyof SampleSchema['properties'], string[], MetricEntityScopeV4][] = [
+    ['networks', ['deviceId'], 'network'],
+    ['filesystems', ['filesystemId'], 'filesystem'],
+    ['blockDevices', ['deviceId'], 'block'],
+    ['gpus', ['gpuId'], 'gpu'],
+    ['hardwareSignals', ['signalId', 'kind'], 'hardwareSignal'],
+  ]
+  for (const [field, idFields, scope] of cases) {
+    const items = (sample.properties[field] as { items: PropertySchema }).items
+    assertEquals([...items.required!].sort(), [...idFields].sort())
+    assertEquals(
+      Object.keys(items.properties).sort(),
+      [...idFields, ...fieldNamesForScope(scope)].sort()
+    )
+  }
+})
+
+test('events reference DaemonMetricEventV4, which documents every MetricEventKindV4', () => {
+  assertEquals(sample.properties.events.items.$ref, '#/components/schemas/DaemonMetricEventV4')
+  assertEquals(event.required, ['eventId', 'at', 'kind', 'severity'])
+  assertEquals([...event.properties.kind!.enum!].sort(), [...METRIC_EVENT_KINDS_V4].sort())
+  assertEquals(event.properties.severity!.enum, ['info', 'warning', 'critical'])
+})
+
+test('cpuDetail documents its scalar fields plus a required hotspots array scoped to cpuHotspot', () => {
+  assertEquals(sample.properties.cpuDetail.required, ['hotspots'])
   assertEquals(
-    [...frame.properties.parts.items.enum].sort(),
-    [...METRIC_PARTS].sort(),
+    Object.keys(sample.properties.cpuDetail.properties).sort(),
+    ['hotspots', ...fieldNamesForScope('cpuDetail')].sort()
+  )
+  const hotspotItems = sample.properties.cpuDetail.properties.hotspots.items
+  assertEquals(hotspotItems.required, ['coreId'])
+  assertEquals(
+    Object.keys(hotspotItems.properties).sort(),
+    ['coreId', ...fieldNamesForScope('cpuHotspot')].sort()
   )
 })
 
-test('DaemonHostMetricsFrame documents every v3 metric key as optional (part-gated)', () => {
-  // v3 `metrics` only carries keys whose part was declared in `parts` — no
-  // key is unconditionally required at the wire-frame level.
-  assertEquals(frame.properties.metrics.required, undefined)
+test('memoryDetail documents exactly its flat scalar field set (no entity id — host-singleton)', () => {
   assertEquals(
-    Object.keys(frame.properties.metrics.properties),
-    [...HOST_METRIC_KEYS],
+    Object.keys(sample.properties.memoryDetail.properties).sort(),
+    fieldNamesForScope('memoryDetail')
   )
 })
 
-test('DaemonHostMetricsFrame dimensions match the v3 contract', () => {
-  assertEquals(frame.properties.dimensions.required, [
-    'schemaVersion',
-    'collectionMode',
-    'hardwareProfileGeneration',
-    'trafficSources',
-  ])
+test('cpuCoreLive documents one entry per online logical core, scoped to cpuCore', () => {
+  const items = sample.properties.cpuCoreLive.items
+  assertEquals(items.required, ['coreId'])
   assertEquals(
-    frame.properties.dimensions.properties.collectionMode!.enum,
-    ['baseline', 'live'],
-  )
-  assertEquals(
-    frame.properties.dimensions.properties.trafficSources!.required,
-    ['caddy', 'proxysql'],
-  )
-  // Documented properties cover exactly the contract's dimension fields,
-  // optional `runtimeMode` included.
-  assertEquals(
-    Object.keys(frame.properties.dimensions.properties).sort(),
-    Object.keys(DIMENSION_KEYS).sort(),
+    Object.keys(items.properties).sort(),
+    ['coreId', ...fieldNamesForScope('cpuCore')].sort()
   )
 })
 
-test('metrics path describes the v3 ingest frame', () => {
+test('metrics path describes the v4 entity-scoped ingest sample', () => {
   const path = metricsPaths['/api/daemon/v1/metrics'] as {
     post: { description: string }
   }
-  assertStringIncludes(path.post.description, 'v3 host-metrics frame')
+  assertStringIncludes(path.post.description, 'v4 entity-scoped metrics sample')
 })

@@ -7,21 +7,19 @@
  * module-scoped sink pattern (and its safety rationale).
  */
 
-import type { ServerMetricsStore } from "./types.ts";
+import type { ServerMetricsStoreV4 } from './types-v4.ts'
 
-let activeStore: ServerMetricsStore | null = null;
+let activeStore: ServerMetricsStoreV4 | null = null
 
-export function setActiveServerMetricsStore(
-  store: ServerMetricsStore | null,
-): void {
-  activeStore = store;
+export function setActiveServerMetricsStore(store: ServerMetricsStoreV4 | null): void {
+  activeStore = store
 }
 
-export function getActiveServerMetricsStore(): ServerMetricsStore | null {
-  return activeStore;
+export function getActiveServerMetricsStore(): ServerMetricsStoreV4 | null {
+  return activeStore
 }
 
 /** Test seam: clear the registered store. */
 export function resetActiveServerMetricsStoreForTests(): void {
-  activeStore = null;
+  activeStore = null
 }

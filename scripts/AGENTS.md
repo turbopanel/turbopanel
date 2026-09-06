@@ -4,6 +4,15 @@ Moved from the root `AGENTS.md` (**Documentation discipline → SonarQube**).
 Covers the SonarCloud CI job, the Vitest+Deno LCOV merge in
 `test-coverage.sh`, and the analysis-scope rules.
 
+**When adding, renaming, or deleting a `*.test.ts`:** claim it in exactly one
+runner, then run **`pnpm check:test-inventory`**. This repo does not glob test
+files — an unclaimed suite never runs in CI and contributes nothing to
+`coverage/lcov.info`. Deno suites go in the `deno test` list in
+`test-coverage.sh`; Workers/DO suites go in `vitest.config.ts` `test.include`;
+Redis (etc.) suites go in `SERVICE_DEPENDENT` in `check-test-inventory.mjs`
+with a reason. Full checklist: root `AGENTS.md` → **Adding tests (inventory)**.
+The guard is wired into `pnpm test:hook` and CI `build.yml`.
+
 - Analysis runs in GitHub Actions (`.github/workflows/build.yml` **SonarQube**
   job — SonarCloud wizard layout) with `SONAR_TOKEN` and
   `sonar-project.properties` (`sonar.projectKey=turbopanel_turbopanel`,

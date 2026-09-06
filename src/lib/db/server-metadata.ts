@@ -1,20 +1,16 @@
-import {
-  parseServerIps,
-  serverIpsEquals,
-  type ServerReportedIp,
-} from '../../server-addresses.ts'
+import { parseServerIps, serverIpsEquals, type ServerReportedIp } from '../../server-addresses.ts'
 import type { ServerGeo } from '../geo/server-geo.ts'
 import type { DatacenterOptions } from '../datacenter-options.ts'
-import {
-  parseNtpDefaults,
-  parseSshPort,
-  type NtpDefaults,
-} from '../host-defaults.ts'
+import { type NtpDefaults, parseNtpDefaults, parseSshPort } from '../host-defaults.ts'
 import type { OrganizationOptions } from '../organization-options.ts'
+import { isExactCpuCatalogMatch, resolveCpuCatalogEntry } from '../hardware/cpu-catalog.ts'
 import {
-  isExactCpuCatalogMatch,
-  resolveCpuCatalogEntry,
-} from '../hardware/cpu-catalog.ts'
+  type MetricsCapabilityPlanOverrideV4,
+  type MetricsCapabilityPlanV4,
+  parseServerMetricsCapabilityPlanOverride,
+  resolveMetricsCapabilityPlan,
+  type ServerMachineClass,
+} from '../../daemon/metrics/capability-plan.ts'
 
 /** OS families we may report from the daemon; extend the union as support is added. */
 export type ServerOsFamily = 'linux' | 'windows' | 'freebsd' | 'darwin'
@@ -190,10 +186,13 @@ export type ServerSensorSlot = ServerSensorSlotAssignment | null
  * Operator-assigned hardware profile nested under
  * `server.metadata.hardwareProfile`. The server row is the source of truth;
  * the daemon-side state files are a cache refreshed by the
- * `metrics-sensor-overrides-update` cell push. `generation` bumps only when
- * a sensor-slot or NIC identity actually changes — it stamps samples
- * (`hardwareProfileGeneration`) so later chart segmentation can tell layout
- * changes apart from a plain value shift.
+ * `topology-overrides-update` cell push. `generation` bumps only when
+ * a sensor-slot, NIC, or topology-id identity actually changes — it stamps
+ * samples (`hardwareProfileGeneration`) so later chart segmentation can tell
+ * layout changes apart from a plain value shift.
+ * `nicSlot1DeviceId` / `nicSlot2DeviceId` / `hostingFilesystemId` hold
+ * daemon-derived stable topology device/filesystem ids, distinct from the
+ * raw interface name / path carried by `nic1` / `nic2` / `hostingPath`.
  */
 export type ServerHardwareProfile = {
   /** CPU temperature sensor (RAPL / hwmon coretemp / thermal zone). */
@@ -220,8 +219,26 @@ export type ServerHardwareProfile = {
   nic1?: string | null
   /** Network interface name bound to the `nic2*` metric slot, or `null` when unassigned. */
   nic2?: string | null
+  /**
+   * Stable topology device id bound to the `nic1*` metric slot, or `null`
+   * when unassigned. Opaque, daemon-derived — not an interface name (see
+   * {@link ServerHardwareProfile.nic1}).
+   */
+  nicSlot1DeviceId?: string | null
+  /**
+   * Stable topology device id bound to the `nic2*` metric slot, or `null`
+   * when unassigned. Opaque, daemon-derived — not an interface name (see
+   * {@link ServerHardwareProfile.nic2}).
+   */
+  nicSlot2DeviceId?: string | null
   /** Absolute path of the filesystem probed as hosting storage. */
   hostingPath?: string
+  /**
+   * Stable topology filesystem id for the hosting-storage filesystem, or
+   * `null` when unassigned. Opaque, daemon-derived — not a path (see
+   * {@link ServerHardwareProfile.hostingPath}).
+   */
+  hostingFilesystemId?: string | null
   /**
    * Whether the daemon may probe per-drive temperatures (`drivetemp`
    * hwmon). Off by default — spinning up drives to read a sensor is
@@ -333,14 +350,16 @@ export type ServerOptions = {
    * choose self-heal vs report-only.
    */
   hosting?: { enabled: boolean }
+  /**
+   * Per-server override for the v4 metrics capability plan (see
+   * `../../daemon/metrics/capability-plan.ts`). Wins over any org-wide
+   * `organization.options.metricsCapabilityPlan` field it sets — see
+   * {@link resolveEffectiveMetricsCapabilityPlan}.
+   */
+  metricsCapabilityPlan?: MetricsCapabilityPlanOverrideV4
 }
 
-const OS_FAMILIES = new Set<ServerOsFamily>([
-  'linux',
-  'windows',
-  'freebsd',
-  'darwin',
-])
+const OS_FAMILIES = new Set<ServerOsFamily>(['linux', 'windows', 'freebsd', 'darwin'])
 
 const OS_VARIANTS = new Set<ServerOsVariant>(['raspberry-pi-os'])
 
@@ -355,14 +374,13 @@ function optionalTrimmedString(value: unknown): string | undefined {
 }
 
 /** Parse a best-effort OS block from daemon hello / stored metadata. */
-export function parseServerOsMetadata(
-  value: unknown,
-): ServerOsMetadata | undefined {
+export function parseServerOsMetadata(value: unknown): ServerOsMetadata | undefined {
   if (!isRecord(value)) return undefined
   const familyRaw = optionalTrimmedString(value.family)?.toLowerCase()
-  const family = familyRaw && OS_FAMILIES.has(familyRaw as ServerOsFamily)
-    ? (familyRaw as ServerOsFamily)
-    : undefined
+  const family =
+    familyRaw && OS_FAMILIES.has(familyRaw as ServerOsFamily)
+      ? (familyRaw as ServerOsFamily)
+      : undefined
 
   const os: ServerOsMetadata = {}
   if (family) os.family = family
@@ -481,9 +499,7 @@ function parseCpuSockets(value: unknown): ServerCpuSocket[] | undefined {
   return sockets.length > 0 ? sockets : undefined
 }
 
-function parseHostCpus(
-  value: Record<string, unknown>,
-): ServerCpuSocket[] | undefined {
+function parseHostCpus(value: Record<string, unknown>): ServerCpuSocket[] | undefined {
   return parseCpuSockets(value.cpus)
 }
 
@@ -531,9 +547,7 @@ function parseSwapTotal(value: unknown): { totalBytes: number } | undefined {
 }
 
 /** Parse host capacity block from daemon hello / stored metadata. */
-export function parseServerHostResources(
-  value: unknown,
-): ServerHostResources | undefined {
+export function parseServerHostResources(value: unknown): ServerHostResources | undefined {
   if (!isRecord(value)) return undefined
   const resources: ServerHostResources = {}
   const cpus = parseHostCpus(value)
@@ -555,7 +569,7 @@ export function parseServerHostResources(
  */
 export function mergeServerHostResources(
   current: ServerHostResources | undefined,
-  incoming: ServerHostResources,
+  incoming: ServerHostResources
 ): ServerHostResources {
   const next: ServerHostResources = { ...current }
   if (incoming.cpus) next.cpus = incoming.cpus
@@ -567,9 +581,7 @@ export function mergeServerHostResources(
 }
 
 /** Host capacity from daemon hello / change-detected heartbeat payloads. */
-export function resourcesFromDaemonPresence(
-  payload: unknown,
-): ServerHostResources | undefined {
+export function resourcesFromDaemonPresence(payload: unknown): ServerHostResources | undefined {
   if (!isRecord(payload)) return undefined
   const resources = parseServerHostResources(payload.resources)
   return resources && Object.keys(resources).length > 0 ? resources : undefined
@@ -577,17 +589,14 @@ export function resourcesFromDaemonPresence(
 
 function cpuCoreSplitEquals(
   a: ServerCpuCoreSplit | undefined,
-  b: ServerCpuCoreSplit | undefined,
+  b: ServerCpuCoreSplit | undefined
 ): boolean {
   if (a === b) return true
   if (!a || !b) return false
   return a.total === b.total && a.p === b.p && a.e === b.e
 }
 
-function cpuCacheEquals(
-  a: ServerCpuCache | undefined,
-  b: ServerCpuCache | undefined,
-): boolean {
+function cpuCacheEquals(a: ServerCpuCache | undefined, b: ServerCpuCache | undefined): boolean {
   if (a === b) return true
   if (!a || !b) return false
   return (
@@ -615,7 +624,7 @@ function cpuSocketEquals(a: ServerCpuSocket, b: ServerCpuSocket): boolean {
 
 function cpuSocketsEquals(
   a: ServerCpuSocket[] | undefined,
-  b: ServerCpuSocket[] | undefined,
+  b: ServerCpuSocket[] | undefined
 ): boolean {
   if (a === b) return true
   if (a?.length !== b?.length) return false
@@ -636,10 +645,7 @@ function gpuEquals(a: ServerGpu, b: ServerGpu): boolean {
   )
 }
 
-function gpusEquals(
-  a: ServerGpu[] | undefined,
-  b: ServerGpu[] | undefined,
-): boolean {
+function gpusEquals(a: ServerGpu[] | undefined, b: ServerGpu[] | undefined): boolean {
   if (a === b) return true
   if (a?.length !== b?.length) return false
   return (a ?? []).every((left, i) => {
@@ -650,7 +656,7 @@ function gpusEquals(
 
 export function serverHostResourcesEquals(
   a: ServerHostResources | null | undefined,
-  b: ServerHostResources | null | undefined,
+  b: ServerHostResources | null | undefined
 ): boolean {
   if (a === b) return true
   if (!a || !b) return false
@@ -664,23 +670,15 @@ export function serverHostResourcesEquals(
 }
 
 /** Parse nested `server.metadata.cell` block. */
-export function parseServerCellMetadata(
-  value: unknown,
-): ServerCellMetadata | undefined {
+export function parseServerCellMetadata(value: unknown): ServerCellMetadata | undefined {
   if (!isRecord(value)) return undefined
   const cell: ServerCellMetadata = {}
   const locationHint = optionalTrimmedString(value.locationHint)
   if (locationHint) cell.locationHint = locationHint
-  if (
-    typeof value.generation === 'number' &&
-    Number.isInteger(value.generation)
-  ) {
+  if (typeof value.generation === 'number' && Number.isInteger(value.generation)) {
     cell.generation = value.generation
   }
-  if (
-    typeof value.snapshotVersion === 'number' &&
-    Number.isInteger(value.snapshotVersion)
-  ) {
+  if (typeof value.snapshotVersion === 'number' && Number.isInteger(value.snapshotVersion)) {
     cell.snapshotVersion = value.snapshotVersion
   }
   return Object.keys(cell).length > 0 ? cell : undefined
@@ -702,12 +700,7 @@ function titleCasePhrase(value: string): string {
 function isRaspberryPiOs(os: ServerOsMetadata): boolean {
   if (os.variant === 'raspberry-pi-os') return true
   const id = os.id?.toLowerCase()
-  return (
-    id === RASPBERRY_PI_OS_ID ||
-    id === 'raspbian' ||
-    id === 'raspberrypi' ||
-    id === 'raspios'
-  )
+  return id === RASPBERRY_PI_OS_ID || id === 'raspbian' || id === 'raspberrypi' || id === 'raspios'
 }
 
 /** Map a parsed OS block onto dedicated `server.os_*` columns. */
@@ -726,20 +719,16 @@ export function osColumnsFromMetadata(os: ServerOsMetadata): ServerOsColumns {
 /** Dedicated columns first; legacy `metadata.os` when columns are unset. */
 export function resolveServerOsForRead(
   row: ServerOsColumns,
-  metadata: unknown,
+  metadata: unknown
 ): ServerOsMetadata | undefined {
   return (
     osMetadataFromColumns(row) ??
-    parseServerOsMetadata(
-      isRecord(metadata) ? metadata.os : undefined,
-    )
+    parseServerOsMetadata(isRecord(metadata) ? metadata.os : undefined)
   )
 }
 
 /** Compose the API `os` object from dedicated columns. */
-export function osMetadataFromColumns(
-  row: ServerOsColumns,
-): ServerOsMetadata | undefined {
+export function osMetadataFromColumns(row: ServerOsColumns): ServerOsMetadata | undefined {
   const os: ServerOsMetadata = {}
   const familyRaw = row.osFamily?.trim().toLowerCase()
   if (familyRaw && OS_FAMILIES.has(familyRaw as ServerOsFamily)) {
@@ -761,10 +750,7 @@ export function osMetadataFromColumns(
   return Object.keys(os).length > 0 ? os : undefined
 }
 
-export function osColumnsEqual(
-  a: ServerOsColumns,
-  b: ServerOsColumns,
-): boolean {
+export function osColumnsEqual(a: ServerOsColumns, b: ServerOsColumns): boolean {
   return (
     a.osId === b.osId &&
     a.osFamily === b.osFamily &&
@@ -798,7 +784,7 @@ function resolveOsProductName(os: ServerOsMetadata): string | undefined {
 
 /** Logo key for UI (`debian` | `raspberry-pi-os` | null). */
 export function resolveServerOsLogoKey(
-  os: ServerOsMetadata | null | undefined,
+  os: ServerOsMetadata | null | undefined
 ): 'debian' | 'raspberry-pi-os' | null {
   if (!os) return null
   if (isRaspberryPiOs(os)) return 'raspberry-pi-os'
@@ -810,9 +796,7 @@ export function resolveServerOsLogoKey(
  * UI/API display string, e.g. `"Debian 13.5 (Trixie)"` or
  * `"Raspberry Pi OS 12.11 (Bookworm)"`.
  */
-export function formatServerOsDisplay(
-  os: ServerOsMetadata | null | undefined,
-): string | null {
+export function formatServerOsDisplay(os: ServerOsMetadata | null | undefined): string | null {
   if (!os) return null
   const product = resolveOsProductName(os)
   const version = os.version?.trim()
@@ -831,7 +815,7 @@ export function formatServerOsDisplay(
 
 export function serverOsMetadataEquals(
   a: ServerOsMetadata | null | undefined,
-  b: ServerOsMetadata | null | undefined,
+  b: ServerOsMetadata | null | undefined
 ): boolean {
   if (a === b) return true
   if (!a || !b) return false
@@ -857,10 +841,7 @@ function optionalStringArray(value: unknown): string[] | undefined {
   return out
 }
 
-function stringArraysEqual(
-  a: string[] | undefined,
-  b: string[] | undefined,
-): boolean {
+function stringArraysEqual(a: string[] | undefined, b: string[] | undefined): boolean {
   if (a === b) return true
   if (!a || !b) return a === b
   if (a.length !== b.length) return false
@@ -881,7 +862,7 @@ function optionalIsoTimestamp(value: unknown): string | undefined {
 function pushNtpHosts(
   out: ServerNtpServerEntry[],
   hosts: string[] | undefined,
-  fallback: boolean,
+  fallback: boolean
 ): void {
   if (!hosts) return
   for (const host of hosts) {
@@ -893,9 +874,7 @@ function pushNtpHosts(
   }
 }
 
-function parseNtpObjectList(
-  value: unknown,
-): ServerNtpServerEntry[] | undefined {
+function parseNtpObjectList(value: unknown): ServerNtpServerEntry[] | undefined {
   if (!Array.isArray(value)) return undefined
   const out: ServerNtpServerEntry[] = []
   for (const entry of value) {
@@ -915,9 +894,7 @@ function parseNtpObjectList(
 }
 
 /** Parse `server.ntp_servers` jsonb (object array, string array, or `{ servers, fallback }`). */
-export function parseNtpServersColumn(
-  value: unknown,
-): ServerNtpServerEntry[] | undefined {
+export function parseNtpServersColumn(value: unknown): ServerNtpServerEntry[] | undefined {
   if (value === null || value === undefined) return undefined
   const fromArray = parseNtpObjectList(value)
   if (fromArray !== undefined) return fromArray
@@ -929,12 +906,9 @@ export function parseNtpServersColumn(
 }
 
 export function ntpServersColumnFromTimeSync(
-  timeSync: Pick<ServerTimeSync, 'ntpServers' | 'fallbackNtpServers'>,
+  timeSync: Pick<ServerTimeSync, 'ntpServers' | 'fallbackNtpServers'>
 ): ServerNtpServerEntry[] | undefined {
-  if (
-    timeSync.ntpServers === undefined &&
-    timeSync.fallbackNtpServers === undefined
-  ) {
+  if (timeSync.ntpServers === undefined && timeSync.fallbackNtpServers === undefined) {
     return undefined
   }
   const out: ServerNtpServerEntry[] = []
@@ -943,9 +917,7 @@ export function ntpServersColumnFromTimeSync(
   return out
 }
 
-export function splitNtpServersColumn(
-  entries: ServerNtpServerEntry[] | undefined,
-): {
+export function splitNtpServersColumn(entries: ServerNtpServerEntry[] | undefined): {
   ntpServers: string[]
   fallbackNtpServers: string[]
 } {
@@ -961,7 +933,7 @@ export function splitNtpServersColumn(
 
 function ntpServerEntriesEqual(
   a: ServerNtpServerEntry[] | undefined,
-  b: ServerNtpServerEntry[] | undefined,
+  b: ServerNtpServerEntry[] | undefined
 ): boolean {
   if (a === b) return true
   if (!a || !b) return a === b
@@ -975,9 +947,7 @@ function ntpServerEntriesEqual(
 }
 
 /** Parse a best-effort time-sync block from daemon hello / stored leftover jsonb. */
-export function parseServerTimeSync(
-  value: unknown,
-): ServerTimeSync | undefined {
+export function parseServerTimeSync(value: unknown): ServerTimeSync | undefined {
   if (!isRecord(value)) return undefined
   const timeSync: ServerTimeSync = {}
   const timezone = optionalTrimmedString(value.timezone)
@@ -1001,16 +971,16 @@ export function parseServerTimeSync(
 
 function ntpServersColumnPatch(
   incoming: ServerTimeSync,
-  current: ServerTimeSyncColumns,
+  current: ServerTimeSyncColumns
 ): ServerNtpServerEntry[] | undefined {
   if (ntpServersColumnFromTimeSync(incoming) === undefined) return undefined
   const currentEntries = parseNtpServersColumn(current.ntpServers) ?? []
   const currentSplit = splitNtpServersColumn(currentEntries)
-  const merged = ntpServersColumnFromTimeSync({
-    ntpServers: incoming.ntpServers ?? currentSplit.ntpServers,
-    fallbackNtpServers: incoming.fallbackNtpServers ??
-      currentSplit.fallbackNtpServers,
-  }) ?? []
+  const merged =
+    ntpServersColumnFromTimeSync({
+      ntpServers: incoming.ntpServers ?? currentSplit.ntpServers,
+      fallbackNtpServers: incoming.fallbackNtpServers ?? currentSplit.fallbackNtpServers,
+    }) ?? []
   return ntpServerEntriesEqual(merged, currentEntries) ? undefined : merged
 }
 
@@ -1018,7 +988,7 @@ function ntpServersColumnPatch(
 function ntpLastSyncedAtColumnPatch(
   incoming: ServerTimeSync,
   current: ServerTimeSyncColumns,
-  nowIso: string,
+  nowIso: string
 ): string | null | undefined {
   if (incoming.ntpSynced === false) {
     return current.ntpLastSyncedAt === null ? undefined : null
@@ -1044,7 +1014,7 @@ function ntpLastSyncedAtColumnPatch(
 export function timeSyncColumnPatch(
   incoming: ServerTimeSync,
   current: ServerTimeSyncColumns,
-  nowIso: string,
+  nowIso: string
 ): Partial<ServerTimeSyncColumns> | null {
   const patch: Partial<ServerTimeSyncColumns> = {}
   if (incoming.timezone !== undefined) {
@@ -1064,9 +1034,7 @@ export function timeSyncColumnPatch(
 }
 
 /** Compose the API `timeSync` object from dedicated columns. */
-export function timeSyncFromColumns(
-  row: ServerTimeSyncColumns,
-): ServerTimeSync | undefined {
+export function timeSyncFromColumns(row: ServerTimeSyncColumns): ServerTimeSync | undefined {
   const timeSync: ServerTimeSync = {}
   const timezone = optionalTrimmedString(row.timezone)
   if (timezone) timeSync.timezone = timezone
@@ -1084,10 +1052,7 @@ export function timeSyncFromColumns(
   if (row.ntpLastSyncedAt) {
     timeSync.ntpSynced = true
     timeSync.lastSyncedAt = row.ntpLastSyncedAt
-  } else if (
-    row.isTimeSyncEnabled !== null ||
-    entries !== undefined
-  ) {
+  } else if (row.isTimeSyncEnabled !== null || entries !== undefined) {
     timeSync.ntpSynced = false
   }
   return Object.keys(timeSync).length > 0 ? timeSync : undefined
@@ -1096,7 +1061,7 @@ export function timeSyncFromColumns(
 /** Compare time-sync facts for equality. */
 export function serverTimeSyncEquals(
   a: ServerTimeSync | null | undefined,
-  b: ServerTimeSync | null | undefined,
+  b: ServerTimeSync | null | undefined
 ): boolean {
   if (a === b) return true
   if (!a || !b) return false
@@ -1165,15 +1130,11 @@ function parseRuntimeExtensionList(value: unknown): string[] {
     .filter((n): n is string => typeof n === 'string')
     .map((n) => n.trim().toLowerCase())
     .filter((n) => RUNTIME_EXTENSION_TOKEN.test(n))
-  return [...new Set(names)]
-    .sort((a, b) => a.localeCompare(b))
-    .slice(0, MAX_RUNTIME_EXTENSIONS)
+  return [...new Set(names)].sort((a, b) => a.localeCompare(b)).slice(0, MAX_RUNTIME_EXTENSIONS)
 }
 
 /** `{ "8.4": ["gd", …] }` — extensions keyed by the series that carries them. */
-function parseRuntimeExtensionsBySeries(
-  value: unknown,
-): Record<string, string[]> {
+function parseRuntimeExtensionsBySeries(value: unknown): Record<string, string[]> {
   if (!isRecord(value)) return {}
   const extensions: Record<string, string[]> = {}
   for (const [key, raw] of Object.entries(value)) {
@@ -1185,9 +1146,7 @@ function parseRuntimeExtensionsBySeries(
 }
 
 /** The `php` area, which is the one that also carries per-series extensions. */
-function parsePhpRuntimeMetadata(
-  value: unknown,
-): ServerRuntimeMetadata['php'] {
+function parsePhpRuntimeMetadata(value: unknown): ServerRuntimeMetadata['php'] {
   if (!isRecord(value)) return undefined
   const series = parseRuntimeSeriesList(value.series)
   if (series.length === 0) return undefined
@@ -1196,9 +1155,7 @@ function parsePhpRuntimeMetadata(
   return { series, extensions }
 }
 
-export function parseServerRuntimeMetadata(
-  value: unknown,
-): ServerRuntimeMetadata | undefined {
+export function parseServerRuntimeMetadata(value: unknown): ServerRuntimeMetadata | undefined {
   if (!isRecord(value)) return undefined
   const out: ServerRuntimeMetadata = {}
 
@@ -1217,15 +1174,13 @@ export function parseServerRuntimeMetadata(
 
 export function serverRuntimeMetadataEquals(
   a: ServerRuntimeMetadata | undefined,
-  b: ServerRuntimeMetadata | undefined,
+  b: ServerRuntimeMetadata | undefined
 ): boolean {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 }
 
 /** Parse a best-effort docker block from daemon hello / stored metadata. */
-export function parseServerDockerMetadata(
-  value: unknown,
-): ServerDockerMetadata | undefined {
+export function parseServerDockerMetadata(value: unknown): ServerDockerMetadata | undefined {
   if (!isRecord(value)) return undefined
   const docker: ServerDockerMetadata = {}
   const version = parseDockerVersionToken(value.version)
@@ -1257,13 +1212,24 @@ export const HARDWARE_PROFILE_NIC_KEYS = [
   'nic2',
 ] as const satisfies readonly (keyof ServerHardwareProfile)[]
 
+/**
+ * Topology-id keys — opaque, daemon-derived device/filesystem ids;
+ * identity-bearing like {@link HARDWARE_PROFILE_NIC_KEYS}, a change here also
+ * bumps `generation`.
+ */
+export const HARDWARE_PROFILE_TOPOLOGY_ID_KEYS = [
+  'nicSlot1DeviceId',
+  'nicSlot2DeviceId',
+  'hostingFilesystemId',
+] as const satisfies readonly (keyof ServerHardwareProfile)[]
+
 /** Update payload for {@link mergeServerHardwareProfile}. */
 export type ServerHardwareProfileUpdate = {
-  [K in (typeof HARDWARE_PROFILE_SENSOR_SLOT_KEYS)[number]]?:
-    | ServerSensorSlotAssignment
-    | null
+  [K in (typeof HARDWARE_PROFILE_SENSOR_SLOT_KEYS)[number]]?: ServerSensorSlotAssignment | null
 } & {
   [K in (typeof HARDWARE_PROFILE_NIC_KEYS)[number]]?: string | null
+} & {
+  [K in (typeof HARDWARE_PROFILE_TOPOLOGY_ID_KEYS)[number]]?: string | null
 } & {
   hostingPath?: string | null
   drivetempEnabled?: boolean | null
@@ -1292,9 +1258,15 @@ function parseNicBinding(value: unknown): string | null | undefined {
   return optionalTrimmedString(value)
 }
 
+/** Same parse discipline as {@link parseNicBinding} — an opaque id string, `null`, or absent. */
+function parseTopologyIdBinding(value: unknown): string | null | undefined {
+  if (value === null) return null
+  return optionalTrimmedString(value)
+}
+
 function applyHardwareProfileSensorSlots(
   value: Record<string, unknown>,
-  profile: ServerHardwareProfile,
+  profile: ServerHardwareProfile
 ): void {
   for (const key of HARDWARE_PROFILE_SENSOR_SLOT_KEYS) {
     if (!(key in value)) continue
@@ -1305,7 +1277,7 @@ function applyHardwareProfileSensorSlots(
 
 function applyHardwareProfileNicBindings(
   value: Record<string, unknown>,
-  profile: ServerHardwareProfile,
+  profile: ServerHardwareProfile
 ): void {
   for (const key of HARDWARE_PROFILE_NIC_KEYS) {
     if (!(key in value)) continue
@@ -1314,12 +1286,23 @@ function applyHardwareProfileNicBindings(
   }
 }
 
+function applyHardwareProfileTopologyIdBindings(
+  value: Record<string, unknown>,
+  profile: ServerHardwareProfile
+): void {
+  for (const key of HARDWARE_PROFILE_TOPOLOGY_ID_KEYS) {
+    if (!(key in value)) continue
+    const id = parseTopologyIdBinding(value[key])
+    if (id !== undefined) profile[key] = id
+  }
+}
+
 /** Shared by both nullable-override fields: `null` clears, a parse failure leaves it unset. */
 function applyParsedNullableOverride<V>(
   present: boolean,
   raw: unknown,
   parse: (value: unknown) => V | undefined,
-  apply: (value: V | null) => void,
+  apply: (value: V | null) => void
 ): void {
   if (!present) return
   if (raw === null) {
@@ -1331,13 +1314,12 @@ function applyParsedNullableOverride<V>(
 }
 
 /** Parse a best-effort hardware-profile block from stored metadata. */
-export function parseServerHardwareProfile(
-  value: unknown,
-): ServerHardwareProfile | undefined {
+export function parseServerHardwareProfile(value: unknown): ServerHardwareProfile | undefined {
   if (!isRecord(value)) return undefined
   const profile: ServerHardwareProfile = {}
   applyHardwareProfileSensorSlots(value, profile)
   applyHardwareProfileNicBindings(value, profile)
+  applyHardwareProfileTopologyIdBindings(value, profile)
 
   const hostingPath = optionalTrimmedString(value.hostingPath)
   if (hostingPath) profile.hostingPath = hostingPath
@@ -1354,19 +1336,25 @@ export function parseServerHardwareProfile(
   const generationAppliedAt = optionalIsoTimestamp(value.generationAppliedAt)
   if (generationAppliedAt) profile.generationAppliedAt = generationAppliedAt
   const cpuModel = optionalTrimmedString(value.cpuModel)
-  if (cpuModel && cpuModel.length <= MAX_CPU_MODEL_CHARS) profile.cpuModel = cpuModel
+  if (cpuModel && cpuModel.length <= MAX_CPU_MODEL_CHARS) {
+    profile.cpuModel = cpuModel
+  }
 
   applyParsedNullableOverride(
     'cpuTdpWattsOverride' in value,
     value.cpuTdpWattsOverride,
     optionalCpuTdpWatts,
-    (tdpWatts) => { profile.cpuTdpWattsOverride = tdpWatts },
+    (tdpWatts) => {
+      profile.cpuTdpWattsOverride = tdpWatts
+    }
   )
   applyParsedNullableOverride(
     'cpuTjMaxCelsiusOverride' in value,
     value.cpuTjMaxCelsiusOverride,
     optionalCpuTjMaxCelsius,
-    (tjMaxCelsius) => { profile.cpuTjMaxCelsiusOverride = tjMaxCelsius },
+    (tjMaxCelsius) => {
+      profile.cpuTjMaxCelsiusOverride = tjMaxCelsius
+    }
   )
 
   return Object.keys(profile).length > 0 ? profile : undefined
@@ -1375,16 +1363,21 @@ export function parseServerHardwareProfile(
 /** `undefined` vs `null` are distinct sentinels — unset vs explicitly unassigned. */
 function sensorSlotIdentityEquals(
   a: ServerSensorSlot | undefined,
-  b: ServerSensorSlot | undefined,
+  b: ServerSensorSlot | undefined
 ): boolean {
   if (a === undefined || b === undefined) return a === b
   if (a === null || b === null) return a === b
   return a.chip === b.chip && a.label === b.label
 }
 
-function nicBindingEquals(
+function nicBindingEquals(a: string | null | undefined, b: string | null | undefined): boolean {
+  return a === b
+}
+
+/** Same identity comparison as {@link nicBindingEquals} — used for topology-id fields. */
+function topologyIdBindingEquals(
   a: string | null | undefined,
-  b: string | null | undefined,
+  b: string | null | undefined
 ): boolean {
   return a === b
 }
@@ -1392,27 +1385,27 @@ function nicBindingEquals(
 /**
  * Merge a partial hardware-profile update onto the stored profile.
  *
- * Per sensor-slot / NIC field: an assignment (or interface name) pins it, an
- * explicit `null` marks it unassigned, `undefined` leaves it untouched.
- * `hostingPath` / `drivetempEnabled` / `cpuTdpWattsOverride` /
- * `cpuTjMaxCelsiusOverride` follow the same undefined-leaves, null-clears
- * convention but never bump `generation` — they carry no sensor identity.
- * `generation` bumps (and `generationAppliedAt` stamps `nowIso`) only when a
- * sensor-slot or NIC identity actually changed; an otherwise no-op save is
+ * Per sensor-slot / NIC / topology-id field: an assignment (or interface
+ * name / opaque id) pins it, an explicit `null` marks it unassigned,
+ * `undefined` leaves it untouched. `hostingPath` / `drivetempEnabled` /
+ * `cpuTdpWattsOverride` / `cpuTjMaxCelsiusOverride` follow the same
+ * undefined-leaves, null-clears convention but never bump `generation` —
+ * they carry no sensor identity. `generation` bumps (and
+ * `generationAppliedAt` stamps `nowIso`) only when a sensor-slot, NIC, or
+ * topology-id identity actually changed; an otherwise no-op save is
  * idempotent.
  */
 function applySensorSlotUpdates(
   existing: ServerHardwareProfile | undefined,
   update: ServerHardwareProfileUpdate,
-  next: ServerHardwareProfile,
+  next: ServerHardwareProfile
 ): boolean {
   let changed = false
   for (const key of HARDWARE_PROFILE_SENSOR_SLOT_KEYS) {
     const incoming = update[key]
     if (incoming === undefined) continue
-    const value: ServerSensorSlot = incoming === null
-      ? null
-      : { chip: incoming.chip.trim(), label: incoming.label.trim() }
+    const value: ServerSensorSlot =
+      incoming === null ? null : { chip: incoming.chip.trim(), label: incoming.label.trim() }
     if (!sensorSlotIdentityEquals(existing?.[key], value)) changed = true
     next[key] = value
   }
@@ -1422,7 +1415,7 @@ function applySensorSlotUpdates(
 function applyNicBindingUpdates(
   existing: ServerHardwareProfile | undefined,
   update: ServerHardwareProfileUpdate,
-  next: ServerHardwareProfile,
+  next: ServerHardwareProfile
 ): boolean {
   let changed = false
   for (const key of HARDWARE_PROFILE_NIC_KEYS) {
@@ -1435,9 +1428,25 @@ function applyNicBindingUpdates(
   return changed
 }
 
+function applyTopologyIdBindingUpdates(
+  existing: ServerHardwareProfile | undefined,
+  update: ServerHardwareProfileUpdate,
+  next: ServerHardwareProfile
+): boolean {
+  let changed = false
+  for (const key of HARDWARE_PROFILE_TOPOLOGY_ID_KEYS) {
+    const incoming = update[key]
+    if (incoming === undefined) continue
+    const value = incoming === null ? null : incoming.trim()
+    if (!topologyIdBindingEquals(existing?.[key], value)) changed = true
+    next[key] = value
+  }
+  return changed
+}
+
 function applyHostingPathUpdate(
   update: ServerHardwareProfileUpdate,
-  next: ServerHardwareProfile,
+  next: ServerHardwareProfile
 ): void {
   if (update.hostingPath === undefined) return
   if (update.hostingPath === null) {
@@ -1453,7 +1462,7 @@ function applyHostingPathUpdate(
 function applyNullableUpdate<V>(
   incoming: V | null | undefined,
   apply: (value: V) => void,
-  clear: () => void,
+  clear: () => void
 ): void {
   if (incoming === undefined) return
   if (incoming === null) {
@@ -1467,7 +1476,7 @@ function applyGenerationBump(
   existing: ServerHardwareProfile | undefined,
   next: ServerHardwareProfile,
   identityChanged: boolean,
-  nowIso: string,
+  nowIso: string
 ): void {
   if (identityChanged) {
     next.generation = (existing?.generation ?? 0) + 1
@@ -1484,29 +1493,42 @@ function applyGenerationBump(
 export function mergeServerHardwareProfile(
   existing: ServerHardwareProfile | undefined,
   update: ServerHardwareProfileUpdate,
-  nowIso: string,
+  nowIso: string
 ): { profile: ServerHardwareProfile | undefined; identityChanged: boolean } {
   const next: ServerHardwareProfile = { ...existing }
 
   const sensorSlotsChanged = applySensorSlotUpdates(existing, update, next)
   const nicBindingsChanged = applyNicBindingUpdates(existing, update, next)
-  const identityChanged = sensorSlotsChanged || nicBindingsChanged
+  const topologyIdBindingsChanged = applyTopologyIdBindingUpdates(existing, update, next)
+  const identityChanged = sensorSlotsChanged || nicBindingsChanged || topologyIdBindingsChanged
 
   applyHostingPathUpdate(update, next)
   applyNullableUpdate(
     update.drivetempEnabled,
-    (v) => { next.drivetempEnabled = v },
-    () => { delete next.drivetempEnabled },
+    (v) => {
+      next.drivetempEnabled = v
+    },
+    () => {
+      delete next.drivetempEnabled
+    }
   )
   applyNullableUpdate(
     update.cpuTdpWattsOverride,
-    (v) => { next.cpuTdpWattsOverride = v },
-    () => { delete next.cpuTdpWattsOverride },
+    (v) => {
+      next.cpuTdpWattsOverride = v
+    },
+    () => {
+      delete next.cpuTdpWattsOverride
+    }
   )
   applyNullableUpdate(
     update.cpuTjMaxCelsiusOverride,
-    (v) => { next.cpuTjMaxCelsiusOverride = v },
-    () => { delete next.cpuTjMaxCelsiusOverride },
+    (v) => {
+      next.cpuTjMaxCelsiusOverride = v
+    },
+    () => {
+      delete next.cpuTjMaxCelsiusOverride
+    }
   )
 
   applyGenerationBump(existing, next, identityChanged, nowIso)
@@ -1530,7 +1552,7 @@ export type EffectiveCpuThermalLimits = {
  * whether *any* value came from an operator's deliberate choice.
  */
 export function resolveEffectiveCpuThermalLimits(
-  profile: ServerHardwareProfile | undefined,
+  profile: ServerHardwareProfile | undefined
 ): EffectiveCpuThermalLimits {
   const tdpOverride = profile?.cpuTdpWattsOverride ?? null
   const tjMaxOverride = profile?.cpuTjMaxCelsiusOverride ?? null
@@ -1548,18 +1570,43 @@ export function resolveEffectiveCpuThermalLimits(
     return {
       tdpWatts: catalog.tdpWatts,
       tjMaxCelsius: catalog.tjMaxCelsius,
-      source: isExactCpuCatalogMatch(profile?.cpuModel)
-        ? 'catalog-exact'
-        : 'catalog-family',
+      source: isExactCpuCatalogMatch(profile?.cpuModel) ? 'catalog-exact' : 'catalog-family',
     }
   }
 
   return { tdpWatts: null, tjMaxCelsius: null, source: 'none' }
 }
 
+/**
+ * Resolve the effective v4 metrics capability plan for a server:
+ * `machineClass`-scoped platform default → org-wide
+ * `organization.options.metricsCapabilityPlan` → per-server
+ * `server.options.metricsCapabilityPlan`, field by field. Unlike
+ * {@link resolveEffectiveCpuThermalLimits}, plan fields aren't independently
+ * sourced-labeled — a single resolved object is sufficient here.
+ *
+ * `machineClass` is required so a virtual server can never resolve the
+ * physical `physicalHardwareSignalSlots` default (see
+ * `../../daemon/metrics/capability-plan.ts`'s
+ * `platformDefaultMetricsCapabilityPlan`) — ingest (`api-routes.ts`)
+ * classifies the reporting server from its persisted topology snapshot
+ * (`classifyServerMachineForMetrics`) and supplies the result here.
+ */
+export function resolveEffectiveMetricsCapabilityPlan(
+  machineClass: ServerMachineClass,
+  orgOptions: OrganizationOptions | undefined,
+  serverOptions: ServerOptions | undefined
+): MetricsCapabilityPlanV4 {
+  return resolveMetricsCapabilityPlan(
+    machineClass,
+    orgOptions?.metricsCapabilityPlan,
+    serverOptions?.metricsCapabilityPlan
+  )
+}
+
 export function serverDockerMetadataEquals(
   a: ServerDockerMetadata | null | undefined,
-  b: ServerDockerMetadata | null | undefined,
+  b: ServerDockerMetadata | null | undefined
 ): boolean {
   if (a === b) return true
   if (!a || !b) return false
@@ -1608,10 +1655,7 @@ export function parseServerOptions(value: unknown): ServerOptions | null {
   if (timezone) options.timezone = timezone
   const cellLocationHint = optionalTrimmedString(value.cellLocationHint)
   if (cellLocationHint) options.cellLocationHint = cellLocationHint
-  if (
-    typeof value.cellGeneration === 'number' &&
-    Number.isInteger(value.cellGeneration)
-  ) {
+  if (typeof value.cellGeneration === 'number' && Number.isInteger(value.cellGeneration)) {
     options.cellGeneration = value.cellGeneration
   }
   if (isRecord(value.hosting) && typeof value.hosting.enabled === 'boolean') {
@@ -1621,6 +1665,14 @@ export function parseServerOptions(value: unknown): ServerOptions | null {
   if (sshPort !== undefined) options.sshPort = sshPort
   const ntp = parseNtpDefaults(value.ntp)
   if (ntp) options.ntp = ntp
+  if ('metricsCapabilityPlan' in value) {
+    const metricsCapabilityPlan = parseServerMetricsCapabilityPlanOverride(
+      value.metricsCapabilityPlan
+    )
+    if (Object.keys(metricsCapabilityPlan).length > 0) {
+      options.metricsCapabilityPlan = metricsCapabilityPlan
+    }
+  }
   return Object.keys(options).length > 0 ? options : {}
 }
 
@@ -1639,7 +1691,7 @@ export type EffectiveServerTimezone = {
 export function resolveEffectiveServerTimezone(
   serverOptions: ServerOptions | null | undefined,
   orgOptions: OrganizationOptions | null | undefined,
-  datacenterOptions?: DatacenterOptions | null,
+  datacenterOptions?: DatacenterOptions | null
 ): EffectiveServerTimezone {
   const dcDefault = datacenterOptions?.defaultServerTimezone?.trim() || null
   const orgDefault = orgOptions?.defaultServerTimezone?.trim() || null
@@ -1666,7 +1718,7 @@ export function resolveEffectiveServerTimezone(
 /** Apply daemon-reported timezone when no configured override was resolved. */
 export function resolveServerResponseTimezone(
   effective: EffectiveServerTimezone,
-  daemonReportedTimezone: string | null | undefined,
+  daemonReportedTimezone: string | null | undefined
 ): EffectiveServerTimezone {
   if (effective.timezone !== null) {
     return effective

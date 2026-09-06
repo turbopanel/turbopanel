@@ -1,18 +1,18 @@
-import { DuckDbParquetServerMetricsStore } from "./backends/duckdb/store.ts";
-import type { ServerMetricsStore } from "./types.ts";
+import { DuckDbParquetServerMetricsStore } from './backends/duckdb/store.ts'
+import type { ServerMetricsStoreV4 } from './types-v4.ts'
 import {
   type ResolveServerMetricsStoreInput,
-  UnavailableServerMetricsStore,
+  UnavailableServerMetricsStoreV4,
   warnMetricsStoreSelectionOnce,
-} from "./store-selection-core.ts";
-import { resolveServerMetricsStore as resolveWorkersServerMetricsStore } from "./store-selection-workers.ts";
+} from './store-selection-core.ts'
+import { resolveServerMetricsStoreV4 as resolveWorkersServerMetricsStoreV4 } from './store-selection-workers.ts'
 
 export type {
   AnalyticsEngineDatasetLike,
   CloudflareAnalyticsSqlConfig,
   MetricsEnvValue,
   ResolveServerMetricsStoreInput,
-} from "./store-selection-core.ts";
+} from './store-selection-core.ts'
 export {
   AE_DEFAULT_MAX_RANGE_SECONDS,
   parseAnalyticsEngineMaxRangeSeconds,
@@ -20,11 +20,37 @@ export {
   parsePositiveIntEnv,
   resetMetricsStoreSelectionWarningsForTests,
   resolveCloudflareAnalyticsSqlConfig,
-  UnavailableServerMetricsStore,
-} from "./store-selection-core.ts";
+  UnavailableServerMetricsStoreV4,
+} from './store-selection-core.ts'
 
 /**
- * Select the host metrics store for the current runtime.
+ * Select Deno's v4 metrics store. `DuckDbParquetServerMetricsStore` is the
+ * single Deno store instance (`backends/duckdb/store.ts`) — a construction
+ * failure degrades to `UnavailableServerMetricsStoreV4` (reads reject with
+ * `metrics_backend_unavailable`, writes stay silent no-ops), never to the
+ * disabled store, since a DuckDB startup failure is a self-hosted backend
+ * outage, not an "unconfigured" state.
+ */
+function resolveDenoServerMetricsStoreV4(
+  input: ResolveServerMetricsStoreInput
+): ServerMetricsStoreV4 {
+  // Deno → DuckDB, always: the metrics directory derives from
+  // `resolveMetricsDir()` with a filesystem default, so there is no
+  // "incomplete config" case — only a directory that cannot be created.
+  try {
+    return new DuckDbParquetServerMetricsStore(input.duckdb ?? {})
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    warnMetricsStoreSelectionOnce(
+      'deno-missing-duckdb',
+      `server metrics on Deno but DuckDB store failed to open; metrics reads will return 503 (${message})`
+    )
+    return new UnavailableServerMetricsStoreV4(`DuckDB metrics store failed to open: ${message}`)
+  }
+}
+
+/**
+ * Select the v4 host metrics store for the current runtime.
  * Server metrics are always on — there is no enable/disable gate.
  * Workers → Analytics Engine; Deno → DuckDB.
  * Only a genuinely unconfigured backend (Workers without the AE binding)
@@ -32,28 +58,11 @@ export {
  * to open resolves to a store whose reads reject, so metrics routes return
  * 503 `metrics_backend_unavailable` instead of hiding the outage.
  */
-export function resolveServerMetricsStore(
-  input: ResolveServerMetricsStoreInput,
-): ServerMetricsStore {
-  if (input.runtime === "workers") {
-    return resolveWorkersServerMetricsStore(input);
+export function resolveServerMetricsStoreV4(
+  input: ResolveServerMetricsStoreInput
+): ServerMetricsStoreV4 {
+  if (input.runtime === 'workers') {
+    return resolveWorkersServerMetricsStoreV4(input)
   }
-
-  // Deno → DuckDB, always: the metrics directory derives from
-  // `resolveMetricsDir()` with a filesystem default, so there is no
-  // "incomplete config" case — only a directory that cannot be created.
-  try {
-    return new DuckDbParquetServerMetricsStore(input.duckdb ?? {});
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    // A DuckDB startup failure is a self-hosted backend outage, never an
-    // "unconfigured" state — reads must surface 503, not the disabled store.
-    warnMetricsStoreSelectionOnce(
-      "deno-missing-duckdb",
-      `server metrics on Deno but DuckDB store failed to open; metrics reads will return 503 (${message})`,
-    );
-    return new UnavailableServerMetricsStore(
-      `DuckDB metrics store failed to open: ${message}`,
-    );
-  }
+  return resolveDenoServerMetricsStoreV4(input)
 }

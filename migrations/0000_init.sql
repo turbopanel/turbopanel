@@ -30,6 +30,17 @@ CREATE TABLE "binding" (
 	CONSTRAINT "binding_database_name_format_check" CHECK ((char_length((database_name)::text) >= 1) AND (char_length((database_name)::text) <= 63) AND ((database_name)::text ~ '^[A-Za-z_][A-Za-z0-9_]*$'::text))
 );
 --> statement-breakpoint
+CREATE TABLE "capability" (
+	"id" uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
+	"created_at" timestamp(3) with time zone DEFAULT now() NOT NULL,
+	"server_id" uuid NOT NULL,
+	"generation" integer NOT NULL,
+	"plan_hash" text NOT NULL,
+	"plan" jsonb,
+	"applied_at" timestamp(3) with time zone NOT NULL,
+	CONSTRAINT "uniq_capability_server_generation" UNIQUE("server_id","generation")
+);
+--> statement-breakpoint
 CREATE TABLE "changeover" (
 	"id" uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
 	"created_at" timestamp(3) with time zone DEFAULT now() NOT NULL,
@@ -802,6 +813,17 @@ CREATE TABLE "tls" (
 	CONSTRAINT "tls_ca_generation_required_check" CHECK (ca_state IS NULL OR ca_state = 'revoked' OR ca_generation IS NOT NULL)
 );
 --> statement-breakpoint
+CREATE TABLE "generation" (
+	"id" uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
+	"created_at" timestamp(3) with time zone DEFAULT now() NOT NULL,
+	"server_id" uuid NOT NULL,
+	"generation" integer NOT NULL,
+	"boot_generation" integer NOT NULL,
+	"snapshot" jsonb,
+	"applied_at" timestamp(3) with time zone NOT NULL,
+	CONSTRAINT "uniq_generation_server_generation" UNIQUE("server_id","generation")
+);
+--> statement-breakpoint
 CREATE TABLE "2fa" (
 	"id" uuid PRIMARY KEY DEFAULT uuidv7() NOT NULL,
 	"created_at" timestamp(3) with time zone DEFAULT now() NOT NULL,
@@ -891,6 +913,7 @@ CREATE TABLE "workspace" (
 ALTER TABLE "account" ADD CONSTRAINT "account_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "binding" ADD CONSTRAINT "binding_principal_id_principal_id_fk" FOREIGN KEY ("principal_id") REFERENCES "public"."principal"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "binding" ADD CONSTRAINT "binding_service_id_service_id_fk" FOREIGN KEY ("service_id") REFERENCES "public"."service"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "capability" ADD CONSTRAINT "capability_server_id_server_id_fk" FOREIGN KEY ("server_id") REFERENCES "public"."server"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "changeover" ADD CONSTRAINT "changeover_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "command" ADD CONSTRAINT "command_server_id_server_id_fk" FOREIGN KEY ("server_id") REFERENCES "public"."server"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "container" ADD CONSTRAINT "container_service_id_service_id_fk" FOREIGN KEY ("service_id") REFERENCES "public"."service"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -981,6 +1004,7 @@ ALTER TABLE "teammate" ADD CONSTRAINT "teammate_user_id_user_id_fk" FOREIGN KEY 
 ALTER TABLE "tenancy" ADD CONSTRAINT "tenancy_principal_id_principal_id_fk" FOREIGN KEY ("principal_id") REFERENCES "public"."principal"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tenancy" ADD CONSTRAINT "tenancy_service_id_service_id_fk" FOREIGN KEY ("service_id") REFERENCES "public"."service"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tls" ADD CONSTRAINT "tls_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "generation" ADD CONSTRAINT "generation_server_id_server_id_fk" FOREIGN KEY ("server_id") REFERENCES "public"."server"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "2fa" ADD CONSTRAINT "2fa_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "variable" ADD CONSTRAINT "variable_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "variable" ADD CONSTRAINT "variable_workspace_id_workspace_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspace"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -995,6 +1019,7 @@ CREATE INDEX "idx_account_user_id" ON "account" USING btree ("user_id" uuid_ops)
 CREATE INDEX "idx_binding_principal_id" ON "binding" USING btree ("principal_id" uuid_ops);--> statement-breakpoint
 CREATE INDEX "idx_binding_service_id" ON "binding" USING btree ("service_id" uuid_ops);--> statement-breakpoint
 CREATE UNIQUE INDEX "uniq_binding_service_engine_defaults" ON "binding" USING btree ("service_id") WHERE "binding"."is_emit_engine_defaults";--> statement-breakpoint
+CREATE INDEX "idx_capability_server_generation" ON "capability" USING btree ("server_id","generation" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "idx_changeover_organization_id" ON "changeover" USING btree ("organization_id" uuid_ops);--> statement-breakpoint
 CREATE UNIQUE INDEX "uniq_changeover_inflight_organization" ON "changeover" USING btree ("organization_id") WHERE "changeover"."state" = 'in_progress';--> statement-breakpoint
 CREATE INDEX "idx_command_server_id_created_at" ON "command" USING btree ("server_id","created_at" DESC NULLS LAST);--> statement-breakpoint
@@ -1126,6 +1151,7 @@ CREATE INDEX "idx_tls_not_after" ON "tls" USING btree ("not_after" timestamptz_o
 CREATE UNIQUE INDEX "uniq_tls_organization_fingerprint_sha256" ON "tls" USING btree ("organization_id","fingerprint_sha256") WHERE "tls"."fingerprint_sha256" IS NOT NULL;--> statement-breakpoint
 CREATE UNIQUE INDEX "uniq_tls_organization_active_ca" ON "tls" USING btree ("organization_id") WHERE "tls"."source" = 'organization_ca' AND "tls"."ca_state" = 'active';--> statement-breakpoint
 CREATE INDEX "idx_tls_organization_ca_generation" ON "tls" USING btree ("organization_id","ca_generation") WHERE "tls"."source" = 'organization_ca';--> statement-breakpoint
+CREATE INDEX "idx_generation_server_generation" ON "generation" USING btree ("server_id","generation" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "idx_2fa_user_id" ON "2fa" USING btree ("user_id" uuid_ops);--> statement-breakpoint
 CREATE INDEX "idx_variable_organization_id" ON "variable" USING btree ("organization_id" uuid_ops);--> statement-breakpoint
 CREATE INDEX "idx_variable_workspace_id" ON "variable" USING btree ("workspace_id" uuid_ops);--> statement-breakpoint

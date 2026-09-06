@@ -1,50 +1,66 @@
 /**
- * Deno DuckDB + Parquet host metrics store.
+ * Deno DuckDB + Parquet metrics store for the v4 contract.
  *
- * Two genuinely typed tables (`server_metric_samples`, `server_status_events`)
- * with real named columns and real SQL `NULL`s for missing metrics — no AE
- * sentinel, no positional `doubleN`/`blobN` layout. Recent rows live in the
- * hot DuckDB table; completed UTC days are sealed into immutable Parquet
- * partitions (`parquet.ts`) and reads union both.
+ * One typed table per entity family (`schema.ts`) with real named columns
+ * and real SQL `NULL`s for missing metrics — no AE sentinel, no positional
+ * `doubleN`/`blobN` layout, no v3 `parts` marker (v4 has no `MetricPart`
+ * allowlist: a family simply has no row for a sample that never reported
+ * it). Recent rows live in the hot DuckDB tables; completed UTC days are
+ * sealed per family into immutable Parquet partitions (`parquet.ts`).
+ *
+ * Implements the full v4 contract (`ServerMetricsStoreV4`): ingest write
+ * path, `queryHostSeries`/`queryHostSummary`/`queryFleetHostSnapshot` over
+ * any `host.*`/`cpuDetail.*`/`memoryDetail.*` canonical metric name, and
+ * `queryStatusHistory`.
  *
  * Fail clearly when configured-but-unavailable: DuckDB/filesystem failures
- * propagate as thrown errors on read paths so chart routes return a clear
- * "metrics backend unavailable" response. Writes are batched in-process
- * (row count + age) and stay fire-and-forget at the ingest boundary.
+ * propagate as thrown errors. Writes are batched in-process (row count +
+ * age) and stay fire-and-forget at the ingest boundary.
  */
 
 import {
-  HOST_METRIC_KEYS,
-  type HostMetricKey,
-  METRIC_PARTS,
-  type MetricPart,
-} from "../../contract.ts";
-import { HOST_METRICS_METRIC_DESCRIPTORS } from "../../metric-descriptors.ts";
+  HOST_METRICS_METRIC_DESCRIPTORS_V4,
+  type HostMetricsMetricDescriptorV4,
+  type MetricEntityScopeV4,
+} from '../../metric-descriptors-v4.ts'
+import type { MetricEventKindV4, MetricEventSeverityV4, MetricEventV4 } from '../../contract-v4.ts'
 import {
   AE_DEFAULT_MAX_RANGE_SECONDS,
   MAX_STATUS_EVENTS,
   resolveTruncatedStatusEvents,
-} from "../cloudflare/sql-api.ts";
+} from '../cloudflare/sql-api-v4.ts'
 import {
+  computeSeriesGapCount,
   defaultExpectedSamplesPerBucket,
-  finalizeHostSeriesResult,
-} from "../../query/series-response.ts";
-import { computeStatusUptime } from "../../query/uptime.ts";
+  finalizeHostSeriesResultV4,
+} from '../../query/series-response-v4.ts'
+import { computeStatusUptime } from '../../query/uptime.ts'
 import type {
-  AuthenticatedHostMetricsSample,
-  FleetHostSnapshotQuery,
-  FleetHostSnapshotResult,
-  FleetHostSnapshotServer,
-  HostSeriesPoint,
-  HostSeriesQuery,
-  HostSeriesResult,
-  HostSummaryQuery,
-  HostSummaryResult,
-  ServerMetricsStore,
+  AuthenticatedMetricsSampleV4,
+  CpuHotspotPointV4,
+  EntityIdsSeenQueryV4,
+  EntityIdsSeenResultV4,
+  EntitySeriesEntityResultV4,
+  EntitySeriesPointV4,
+  EntitySeriesQueryV4,
+  EntitySeriesResultV4,
+  FleetHostSnapshotQueryV4,
+  FleetHostSnapshotResultV4,
+  FleetHostSnapshotServerV4,
+  HostSeriesPointV4,
+  HostSeriesQueryV4,
+  HostSeriesResultV4,
+  HostSummaryQueryV4,
+  HostSummaryResultV4,
+  MetricEventsQueryV4,
+  MetricEventsResultV4,
+  PerEntityHostedFamilyV4,
+  ServerMetricsStoreV4,
   ServerStatusEvent,
+  SlotMapping,
   StatusHistoryQuery,
   StatusHistoryResult,
-} from "../../types.ts";
+} from '../../types-v4.ts'
 import {
   type DuckDbBindValue,
   type DuckDbConnectionLike,
@@ -54,25 +70,65 @@ import {
   escapeSqlString,
   openDuckDb,
   resolveDuckDbPaths,
-} from "./database.ts";
+} from './database.ts'
 import {
   cleanupTmpParquetFiles,
   listPartitionFilesInRange,
   MS_PER_DAY,
+  PARQUET_FAMILIES,
+  type ParquetFamily,
+  parquetFamily,
+  type ParquetFamilyKey,
   pruneExpiredPartitions,
   sealDayToParquet,
   timestampLiteralFromMs,
   utcDayStartMs,
-} from "./parquet.ts";
+} from './parquet.ts'
 import {
-  HOST_METRICS_TABLE,
-  hostMetricsInsertColumns,
-  metricColumnName,
+  BLOCK_METRIC_FIELDS,
+  BLOCK_SAMPLES_TABLE,
+  blockSamplesInsertColumns,
+  CPU_CORE_LIVE_METRIC_FIELDS,
+  CPU_CORE_SAMPLES_TABLE,
+  CPU_HOTSPOT_METRIC_FIELDS,
+  CPU_HOTSPOT_SAMPLES_TABLE,
+  cpuCoreSamplesInsertColumns,
+  cpuDetailHostColumnName,
+  cpuHotspotSamplesInsertColumns,
+  DATABASE_PROXY_METRIC_FIELDS,
+  DATABASE_PROXY_SAMPLES_TABLE,
+  databaseProxySamplesInsertColumns,
+  entityMetricColumnName,
+  FILESYSTEM_METRIC_FIELDS,
+  FILESYSTEM_SAMPLES_TABLE,
+  filesystemSamplesInsertColumns,
+  GPU_METRIC_FIELDS,
+  GPU_SAMPLES_TABLE,
+  gpuSamplesInsertColumns,
+  HARDWARE_SIGNAL_SAMPLES_TABLE,
+  hardwareSignalSamplesInsertColumns,
+  HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST,
+  HOST_METRIC_FIELD_REFS,
+  HOST_SAMPLES_TABLE,
+  hostMetricColumnName,
+  type HostMetricGroupV4,
+  hostSamplesInsertColumns,
+  INGRESS_METRIC_FIELDS,
+  INGRESS_SAMPLES_TABLE,
+  ingressSamplesInsertColumns,
+  MEMORY_DETAIL_METRIC_FIELDS,
+  MEMORY_DETAIL_SAMPLES_TABLE,
+  memoryDetailSamplesInsertColumns,
+  METRIC_EVENTS_TABLE,
+  metricEventsInsertColumns,
+  NETWORK_METRIC_FIELDS,
+  NETWORK_SAMPLES_TABLE,
+  networkSamplesInsertColumns,
   STATUS_EVENTS_TABLE,
-} from "./schema.ts";
+} from './schema.ts'
 
 /** Flush when this many pending rows accumulate (small co-located fleet). */
-export const DUCKDB_WRITE_BATCH_MAX_ROWS = 10;
+export const DUCKDB_WRITE_BATCH_MAX_ROWS = 10
 
 /**
  * Max age before an incomplete batch flushes. Short on purpose: loaded
@@ -80,120 +136,123 @@ export const DUCKDB_WRITE_BATCH_MAX_ROWS = 10;
  * sample every ~60 s) must still persist promptly — an accepted row never
  * sits in memory for more than a few seconds.
  */
-export const DUCKDB_WRITE_BATCH_MAX_AGE_MS = 5_000;
+export const DUCKDB_WRITE_BATCH_MAX_AGE_MS = 5_000
 
 /** Default retention for hot rows + sealed partitions (matches AE's 90 days). */
-export const DEFAULT_DUCKDB_RETENTION_DAYS = 90;
+export const DEFAULT_DUCKDB_RETENTION_DAYS = 90
 
 /** Loopback port the dev-only embedded DuckDB UI serves on. */
-export const DUCKDB_UI_DEFAULT_PORT = 4213;
-
-/** Default bucket when `resolutionSeconds` is omitted (5 minutes). */
-export const DUCKDB_DEFAULT_BUCKET_SECONDS = 300;
+export const DUCKDB_UI_DEFAULT_PORT = 4213
 
 /** How often the armed daily-archive timer checks for a completed UTC day. */
-export const DUCKDB_ARCHIVE_CHECK_INTERVAL_MS = 60 * 60_000;
+export const DUCKDB_ARCHIVE_CHECK_INTERVAL_MS = 60 * 60_000
 
-/** Cap on serverIds accepted into a fleet snapshot IN-list. */
-export const DUCKDB_MAX_FLEET_SNAPSHOT_SERVERS = 500;
+/** Default bucket when `resolutionSeconds` is omitted (5 minutes). */
+export const DUCKDB_DEFAULT_BUCKET_SECONDS = 300
 
-const ALLOWED_METRIC_KEYS = new Set<string>(HOST_METRIC_KEYS);
+/** Cap on serverIds accepted into one fleet snapshot IN-list. */
+export const DUCKDB_MAX_FLEET_SNAPSHOT_SERVERS = 500
 
 export type DuckDbStoreConfig = {
   /** Metrics state root override (default: `resolveMetricsDir()`). */
-  metricsDir?: string;
+  metricsDir?: string
   /** DuckDB worker-thread cap (`SET threads`, default 2). */
-  threads?: number;
+  threads?: number
   /** DuckDB memory cap in MiB (`SET memory_limit`, default 128). */
-  memoryLimitMb?: number;
+  memoryLimitMb?: number
   /** Hot + Parquet retention days (default 90). */
-  retentionDays?: number;
-};
+  retentionDays?: number
+}
 
 export type DuckDbStoreOptions = {
   /** Injected handle factory (tests) — skips filesystem setup + native open. */
-  openHandle?: () => Promise<DuckDbHandle>;
+  openHandle?: () => Promise<DuckDbHandle>
   /** Override insert batch size (default {@link DUCKDB_WRITE_BATCH_MAX_ROWS}). */
-  writeBatchMaxRows?: number;
+  writeBatchMaxRows?: number
   /** Override insert batch age (default {@link DUCKDB_WRITE_BATCH_MAX_AGE_MS}). */
-  writeBatchMaxAgeMs?: number;
-  setTimeoutFn?: typeof setTimeout;
-  clearTimeoutFn?: typeof clearTimeout;
-  setIntervalFn?: typeof setInterval;
-  clearIntervalFn?: typeof clearInterval;
-  now?: () => number;
-  onFlushError?: (error: unknown) => void;
-};
+  writeBatchMaxAgeMs?: number
+  setTimeoutFn?: typeof setTimeout
+  clearTimeoutFn?: typeof clearTimeout
+  setIntervalFn?: typeof setInterval
+  clearIntervalFn?: typeof clearInterval
+  now?: () => number
+  onFlushError?: (error: unknown) => void
+}
 
-type PendingRow =
-  | { table: "host"; values: DuckDbBindValue[] }
-  | { table: "status"; values: DuckDbBindValue[] };
+type PendingRowTable =
+  | 'host'
+  | 'network'
+  | 'filesystem'
+  | 'block'
+  | 'gpu'
+  | 'cpuHotspot'
+  | 'cpuCore'
+  | 'memoryDetail'
+  | 'hardwareSignal'
+  | 'ingress'
+  | 'databaseProxy'
+  | 'event'
+  | 'status'
 
-export class DuckDbParquetServerMetricsStore implements ServerMetricsStore {
-  readonly #paths: DuckDbPaths;
-  readonly #threads: number | undefined;
-  readonly #memoryLimitMb: number | undefined;
-  readonly #retentionDays: number;
-  readonly #openHandle: () => Promise<DuckDbHandle>;
-  readonly #batchMaxRows: number;
-  readonly #batchMaxAgeMs: number;
-  readonly #setTimeout: typeof setTimeout;
-  readonly #clearTimeout: typeof clearTimeout;
-  readonly #setInterval: typeof setInterval;
-  readonly #clearInterval: typeof clearInterval;
-  readonly #now: () => number;
-  readonly #onFlushError: (error: unknown) => void;
-  #handle: DuckDbHandle | null = null;
-  #openPromise: Promise<DuckDbHandle> | null = null;
-  readonly #pendingRows: PendingRow[] = [];
-  #flushTimer: ReturnType<typeof setTimeout> | null = null;
-  #flushPromise: Promise<void> | null = null;
-  #archiveTimer: ReturnType<typeof setInterval> | null = null;
+type PendingRow = { table: PendingRowTable; values: DuckDbBindValue[] }
+
+export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV4 {
+  readonly #paths: DuckDbPaths
+  readonly #threads: number | undefined
+  readonly #memoryLimitMb: number | undefined
+  readonly #retentionDays: number
+  readonly #openHandle: () => Promise<DuckDbHandle>
+  readonly #batchMaxRows: number
+  readonly #batchMaxAgeMs: number
+  readonly #setTimeout: typeof setTimeout
+  readonly #clearTimeout: typeof clearTimeout
+  readonly #setInterval: typeof setInterval
+  readonly #clearInterval: typeof clearInterval
+  readonly #now: () => number
+  readonly #onFlushError: (error: unknown) => void
+  #handle: DuckDbHandle | null = null
+  #openPromise: Promise<DuckDbHandle> | null = null
+  readonly #pendingRows: PendingRow[] = []
+  #flushTimer: ReturnType<typeof setTimeout> | null = null
+  #flushPromise: Promise<void> | null = null
+  #archiveTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(config: DuckDbStoreConfig = {}, options?: DuckDbStoreOptions) {
-    this.#threads = assertOptionalPositiveInt("threads", config.threads);
-    this.#memoryLimitMb = assertOptionalPositiveInt(
-      "memoryLimitMb",
-      config.memoryLimitMb,
-    );
-    this.#retentionDays = assertOptionalPositiveInt(
-      "retentionDays",
-      config.retentionDays,
-    ) ?? DEFAULT_DUCKDB_RETENTION_DAYS;
-    this.#paths = resolveDuckDbPaths(config.metricsDir);
-    this.#batchMaxRows = options?.writeBatchMaxRows ??
-      DUCKDB_WRITE_BATCH_MAX_ROWS;
-    this.#batchMaxAgeMs = options?.writeBatchMaxAgeMs ??
-      DUCKDB_WRITE_BATCH_MAX_AGE_MS;
-    this.#setTimeout = options?.setTimeoutFn ?? setTimeout;
-    this.#clearTimeout = options?.clearTimeoutFn ?? clearTimeout;
-    this.#setInterval = options?.setIntervalFn ?? setInterval;
-    this.#clearInterval = options?.clearIntervalFn ?? clearInterval;
-    this.#now = options?.now ?? Date.now;
-    this.#onFlushError = options?.onFlushError ?? defaultFlushErrorLog;
+    this.#threads = assertOptionalPositiveInt('threads', config.threads)
+    this.#memoryLimitMb = assertOptionalPositiveInt('memoryLimitMb', config.memoryLimitMb)
+    this.#retentionDays =
+      assertOptionalPositiveInt('retentionDays', config.retentionDays) ??
+      DEFAULT_DUCKDB_RETENTION_DAYS
+    this.#paths = resolveDuckDbPaths(config.metricsDir)
+    this.#batchMaxRows = options?.writeBatchMaxRows ?? DUCKDB_WRITE_BATCH_MAX_ROWS
+    this.#batchMaxAgeMs = options?.writeBatchMaxAgeMs ?? DUCKDB_WRITE_BATCH_MAX_AGE_MS
+    this.#setTimeout = options?.setTimeoutFn ?? setTimeout
+    this.#clearTimeout = options?.clearTimeoutFn ?? clearTimeout
+    this.#setInterval = options?.setIntervalFn ?? setInterval
+    this.#clearInterval = options?.clearIntervalFn ?? clearInterval
+    this.#now = options?.now ?? Date.now
+    this.#onFlushError = options?.onFlushError ?? defaultFlushErrorLog
     if (options?.openHandle) {
-      this.#openHandle = options.openHandle;
+      this.#openHandle = options.openHandle
     } else {
       // Fail at construction (not first query) when the metrics directory
       // cannot be created — store selection catches this and falls back to
       // the disabled store.
-      Deno.mkdirSync(this.#paths.metricsDir, { recursive: true });
-      Deno.mkdirSync(this.#paths.parquetRoot, { recursive: true });
-      Deno.mkdirSync(this.#paths.tmpDir, { recursive: true });
+      Deno.mkdirSync(this.#paths.metricsDir, { recursive: true })
+      Deno.mkdirSync(this.#paths.parquetRoot, { recursive: true })
+      Deno.mkdirSync(this.#paths.tmpDir, { recursive: true })
       this.#openHandle = () =>
         openDuckDb({
           paths: this.#paths,
           ...(this.#threads !== undefined ? { threads: this.#threads } : {}),
-          ...(this.#memoryLimitMb !== undefined
-            ? { memoryLimitMb: this.#memoryLimitMb }
-            : {}),
-        });
+          ...(this.#memoryLimitMb !== undefined ? { memoryLimitMb: this.#memoryLimitMb } : {}),
+        })
     }
   }
 
   /** Resolved on-disk layout (db file, parquet tree, tmp spill). */
   get paths(): DuckDbPaths {
-    return this.#paths;
+    return this.#paths
   }
 
   /**
@@ -202,259 +261,226 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStore {
    * to the single writer instead of a second process opening the database
    * file. Idempotent — `start_ui_server()` is a no-op when already running.
    */
-  async startUiServer(
-    port: number = DUCKDB_UI_DEFAULT_PORT,
-  ): Promise<{ port: number }> {
+  async startUiServer(port: number = DUCKDB_UI_DEFAULT_PORT): Promise<{ port: number }> {
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-      throw new TypeError("port must be a valid TCP port");
+      throw new TypeError('port must be a valid TCP port')
     }
-    const handle = await this.#ensureOpen();
-    await handle.connection.run(`SET ui_local_port = ${port}`);
-    await handle.connection.run("INSTALL ui");
-    await handle.connection.run("LOAD ui");
-    await handle.connection.run("CALL start_ui_server()");
-    return { port };
+    const handle = await this.#ensureOpen()
+    await handle.connection.run(`SET ui_local_port = ${port}`)
+    await handle.connection.run('INSTALL ui')
+    await handle.connection.run('LOAD ui')
+    await handle.connection.run('CALL start_ui_server()')
+    return { port }
   }
 
   /**
-   * Fire-and-forget insert (batched). Returns a Promise so callers can
-   * `.catch`; the ingest path must not await it into the request handler.
+   * Fire-and-forget insert (batched). Fans one sample into a `host` row, one
+   * row per entity in `networks`/`filesystems`/`blockDevices`/`gpus`/
+   * `hardwareSignals`/`ingressSources`/`databaseProxies`, and one row per
+   * `events` entry — all enqueued together so `#flushPending` commits the
+   * entire fan-out for one sample in a single transaction (never split
+   * across two batches). `slotMapping` is accepted to satisfy
+   * `ServerMetricsStoreV4` but not consulted: DuckDB has no page/slot
+   * concept to resolve identity against.
    */
-  writeHostSample(input: AuthenticatedHostMetricsSample): Promise<void> {
-    const values: DuckDbBindValue[] = [
+  writeSample(input: AuthenticatedMetricsSampleV4, _slotMapping?: SlotMapping): Promise<void> {
+    const common: DuckDbBindValue[] = [
       input.serverId,
-      toDuckDbTimestamp(input.sampledAt),
+      toDuckDbTimestamp(input.metadata.sampledAt),
       toDuckDbTimestamp(input.receivedAt),
-      Math.round(input.intervalSeconds),
-      input.collectionMode,
-      input.dimensions.hardwareProfileGeneration ?? null,
-      input.parts.join(","),
-    ];
-    for (const key of HOST_METRIC_KEYS) {
-      // Raw value or SQL NULL — never a sentinel, never a coerced 0.
-      values.push(input.metrics[key] ?? null);
+      Math.round(input.metadata.intervalSeconds),
+      input.metadata.collectionMode,
+      input.metadata.sequence,
+      input.metadata.topologyGeneration,
+      input.metadata.bootGeneration,
+    ]
+    const rows: PendingRow[] = []
+
+    rows.push({
+      table: 'host',
+      values: [
+        ...common,
+        ...HOST_METRIC_FIELD_REFS.map((ref) => numericField(input.host[ref.group], ref.field)),
+        ...HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST.map((field) =>
+          input.cpuDetail ? numericField(input.cpuDetail, field) : null
+        ),
+      ],
+    })
+
+    if (input.cpuDetail) {
+      for (const hotspot of input.cpuDetail.hotspots) {
+        rows.push({
+          table: 'cpuHotspot',
+          values: [
+            ...common,
+            hotspot.coreId,
+            ...CPU_HOTSPOT_METRIC_FIELDS.map((field) => numericField(hotspot, field)),
+          ],
+        })
+      }
     }
-    return this.#enqueueRow({ table: "host", values });
+
+    if (input.memoryDetail) {
+      rows.push({
+        table: 'memoryDetail',
+        values: [
+          ...common,
+          ...MEMORY_DETAIL_METRIC_FIELDS.map((field) => numericField(input.memoryDetail, field)),
+        ],
+      })
+    }
+
+    for (const core of input.cpuCoreLive ?? []) {
+      rows.push({
+        table: 'cpuCore',
+        values: [
+          ...common,
+          core.coreId,
+          ...CPU_CORE_LIVE_METRIC_FIELDS.map((field) => numericField(core, field)),
+        ],
+      })
+    }
+
+    for (const network of input.networks) {
+      rows.push({
+        table: 'network',
+        values: [
+          ...common,
+          network.deviceId,
+          ...NETWORK_METRIC_FIELDS.map((field) => numericField(network, field)),
+        ],
+      })
+    }
+
+    for (const filesystem of input.filesystems) {
+      rows.push({
+        table: 'filesystem',
+        values: [
+          ...common,
+          filesystem.filesystemId,
+          ...FILESYSTEM_METRIC_FIELDS.map((field) => numericField(filesystem, field)),
+        ],
+      })
+    }
+
+    for (const device of input.blockDevices) {
+      rows.push({
+        table: 'block',
+        values: [
+          ...common,
+          device.deviceId,
+          ...BLOCK_METRIC_FIELDS.map((field) => numericField(device, field)),
+        ],
+      })
+    }
+
+    for (const gpu of input.gpus) {
+      rows.push({
+        table: 'gpu',
+        values: [
+          ...common,
+          gpu.gpuId,
+          ...GPU_METRIC_FIELDS.map((field) => numericField(gpu, field)),
+        ],
+      })
+    }
+
+    for (const signal of input.hardwareSignals) {
+      rows.push({
+        table: 'hardwareSignal',
+        values: [...common, signal.signalId, signal.kind, signal.value ?? null],
+      })
+    }
+
+    for (const ingress of input.ingressSources) {
+      rows.push({
+        table: 'ingress',
+        values: [
+          ...common,
+          ingress.sourceId,
+          ingress.sourceKind,
+          ...INGRESS_METRIC_FIELDS.map((field) => numericField(ingress, field)),
+        ],
+      })
+    }
+
+    for (const proxy of input.databaseProxies) {
+      rows.push({
+        table: 'databaseProxy',
+        values: [
+          ...common,
+          proxy.sourceId,
+          proxy.sourceKind,
+          ...DATABASE_PROXY_METRIC_FIELDS.map((field) => numericField(proxy, field)),
+        ],
+      })
+    }
+
+    for (const event of input.events) {
+      rows.push({
+        table: 'event',
+        values: [
+          input.serverId,
+          event.eventId,
+          toDuckDbTimestamp(event.at),
+          toDuckDbTimestamp(input.receivedAt),
+          event.kind,
+          event.severity,
+          input.metadata.topologyGeneration,
+          event.entityId ?? null,
+          event.source ?? null,
+          event.payload ? JSON.stringify(event.payload) : null,
+        ],
+      })
+    }
+
+    return this.#enqueueRows(rows)
   }
 
   /**
    * Fire-and-forget status transition — batched onto the same pending buffer
-   * / flush timer as host samples, but inserted into its own typed table.
+   * / flush timer as metric samples, but inserted into its own typed table.
    */
   writeStatusEvent(input: ServerStatusEvent): Promise<void> {
-    return this.#enqueueRow({
-      table: "status",
-      values: [
-        input.serverId,
-        toDuckDbTimestamp(input.at),
-        input.connected,
-        input.reason,
-      ],
-    });
+    return this.#enqueueRows([
+      {
+        table: 'status',
+        values: [input.serverId, toDuckDbTimestamp(input.at), input.connected, input.reason],
+      },
+    ])
   }
 
   /** Force-flush pending writes (queries / shutdown / archive tick). */
   flushWrites(): Promise<void> {
-    return this.#flushPending({ rethrow: true });
+    return this.#flushPending({ rethrow: true })
   }
 
-  async queryHostSeries(input: HostSeriesQuery): Promise<HostSeriesResult> {
-    await this.flushWrites();
-    const serverId = assertSafeServerId(input.serverId);
-    const metrics = assertAllowedMetrics(input.metrics);
-    const from = assertIsoTimestamp("from", input.from);
-    const to = assertIsoTimestamp("to", input.to);
-    assertRange(from, to);
-    const bucketSeconds = assertPositiveInt(
-      "resolutionSeconds",
-      input.resolutionSeconds ?? DUCKDB_DEFAULT_BUCKET_SECONDS,
-    );
+  async queryStatusHistory(input: StatusHistoryQuery): Promise<StatusHistoryResult> {
+    await this.flushWrites()
+    const serverId = assertSafeServerId(input.serverId)
+    const from = assertIsoTimestamp('from', input.from)
+    const to = assertIsoTimestamp('to', input.to)
+    assertRange(from, to)
 
-    const handle = await this.#ensureOpen();
-    const source = await this.#samplesSource(from.getTime(), to.getTime());
-    const metricSelects = metrics.map((key) =>
-      `${metricAggregateSql(key)} AS "${key}"`
-    );
-    const sql = [
-      "SELECT",
-      `  CAST((epoch_ms(sampled_at) // ${
-        bucketSeconds * 1000
-      }) * ${bucketSeconds} AS DOUBLE) AS bucket,`,
-      `  CAST(count(*) AS DOUBLE) AS sample_count,`,
-      `  CAST(avg(interval_seconds) AS DOUBLE) AS avg_interval_seconds,`,
-      `  string_agg(DISTINCT parts, ',') AS parts_present_raw,`,
-      `  string_agg(DISTINCT CAST(hardware_profile_generation AS VARCHAR), ',') AS hw_gen_raw,`,
-      `  ${metricSelects.join(",\n  ")}`,
-      `FROM ${source}`,
-      `WHERE server_id = CAST(? AS UUID)`,
-      `  AND sampled_at >= CAST(? AS TIMESTAMP)`,
-      `  AND sampled_at < CAST(? AS TIMESTAMP)`,
-      `GROUP BY bucket`,
-      `ORDER BY bucket ASC`,
-    ].join("\n");
-
-    const reader = await handle.connection.runAndReadAll(sql, [
-      serverId,
-      toDuckDbTimestamp(from.toISOString()),
-      toDuckDbTimestamp(to.toISOString()),
-    ]);
-    const { points, sampleCount, hardwareProfileGenerations } =
-      parseSeriesRows(
-        metrics,
-        reader.getRowObjectsJS(),
-        bucketSeconds,
-      );
-
-    return finalizeHostSeriesResult(from.toISOString(), to.toISOString(), {
-      kind: "duckdb",
-      available: true,
-      serverId: input.serverId,
-      metrics,
-      points,
-      resolutionSeconds: bucketSeconds,
-      gapCount: 0,
-      sampleCount,
-      hardwareProfileGenerations,
-    });
-  }
-
-  async queryHostSummary(input: HostSummaryQuery): Promise<HostSummaryResult> {
-    await this.flushWrites();
-    const serverId = assertSafeServerId(input.serverId);
-    const from = assertIsoTimestamp("from", input.from);
-    const to = assertIsoTimestamp("to", input.to);
-    assertRange(from, to);
-
-    const handle = await this.#ensureOpen();
-    const source = await this.#samplesSource(from.getTime(), to.getTime());
-    const sql = [
-      "SELECT",
-      `  CAST(count(*) AS DOUBLE) AS sample_count,`,
-      `  CAST(epoch_ms(max(sampled_at)) AS DOUBLE) AS latest_at_ms`,
-      `FROM ${source}`,
-      `WHERE server_id = CAST(? AS UUID)`,
-      `  AND sampled_at >= CAST(? AS TIMESTAMP)`,
-      `  AND sampled_at < CAST(? AS TIMESTAMP)`,
-    ].join("\n");
-    const reader = await handle.connection.runAndReadAll(sql, [
-      serverId,
-      toDuckDbTimestamp(from.toISOString()),
-      toDuckDbTimestamp(to.toISOString()),
-    ]);
-    const row = reader.getRowObjectsJS()[0];
-    const sampleCount = toFiniteNumber(row?.sample_count) ?? 0;
-    const latestAtMs = toFiniteNumber(row?.latest_at_ms);
-
-    return {
-      kind: "duckdb",
-      available: true,
-      serverId: input.serverId,
-      sampleCount,
-      latestAt: sampleCount > 0 && latestAtMs !== null
-        ? new Date(latestAtMs).toISOString()
-        : null,
-    };
-  }
-
-  async queryFleetHostSnapshot(
-    input: FleetHostSnapshotQuery,
-  ): Promise<FleetHostSnapshotResult> {
-    if (input.serverIds.length === 0) {
-      return {
-        kind: "duckdb",
-        available: true,
-        metrics: [...input.metrics],
-        servers: [],
-      };
-    }
-    await this.flushWrites();
-    const metrics = assertAllowedMetrics(input.metrics);
-    const from = assertIsoTimestamp("from", input.from);
-    const to = assertIsoTimestamp("to", input.to);
-    assertRange(from, to);
-    const serverIds = dedupeServerIds(input.serverIds);
-
-    const handle = await this.#ensureOpen();
-    const source = await this.#samplesSource(from.getTime(), to.getTime());
-    const metricSelects = metrics.map((key) =>
-      `${metricAggregateSql(key)} AS "${key}"`
-    );
-    const inList = serverIds.map(() => "CAST(? AS UUID)").join(", ");
-    const sql = [
-      "SELECT",
-      `  CAST(server_id AS VARCHAR) AS server_id,`,
-      `  CAST(count(*) AS DOUBLE) AS sample_count,`,
-      `  CAST(epoch_ms(max(sampled_at)) AS DOUBLE) AS latest_at_ms,`,
-      `  string_agg(DISTINCT parts, ',') AS parts_present_raw,`,
-      `  string_agg(DISTINCT CAST(hardware_profile_generation AS VARCHAR), ',') AS hw_gen_raw,`,
-      `  ${metricSelects.join(",\n  ")}`,
-      `FROM ${source}`,
-      `WHERE server_id IN (${inList})`,
-      `  AND sampled_at >= CAST(? AS TIMESTAMP)`,
-      `  AND sampled_at < CAST(? AS TIMESTAMP)`,
-      `GROUP BY server_id`,
-    ].join("\n");
-    const reader = await handle.connection.runAndReadAll(sql, [
-      ...serverIds,
-      toDuckDbTimestamp(from.toISOString()),
-      toDuckDbTimestamp(to.toISOString()),
-    ]);
-
-    const servers: FleetHostSnapshotServer[] = [];
-    for (const row of reader.getRowObjectsJS()) {
-      const serverId = typeof row.server_id === "string"
-        ? row.server_id.trim()
-        : "";
-      if (!serverId) continue;
-      const sampleCount = toFiniteNumber(row.sample_count) ?? 0;
-      const latestAtMs = toFiniteNumber(row.latest_at_ms);
-      const generations = parseHardwareProfileGenerations(row.hw_gen_raw);
-      servers.push({
-        serverId,
-        sampleCount,
-        latestAt: latestAtMs === null || sampleCount <= 0
-          ? null
-          : new Date(latestAtMs).toISOString(),
-        values: parseMetricValues(metrics, row),
-        partsPresent: parsePartsPresent(row.parts_present_raw),
-        hardwareProfileGeneration: generations.length === 1
-          ? generations[0]!
-          : null,
-      });
-    }
-    servers.sort((a, b) => a.serverId.localeCompare(b.serverId));
-
-    return { kind: "duckdb", available: true, metrics, servers };
-  }
-
-  async queryStatusHistory(
-    input: StatusHistoryQuery,
-  ): Promise<StatusHistoryResult> {
-    await this.flushWrites();
-    const serverId = assertSafeServerId(input.serverId);
-    const from = assertIsoTimestamp("from", input.from);
-    const to = assertIsoTimestamp("to", input.to);
-    assertRange(from, to);
-
-    const handle = await this.#ensureOpen();
+    const handle = await this.#ensureOpen()
     // Aliases match `resolveTruncatedStatusEvents` row expectations
     // (`timestamp` epoch-ms, `connected`, `reason`).
     const selectList = [
       `  CAST(epoch_ms("at") AS DOUBLE) AS "timestamp",`,
       `  connected,`,
       `  reason`,
-    ].join("\n");
+    ].join('\n')
     const priorSql = [
-      "SELECT",
+      'SELECT',
       selectList,
       `FROM ${STATUS_EVENTS_TABLE}`,
       `WHERE server_id = CAST(? AS UUID)`,
       `  AND "at" < CAST(? AS TIMESTAMP)`,
       `ORDER BY "at" DESC`,
       `LIMIT 1`,
-    ].join("\n");
+    ].join('\n')
     const eventsSql = [
-      "SELECT",
+      'SELECT',
       selectList,
       `FROM ${STATUS_EVENTS_TABLE}`,
       `WHERE server_id = CAST(? AS UUID)`,
@@ -462,41 +488,36 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStore {
       `  AND "at" < CAST(? AS TIMESTAMP)`,
       `ORDER BY "at" ASC`,
       `LIMIT ${MAX_STATUS_EVENTS + 1}`,
-    ].join("\n");
+    ].join('\n')
 
     // Sequential on purpose — a DuckDB connection is not safe for
     // concurrent statements.
-    const fromParam = toDuckDbTimestamp(from.toISOString());
-    const toParam = toDuckDbTimestamp(to.toISOString());
-    const priorReader = await handle.connection.runAndReadAll(priorSql, [
-      serverId,
-      fromParam,
-    ]);
+    const fromParam = toDuckDbTimestamp(from.toISOString())
+    const toParam = toDuckDbTimestamp(to.toISOString())
+    const priorReader = await handle.connection.runAndReadAll(priorSql, [serverId, fromParam])
     const eventsReader = await handle.connection.runAndReadAll(eventsSql, [
       serverId,
       fromParam,
       toParam,
-    ]);
+    ])
 
-    const priorConnected = parseStatusConnected(
-      priorReader.getRowObjectsJS()[0]?.connected,
-    );
-    const fromMs = from.getTime();
-    const toMs = to.getTime();
+    const priorConnected = parseStatusConnected(priorReader.getRowObjectsJS()[0]?.connected)
+    const fromMs = from.getTime()
+    const toMs = to.getTime()
     const { events, truncated, knownUntilMs } = resolveTruncatedStatusEvents(
       eventsReader.getRowObjectsJS(),
-      fromMs,
-    );
+      fromMs
+    )
     const uptime = computeStatusUptime({
       fromMs,
       toMs,
       initialConnected: priorConnected,
       events,
       knownUntilMs,
-    });
+    })
 
     return {
-      kind: "duckdb",
+      kind: 'duckdb',
       available: true,
       serverId: input.serverId,
       initialConnected: priorConnected,
@@ -506,7 +527,291 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStore {
       unknownSeconds: uptime.unknownSeconds,
       uptimePercent: uptime.uptimePercent,
       truncated,
-    };
+    }
+  }
+
+  /**
+   * Real per-descriptor aggregation (`HOST_METRICS_METRIC_DESCRIPTORS_V4`)
+   * over any `host.*` canonical metric name. Also accepts `cpuDetail.*`/
+   * `memoryDetail.*` canonical names (host-singleton scalars, same as
+   * `host.*`): `cpuDetail` fields live on the host row itself (`cpu_detail_*`
+   * columns), so they need no join; `memoryDetail` fields live in their own
+   * singleton table (`server_memory_detail_samples`), left-joined on
+   * `(server_id, sampled_at)` — every sample writes its host and
+   * memoryDetail rows with the identical pair, so the join is exact, never
+   * fan-out. Requesting any `cpuDetail.*` field also rehydrates
+   * `HostSeriesPointV4.cpuHotspots` from `server_cpu_hotspot_samples`, keyed
+   * off each bucket's last-observed sample — mirrors the Cloudflare
+   * backend's `cpuHotspots` attachment (`sql-api-v4.ts`'s
+   * `parseCpuHotspotsV4`) so both backends return the same shape, though
+   * DuckDB has no fixed 4-slot embed to pad against: a bucket reports as
+   * many hotspots as that sample actually recorded (0-4), not always
+   * exactly 4.
+   */
+  async queryHostSeries(input: HostSeriesQueryV4): Promise<HostSeriesResultV4> {
+    await this.flushWrites()
+    const serverId = assertSafeServerId(input.serverId)
+    const metrics = assertHostMetricsV4(input.metrics, HOST_SERIES_EXTRA_SCOPES_V4)
+    const from = assertIsoTimestamp('from', input.from)
+    const to = assertIsoTimestamp('to', input.to)
+    assertRange(from, to)
+    const bucketSeconds = assertPositiveInt(
+      'resolutionSeconds',
+      input.resolutionSeconds ?? DUCKDB_DEFAULT_BUCKET_SECONDS
+    )
+
+    const handle = await this.#ensureOpen()
+    const fromMs = from.getTime()
+    const toMs = to.getTime()
+    const hostSource = await this.#familySamplesSource(parquetFamily('host'), fromMs, toMs)
+    const requiresMemoryDetail = requiresEntityScopeV4(metrics, 'memoryDetail')
+    const requiresCpuDetail = requiresEntityScopeV4(metrics, 'cpuDetail')
+
+    let joinSql = ''
+    if (requiresMemoryDetail) {
+      const memoryDetailSource = await this.#familySamplesSource(
+        parquetFamily('memory-detail'),
+        fromMs,
+        toMs
+      )
+      joinSql = `LEFT JOIN ${memoryDetailSource} AS md ON md.server_id = h.server_id AND md.sampled_at = h.sampled_at`
+    }
+
+    const metricSelects = metrics.map((name) => {
+      const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[name]!
+      const column = hostSeriesColumnForDescriptorV4(descriptor)
+      // "h." metadata prefix: unambiguous even without the `md` join, and
+      // required whenever it's present (both tables carry `sampled_at`/
+      // `interval_seconds`).
+      return `${hostFieldAggregateSqlV4(descriptor, column, 'h.')} AS "${name}"`
+    })
+    const sql = [
+      'SELECT',
+      `  CAST((epoch_ms(h.sampled_at) // ${
+        bucketSeconds * 1000
+      }) * ${bucketSeconds} AS DOUBLE) AS bucket,`,
+      `  CAST(count(*) AS DOUBLE) AS sample_count,`,
+      `  CAST(avg(h.interval_seconds) AS DOUBLE) AS avg_interval_seconds,`,
+      `  string_agg(DISTINCT CAST(h.topology_generation AS VARCHAR), ',') AS topology_gen_raw,`,
+      ...(requiresCpuDetail
+        ? [`  CAST(epoch_ms(max(h.sampled_at)) AS DOUBLE) AS last_sampled_at_ms,`]
+        : []),
+      `  ${metricSelects.join(',\n  ')}`,
+      `FROM ${hostSource} AS h`,
+      ...(joinSql ? [joinSql] : []),
+      `WHERE h.server_id = CAST(? AS UUID)`,
+      `  AND h.sampled_at >= CAST(? AS TIMESTAMP)`,
+      `  AND h.sampled_at < CAST(? AS TIMESTAMP)`,
+      `GROUP BY bucket`,
+      `ORDER BY bucket ASC`,
+    ].join('\n')
+
+    const reader = await handle.connection.runAndReadAll(sql, [
+      serverId,
+      toDuckDbTimestamp(from.toISOString()),
+      toDuckDbTimestamp(to.toISOString()),
+    ])
+    const rows = reader.getRowObjectsJS()
+
+    const hotspotsByLastSampledAtMs = requiresCpuDetail
+      ? await this.#queryCpuHotspotsForTimestampsV4(
+          handle,
+          serverId,
+          rows
+            .map((row) => toFiniteNumber(row.last_sampled_at_ms))
+            .filter((ms): ms is number => ms !== null),
+          fromMs,
+          toMs
+        )
+      : undefined
+
+    const { points, sampleCount, topologyGenerations } = parseHostSeriesRowsV4(
+      metrics,
+      rows,
+      bucketSeconds,
+      hotspotsByLastSampledAtMs
+    )
+
+    return finalizeHostSeriesResultV4(from.toISOString(), to.toISOString(), {
+      kind: 'duckdb',
+      available: true,
+      serverId: input.serverId,
+      metrics,
+      points,
+      resolutionSeconds: bucketSeconds,
+      gapCount: 0,
+      sampleCount,
+      topologyGenerations,
+    })
+  }
+
+  /**
+   * `cpu.detail` hotspot rows (`server_cpu_hotspot_samples`) for a set of
+   * exact `sampled_at` instants — one bucket's last-observed sample each
+   * (`last_sampled_at_ms` from `queryHostSeries`'s SQL). Grouped by
+   * timestamp so the caller can attach each bucket's own hotspot list;
+   * ordered by `busyPercent` descending within a timestamp to approximate
+   * the original embed order (busiest core first), since this table carries
+   * no positional slot column.
+   */
+  async #queryCpuHotspotsForTimestampsV4(
+    handle: DuckDbHandle,
+    serverId: string,
+    sampledAtMsList: readonly number[],
+    fromMs: number,
+    toMs: number
+  ): Promise<Map<number, CpuHotspotPointV4[]>> {
+    const distinctMs = [...new Set(sampledAtMsList)]
+    if (distinctMs.length === 0) return new Map()
+
+    const source = await this.#familySamplesSource(parquetFamily('cpu-hotspot'), fromMs, toMs)
+    const busyPercentColumn = entityMetricColumnName('busyPercent')
+    const fieldSelects = CPU_HOTSPOT_METRIC_FIELDS.map(
+      (field) => `${entityMetricColumnName(field)}`
+    )
+    const inList = distinctMs.map(() => 'CAST(? AS TIMESTAMP)').join(', ')
+    const sql = [
+      'SELECT',
+      `  CAST(epoch_ms(sampled_at) AS DOUBLE) AS sampled_at_ms,`,
+      `  core_id,`,
+      `  ${fieldSelects.join(',\n  ')}`,
+      `FROM ${source}`,
+      `WHERE server_id = CAST(? AS UUID)`,
+      `  AND sampled_at IN (${inList})`,
+      `ORDER BY sampled_at_ms ASC, ${busyPercentColumn} DESC`,
+    ].join('\n')
+
+    const reader = await handle.connection.runAndReadAll(sql, [
+      serverId,
+      ...distinctMs.map((ms) => toDuckDbTimestamp(new Date(ms).toISOString())),
+    ])
+
+    const byMs = new Map<number, CpuHotspotPointV4[]>()
+    for (const row of reader.getRowObjectsJS()) {
+      const ms = toFiniteNumber(row.sampled_at_ms)
+      if (ms === null) continue
+      const coreId = typeof row.core_id === 'string' ? row.core_id : null
+      const values: Partial<Record<string, number | null>> = {}
+      for (const field of CPU_HOTSPOT_METRIC_FIELDS) {
+        values[field] = toFiniteNumber(row[entityMetricColumnName(field)])
+      }
+      const list = byMs.get(ms)
+      if (list) {
+        list.push({ coreId, values })
+      } else {
+        byMs.set(ms, [{ coreId, values }])
+      }
+    }
+    return byMs
+  }
+
+  async queryHostSummary(input: HostSummaryQueryV4): Promise<HostSummaryResultV4> {
+    await this.flushWrites()
+    const serverId = assertSafeServerId(input.serverId)
+    const from = assertIsoTimestamp('from', input.from)
+    const to = assertIsoTimestamp('to', input.to)
+    assertRange(from, to)
+
+    const handle = await this.#ensureOpen()
+    const source = await this.#hostSamplesSource(from.getTime(), to.getTime())
+    const sql = [
+      'SELECT',
+      `  CAST(count(*) AS DOUBLE) AS sample_count,`,
+      `  CAST(epoch_ms(max(sampled_at)) AS DOUBLE) AS latest_at_ms`,
+      `FROM ${source}`,
+      `WHERE server_id = CAST(? AS UUID)`,
+      `  AND sampled_at >= CAST(? AS TIMESTAMP)`,
+      `  AND sampled_at < CAST(? AS TIMESTAMP)`,
+    ].join('\n')
+    const reader = await handle.connection.runAndReadAll(sql, [
+      serverId,
+      toDuckDbTimestamp(from.toISOString()),
+      toDuckDbTimestamp(to.toISOString()),
+    ])
+    const row = reader.getRowObjectsJS()[0]
+    const sampleCount = toFiniteNumber(row?.sample_count) ?? 0
+    const latestAtMs = toFiniteNumber(row?.latest_at_ms)
+
+    return {
+      kind: 'duckdb',
+      available: true,
+      serverId: input.serverId,
+      sampleCount,
+      latestAt: sampleCount > 0 && latestAtMs !== null ? new Date(latestAtMs).toISOString() : null,
+    }
+  }
+
+  /**
+   * Real per-descriptor aggregation over any `host.*` canonical metric name.
+   */
+  async queryFleetHostSnapshot(
+    input: FleetHostSnapshotQueryV4
+  ): Promise<FleetHostSnapshotResultV4> {
+    if (input.serverIds.length === 0) {
+      return {
+        kind: 'duckdb',
+        available: true,
+        metrics: [...input.metrics],
+        servers: [],
+      }
+    }
+    await this.flushWrites()
+    const metrics = assertHostMetricsV4(input.metrics)
+    const from = assertIsoTimestamp('from', input.from)
+    const to = assertIsoTimestamp('to', input.to)
+    assertRange(from, to)
+    const serverIds = dedupeServerIds(input.serverIds)
+
+    const handle = await this.#ensureOpen()
+    const source = await this.#familySamplesSource(
+      parquetFamily('host'),
+      from.getTime(),
+      to.getTime()
+    )
+    const metricSelects = metrics.map((name) => {
+      const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[name]!
+      const column = hostColumnForDescriptorV4(descriptor)
+      return `${hostFieldAggregateSqlV4(descriptor, column)} AS "${name}"`
+    })
+    const inList = serverIds.map(() => 'CAST(? AS UUID)').join(', ')
+    const sql = [
+      'SELECT',
+      `  CAST(server_id AS VARCHAR) AS server_id,`,
+      `  CAST(count(*) AS DOUBLE) AS sample_count,`,
+      `  CAST(epoch_ms(max(sampled_at)) AS DOUBLE) AS latest_at_ms,`,
+      `  string_agg(DISTINCT CAST(topology_generation AS VARCHAR), ',') AS topology_gen_raw,`,
+      `  ${metricSelects.join(',\n  ')}`,
+      `FROM ${source}`,
+      `WHERE server_id IN (${inList})`,
+      `  AND sampled_at >= CAST(? AS TIMESTAMP)`,
+      `  AND sampled_at < CAST(? AS TIMESTAMP)`,
+      `GROUP BY server_id`,
+    ].join('\n')
+    const reader = await handle.connection.runAndReadAll(sql, [
+      ...serverIds,
+      toDuckDbTimestamp(from.toISOString()),
+      toDuckDbTimestamp(to.toISOString()),
+    ])
+
+    const servers: FleetHostSnapshotServerV4[] = []
+    for (const row of reader.getRowObjectsJS()) {
+      const serverId = typeof row.server_id === 'string' ? row.server_id.trim() : ''
+      if (!serverId) continue
+      const sampleCount = toFiniteNumber(row.sample_count) ?? 0
+      const latestAtMs = toFiniteNumber(row.latest_at_ms)
+      const generations = parseHardwareProfileGenerations(row.topology_gen_raw)
+      servers.push({
+        serverId,
+        sampleCount,
+        latestAt:
+          latestAtMs === null || sampleCount <= 0 ? null : new Date(latestAtMs).toISOString(),
+        values: parseMetricValuesV4(metrics, row),
+        topologyGeneration: generations.length === 1 ? generations[0]! : null,
+      })
+    }
+    servers.sort((a, b) => a.serverId.localeCompare(b.serverId))
+
+    return { kind: 'duckdb', available: true, metrics, servers }
   }
 
   /**
@@ -515,471 +820,1059 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStore {
    * can drive archiving deterministically via {@link runDailyArchiveOnce}.
    */
   startDailyArchiveTimer(): void {
-    if (this.#archiveTimer !== null) return;
+    if (this.#archiveTimer !== null) return
     const tick = () => {
       void this.runDailyArchiveOnce().catch((error) => {
-        this.#onFlushError(error);
-      });
-    };
-    this.#archiveTimer = this.#setInterval(
-      tick,
-      DUCKDB_ARCHIVE_CHECK_INTERVAL_MS,
-    );
+        this.#onFlushError(error)
+      })
+    }
+    this.#archiveTimer = this.#setInterval(tick, DUCKDB_ARCHIVE_CHECK_INTERVAL_MS)
     // Immediate first pass: sweep crash leftovers + seal any backlog days.
-    tick();
+    tick()
   }
 
   stopDailyArchiveTimer(): void {
-    if (this.#archiveTimer === null) return;
-    this.#clearInterval(this.#archiveTimer);
-    this.#archiveTimer = null;
+    if (this.#archiveTimer === null) return
+    this.#clearInterval(this.#archiveTimer)
+    this.#archiveTimer = null
   }
 
   /**
    * One archive pass: sweep interrupted exports, seal every completed UTC
-   * day still in the hot table, then apply retention to partitions and rows.
+   * day still hot in every family table, then apply retention to partitions
+   * and rows across every family (plus `server_status_events`).
    */
   async runDailyArchiveOnce(nowMs: number = this.#now()): Promise<void> {
-    const handle = await this.#ensureOpen();
-    await this.flushWrites();
+    const handle = await this.#ensureOpen()
+    await this.flushWrites()
     // An interrupted export never counts as sealed — its hot rows are still
     // in the hot table, so deleting the leftover cannot double-delete.
-    await cleanupTmpParquetFiles(this.#paths.tmpDir);
+    await cleanupTmpParquetFiles(this.#paths.tmpDir)
 
-    const todayStartMs = utcDayStartMs(nowMs);
-    const reader = await handle.connection.runAndReadAll(
-      `SELECT DISTINCT CAST(epoch_ms(sampled_at) // ${MS_PER_DAY} AS DOUBLE) AS day ` +
-        `FROM ${HOST_METRICS_TABLE} ` +
-        `WHERE sampled_at < ${timestampLiteralFromMs(todayStartMs)}`,
-    );
-    const days = reader.getRowObjectsJS()
-      .map((row) => toFiniteNumber(row.day))
-      .filter((day): day is number => day !== null)
-      .sort((a, b) => a - b);
-    for (const day of days) {
-      const dayStartMs = day * MS_PER_DAY;
-      await sealDayToParquet(handle.connection, {
-        dayStartMs,
-        dayEndMs: dayStartMs + MS_PER_DAY,
-        parquetRoot: this.#paths.parquetRoot,
-        tmpDir: this.#paths.tmpDir,
-      });
+    const todayStartMs = utcDayStartMs(nowMs)
+    for (const family of PARQUET_FAMILIES) {
+      const reader = await handle.connection.runAndReadAll(
+        `SELECT DISTINCT CAST(epoch_ms(${family.timestampColumn}) // ${MS_PER_DAY} AS DOUBLE) AS day ` +
+          `FROM ${family.table} ` +
+          `WHERE ${family.timestampColumn} < ${timestampLiteralFromMs(todayStartMs)}`
+      )
+      const days = reader
+        .getRowObjectsJS()
+        .map((row) => toFiniteNumber(row.day))
+        .filter((day): day is number => day !== null)
+        .sort((a, b) => a - b)
+      for (const day of days) {
+        const dayStartMs = day * MS_PER_DAY
+        await sealDayToParquet(handle.connection, {
+          family,
+          dayStartMs,
+          dayEndMs: dayStartMs + MS_PER_DAY,
+          parquetRoot: this.#paths.parquetRoot,
+          tmpDir: this.#paths.tmpDir,
+        })
+      }
     }
 
     await pruneExpiredPartitions(handle.connection, {
       retentionDays: this.#retentionDays,
       parquetRoot: this.#paths.parquetRoot,
       nowMs,
-    });
+    })
   }
 
   /** Flush pending writes and release the database handle (tests/shutdown). */
   async close(): Promise<void> {
-    this.stopDailyArchiveTimer();
-    this.#clearFlushTimer();
+    this.stopDailyArchiveTimer()
+    this.#clearFlushTimer()
     try {
-      await this.#flushPending({ rethrow: false });
+      await this.#flushPending({ rethrow: false })
     } finally {
       if (this.#openPromise !== null) {
         try {
-          await this.#openPromise;
+          await this.#openPromise
         } catch {
           // Never opened successfully — nothing to close.
         }
       }
-      this.#handle?.close();
-      this.#handle = null;
-      this.#openPromise = null;
+      this.#handle?.close()
+      this.#handle = null
+      this.#openPromise = null
     }
   }
 
   #ensureOpen(): Promise<DuckDbHandle> {
-    if (this.#handle !== null) return Promise.resolve(this.#handle);
-    if (this.#openPromise !== null) return this.#openPromise;
+    if (this.#handle !== null) return Promise.resolve(this.#handle)
+    if (this.#openPromise !== null) return this.#openPromise
     this.#openPromise = this.#openHandle()
       .then((handle) => {
-        this.#handle = handle;
-        return handle;
+        this.#handle = handle
+        return handle
       })
       .catch((error) => {
-        this.#openPromise = null;
-        throw error;
-      });
-    return this.#openPromise;
+        this.#openPromise = null
+        throw error
+      })
+    return this.#openPromise
   }
 
-  async #samplesSource(fromMs: number, toMs: number): Promise<string> {
+  /**
+   * `queryHostSummary`'s query source: the hot `server_host_samples` table,
+   * unioned with its sealed host-family Parquet partitions overlapping the
+   * queried range. Thin wrapper over {@link #familySamplesSource} for the
+   * `"host"` family.
+   */
+  #hostSamplesSource(fromMs: number, toMs: number): Promise<string> {
+    return this.#familySamplesSource(parquetFamily('host'), fromMs, toMs)
+  }
+
+  /**
+   * Query source for any family: its hot table, unioned with its sealed
+   * Parquet partitions overlapping `[fromMs, toMs)` (a no-op union when no
+   * partition overlaps — the plain hot table is returned as-is). Mirrors
+   * `runDailyArchiveOnce`'s per-family sealing, generalized to every
+   * `PARQUET_FAMILIES` entry rather than just `"host"`.
+   */
+  async #familySamplesSource(family: ParquetFamily, fromMs: number, toMs: number): Promise<string> {
     const files = await listPartitionFilesInRange(
       this.#paths.parquetRoot,
+      family.subdir,
       fromMs,
-      toMs,
-    );
-    if (files.length === 0) return HOST_METRICS_TABLE;
-    const fileList = files
-      .map((file) => `'${escapeSqlString(file)}'`)
-      .join(", ");
-    return `(SELECT * FROM ${HOST_METRICS_TABLE} ` +
+      toMs
+    )
+    if (files.length === 0) return family.table
+    const fileList = files.map((file) => `'${escapeSqlString(file)}'`).join(', ')
+    return (
+      `(SELECT * FROM ${family.table} ` +
       `UNION ALL BY NAME ` +
-      `SELECT * FROM read_parquet([${fileList}], union_by_name = true))`;
+      `SELECT * FROM read_parquet([${fileList}], union_by_name = true))`
+    )
   }
 
-  async #enqueueRow(row: PendingRow): Promise<void> {
+  /**
+   * Multi-entity, multi-metric series for one `PerEntityHostedFamilyV4` —
+   * real per-descriptor aggregation over the family's per-entity table
+   * (unioned with its sealed Parquet partitions), bucketed by time and
+   * grouped by entity id. `managed.ingress` / `managed.database_proxy` group
+   * by `source_id` so distinct sources of the same `source_kind` stay
+   * distinct entities — see `EntitySeriesQueryV4.entityIds`'s doc comment.
+   */
+  async queryEntitySeries(input: EntitySeriesQueryV4): Promise<EntitySeriesResultV4> {
+    if (input.entityIds.length === 0) {
+      return {
+        kind: 'duckdb',
+        available: true,
+        serverId: input.serverId,
+        family: input.family,
+        metrics: input.metrics,
+        resolutionSeconds: null,
+        entities: [],
+      }
+    }
+    await this.flushWrites()
+    const serverId = assertSafeServerId(input.serverId)
+    const config = entityFamilyConfig(input.family)
+    const fields = assertNonEmptyFields(input.metrics)
+    const from = assertIsoTimestamp('from', input.from)
+    const to = assertIsoTimestamp('to', input.to)
+    assertRange(from, to)
+    const bucketSeconds = assertPositiveInt(
+      'resolutionSeconds',
+      input.resolutionSeconds ?? DUCKDB_DEFAULT_BUCKET_SECONDS
+    )
+
+    const handle = await this.#ensureOpen()
+    const source = await this.#familySamplesSource(
+      parquetFamily(config.parquetKey),
+      from.getTime(),
+      to.getTime()
+    )
+    const metricSelects = fields.map((field) => {
+      const descriptor = resolveEntityFieldDescriptor(input.family, config.entityScope, field)
+      const column = entityMetricColumnForFamily(input.family, field)
+      return `${hostFieldAggregateSqlV4(descriptor, column)} AS "${field}"`
+    })
+    const inList = input.entityIds.map(() => '?').join(', ')
+    const sql = [
+      'SELECT',
+      `  CAST((epoch_ms(sampled_at) // ${
+        bucketSeconds * 1000
+      }) * ${bucketSeconds} AS DOUBLE) AS bucket,`,
+      `  ${config.idColumn} AS entity_id,`,
+      `  CAST(count(*) AS DOUBLE) AS sample_count,`,
+      `  ${metricSelects.join(',\n  ')}`,
+      `FROM ${source}`,
+      `WHERE server_id = CAST(? AS UUID)`,
+      `  AND ${config.idColumn} IN (${inList})`,
+      `  AND sampled_at >= CAST(? AS TIMESTAMP)`,
+      `  AND sampled_at < CAST(? AS TIMESTAMP)`,
+      `GROUP BY bucket, ${config.idColumn}`,
+      `ORDER BY bucket ASC`,
+    ].join('\n')
+
+    const reader = await handle.connection.runAndReadAll(sql, [
+      serverId,
+      ...input.entityIds,
+      toDuckDbTimestamp(from.toISOString()),
+      toDuckDbTimestamp(to.toISOString()),
+    ])
+
+    const rowsByEntity = new Map<string, DuckDbRow[]>()
+    for (const row of reader.getRowObjectsJS()) {
+      const entityId = typeof row.entity_id === 'string' ? row.entity_id : ''
+      if (!entityId) continue
+      const list = rowsByEntity.get(entityId)
+      if (list) {
+        list.push(row)
+      } else {
+        rowsByEntity.set(entityId, [row])
+      }
+    }
+
+    const fromMs = from.getTime()
+    const toMs = to.getTime()
+    const entities: EntitySeriesEntityResultV4[] = input.entityIds.map((entityId) => {
+      const rows = rowsByEntity.get(entityId) ?? []
+      const points: EntitySeriesPointV4[] = []
+      let sampleCount = 0
+      for (const row of rows) {
+        const bucketEpochSeconds = toFiniteNumber(row.bucket)
+        if (bucketEpochSeconds === null) continue
+        const rowSamples = toFiniteNumber(row.sample_count) ?? 0
+        sampleCount += rowSamples
+        points.push({
+          at: new Date(bucketEpochSeconds * 1000).toISOString(),
+          values: parseMetricValuesV4(fields, row),
+          sampleCount: rowSamples,
+        })
+      }
+      points.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+      const gapCount = computeSeriesGapCount({
+        fromMs,
+        toMs,
+        resolutionSeconds: bucketSeconds,
+        points,
+      })
+      return { entityId, points, sampleCount, gapCount }
+    })
+
+    return {
+      kind: 'duckdb',
+      available: true,
+      serverId: input.serverId,
+      family: input.family,
+      metrics: fields,
+      resolutionSeconds: bucketSeconds,
+      entities,
+    }
+  }
+
+  /**
+   * Distinct entity ids of `family` observed in `[from, to)` — unions the
+   * hot table with sealed Parquet partitions the same way `queryEntitySeries`
+   * does. `managed.ingress` / `managed.database_proxy` return `source_id`
+   * values, not `source_kind` — same rule as `queryEntitySeries`.
+   */
+  async queryEntityIdsSeen(input: EntityIdsSeenQueryV4): Promise<EntityIdsSeenResultV4> {
+    await this.flushWrites()
+    const serverId = assertSafeServerId(input.serverId)
+    const config = entityFamilyConfig(input.family)
+    const from = assertIsoTimestamp('from', input.from)
+    const to = assertIsoTimestamp('to', input.to)
+    assertRange(from, to)
+
+    const handle = await this.#ensureOpen()
+    const source = await this.#familySamplesSource(
+      parquetFamily(config.parquetKey),
+      from.getTime(),
+      to.getTime()
+    )
+    const sql = [
+      `SELECT DISTINCT ${config.idColumn} AS entity_id`,
+      `FROM ${source}`,
+      `WHERE server_id = CAST(? AS UUID)`,
+      `  AND sampled_at >= CAST(? AS TIMESTAMP)`,
+      `  AND sampled_at < CAST(? AS TIMESTAMP)`,
+    ].join('\n')
+    const reader = await handle.connection.runAndReadAll(sql, [
+      serverId,
+      toDuckDbTimestamp(from.toISOString()),
+      toDuckDbTimestamp(to.toISOString()),
+    ])
+    const entityIds = reader
+      .getRowObjectsJS()
+      .map((row) => (typeof row.entity_id === 'string' ? row.entity_id : null))
+      .filter((id): id is string => id !== null && id.length > 0)
+      .sort((a, b) => a.localeCompare(b))
+
+    return { kind: 'duckdb', available: true, entityIds }
+  }
+
+  /**
+   * Discrete `server_metric_events` rows in `[from, to)`, unioned with sealed
+   * `"events"` Parquet partitions, capped at {@link MAX_STATUS_EVENTS} (same
+   * cap/truncation discipline as `queryStatusHistory`). Columns are selected
+   * explicitly (not `SELECT *`) so `"at"` can be cast to an epoch-ms double —
+   * the raw DuckDB `TIMESTAMP` value `getRowObjectsJS()` returns for an
+   * unconverted column isn't a plain JS string/number, the same reason every
+   * other read path in this file casts timestamps before reading them.
+   */
+  async queryMetricEvents(input: MetricEventsQueryV4): Promise<MetricEventsResultV4> {
+    await this.flushWrites()
+    const serverId = assertSafeServerId(input.serverId)
+    const from = assertIsoTimestamp('from', input.from)
+    const to = assertIsoTimestamp('to', input.to)
+    assertRange(from, to)
+
+    const handle = await this.#ensureOpen()
+    const source = await this.#familySamplesSource(
+      parquetFamily('events'),
+      from.getTime(),
+      to.getTime()
+    )
+    const sql = [
+      'SELECT',
+      `  event_id,`,
+      `  CAST(epoch_ms("at") AS DOUBLE) AS at_ms,`,
+      `  kind,`,
+      `  severity,`,
+      `  entity_id,`,
+      `  source,`,
+      `  payload`,
+      `FROM ${source}`,
+      `WHERE server_id = CAST(? AS UUID)`,
+      `  AND "at" >= CAST(? AS TIMESTAMP)`,
+      `  AND "at" < CAST(? AS TIMESTAMP)`,
+      `ORDER BY "at" ASC`,
+      `LIMIT ${MAX_STATUS_EVENTS + 1}`,
+    ].join('\n')
+    const reader = await handle.connection.runAndReadAll(sql, [
+      serverId,
+      toDuckDbTimestamp(from.toISOString()),
+      toDuckDbTimestamp(to.toISOString()),
+    ])
+    const rawRows = reader.getRowObjectsJS()
+    const truncated = rawRows.length > MAX_STATUS_EVENTS
+    const rows = truncated ? rawRows.slice(0, MAX_STATUS_EVENTS) : rawRows
+    const events = rows.map(parseMetricEventRowV4)
+
+    return {
+      kind: 'duckdb',
+      available: true,
+      serverId: input.serverId,
+      events,
+      truncated,
+    }
+  }
+
+  /**
+   * Enqueue every row produced by one `writeSample`/`writeStatusEvent` call
+   * together, then check the flush threshold exactly once — so a sample
+   * fanning out to many rows (e.g. 16 GPUs) never has its rows split across
+   * two flush batches (and therefore two transactions).
+   */
+  async #enqueueRows(rows: PendingRow[]): Promise<void> {
     // Enqueue before any await so concurrent chart queries that
     // `flushWrites()` cannot race ahead of an in-flight open and observe an
     // empty pending buffer for a sample already accepted with 202.
-    this.#pendingRows.push(row);
+    this.#pendingRows.push(...rows)
     if (this.#pendingRows.length >= this.#batchMaxRows) {
-      await this.#flushPending({ rethrow: true });
-      return;
+      await this.#flushPending({ rethrow: true })
+      return
     }
-    this.#armFlushTimer();
+    this.#armFlushTimer()
   }
 
   #armFlushTimer(): void {
-    if (this.#flushTimer !== null) return;
+    if (this.#flushTimer !== null) return
     this.#flushTimer = this.#setTimeout(() => {
-      this.#flushTimer = null;
-      void this.#flushPending({ rethrow: false });
-    }, this.#batchMaxAgeMs);
+      this.#flushTimer = null
+      void this.#flushPending({ rethrow: false })
+    }, this.#batchMaxAgeMs)
   }
 
   #clearFlushTimer(): void {
-    if (this.#flushTimer === null) return;
-    this.#clearTimeout(this.#flushTimer);
-    this.#flushTimer = null;
+    if (this.#flushTimer === null) return
+    this.#clearTimeout(this.#flushTimer)
+    this.#flushTimer = null
   }
 
   async #flushPending(opts: { rethrow: boolean }): Promise<void> {
     if (this.#flushPromise) {
-      await this.#flushPromise;
-      if (this.#pendingRows.length === 0) return;
+      await this.#flushPromise
+      if (this.#pendingRows.length === 0) return
     }
-    this.#clearFlushTimer();
-    if (this.#pendingRows.length === 0) return;
+    this.#clearFlushTimer()
+    if (this.#pendingRows.length === 0) return
 
-    const handle = await this.#ensureOpen();
-    if (this.#pendingRows.length === 0) return;
+    const handle = await this.#ensureOpen()
+    if (this.#pendingRows.length === 0) return
 
-    const batch = this.#pendingRows.splice(0);
-    this.#flushPromise = this.#insertBatch(handle.connection, batch, opts.rethrow)
-      .finally(() => {
-        this.#flushPromise = null;
-      });
-    await this.#flushPromise;
+    const batch = this.#pendingRows.splice(0)
+    this.#flushPromise = this.#insertBatch(handle.connection, batch, opts.rethrow).finally(() => {
+      this.#flushPromise = null
+    })
+    await this.#flushPromise
   }
 
+  /** One transaction per flushed batch — every row a single `writeSample` produced lands (or rolls back) together. */
   async #insertBatch(
     connection: DuckDbConnectionLike,
     batch: PendingRow[],
-    rethrow: boolean,
+    rethrow: boolean
   ): Promise<void> {
-    const hostRows = batch.filter((row) => row.table === "host");
-    const statusRows = batch.filter((row) => row.table === "status");
+    const byTable = new Map<PendingRowTable, DuckDbBindValue[][]>()
+    for (const row of batch) {
+      const rows = byTable.get(row.table)
+      if (rows) {
+        rows.push(row.values)
+      } else {
+        byTable.set(row.table, [row.values])
+      }
+    }
     try {
-      await connection.run("BEGIN TRANSACTION");
+      await connection.run('BEGIN TRANSACTION')
       try {
-        if (hostRows.length > 0) {
-          await connection.run(
-            buildHostInsertSql(hostRows.length),
-            hostRows.flatMap((row) => row.values),
-          );
+        for (const [table, rows] of byTable) {
+          const { sql, values } = buildInsertForTable(table, rows)
+          await connection.run(sql, values)
         }
-        if (statusRows.length > 0) {
-          await connection.run(
-            buildStatusInsertSql(statusRows.length),
-            statusRows.flatMap((row) => row.values),
-          );
-        }
-        await connection.run("COMMIT");
+        await connection.run('COMMIT')
       } catch (error) {
-        await connection.run("ROLLBACK").catch(() => {});
-        throw error;
+        await connection.run('ROLLBACK').catch(() => {})
+        throw error
       }
     } catch (error) {
       // Re-queue so a later query flush / timer can retry; dropping the batch
       // permanently would leave charts empty after a transient hiccup.
-      this.#pendingRows.unshift(...batch);
-      this.#onFlushError(error);
-      if (rethrow) throw error;
-      this.#armFlushTimer();
+      this.#pendingRows.unshift(...batch)
+      this.#onFlushError(error)
+      if (rethrow) throw error
+      this.#armFlushTimer()
     }
   }
 }
 
 function defaultFlushErrorLog(error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`duckdb metrics write flush failed: ${message}`);
+  const message = error instanceof Error ? error.message : String(error)
+  console.error(`duckdb metrics write flush failed: ${message}`)
 }
+
+/** Raw field value off an entity/group object — real value or SQL `NULL`, never a sentinel or coerced `0`. */
+function numericField(source: unknown, field: string): number | null {
+  return (source as Record<string, number | null>)[field] ?? null
+}
+
+// ---------------------------------------------------------------------------
+// Per-table parameterized INSERT builders — column lists come from
+// `schema.ts` (the single source of truth also used for DDL); tuples here
+// only add the `CAST(... AS ...)` coercions bound string/number parameters
+// need for UUID/TIMESTAMP/SMALLINT/BIGINT/INTEGER columns.
+// ---------------------------------------------------------------------------
+
+const COMMON_METADATA_TUPLE_PREFIX = [
+  'CAST(? AS UUID)',
+  'CAST(? AS TIMESTAMP)',
+  'CAST(? AS TIMESTAMP)',
+  'CAST(? AS SMALLINT)',
+  '?',
+  'CAST(? AS BIGINT)',
+  'CAST(? AS INTEGER)',
+  'CAST(? AS INTEGER)',
+]
+
+function entityTuple(idPlaceholders: readonly string[], metricCount: number): string {
+  return (
+    '(' +
+    [
+      ...COMMON_METADATA_TUPLE_PREFIX,
+      ...idPlaceholders,
+      ...new Array<string>(metricCount).fill('?'),
+    ].join(', ') +
+    ')'
+  )
+}
+
+const HOST_COLUMNS = hostSamplesInsertColumns()
+const HOST_TUPLE = entityTuple(
+  [],
+  HOST_METRIC_FIELD_REFS.length + HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST.length
+)
+
+const NETWORK_COLUMNS = networkSamplesInsertColumns()
+const NETWORK_TUPLE = entityTuple(['?'], NETWORK_METRIC_FIELDS.length)
+
+const FILESYSTEM_COLUMNS = filesystemSamplesInsertColumns()
+const FILESYSTEM_TUPLE = entityTuple(['?'], FILESYSTEM_METRIC_FIELDS.length)
+
+const BLOCK_COLUMNS = blockSamplesInsertColumns()
+const BLOCK_TUPLE = entityTuple(['?'], BLOCK_METRIC_FIELDS.length)
+
+const GPU_COLUMNS = gpuSamplesInsertColumns()
+const GPU_TUPLE = entityTuple(['?'], GPU_METRIC_FIELDS.length)
+
+const CPU_HOTSPOT_COLUMNS = cpuHotspotSamplesInsertColumns()
+const CPU_HOTSPOT_TUPLE = entityTuple(['?'], CPU_HOTSPOT_METRIC_FIELDS.length)
+
+const CPU_CORE_COLUMNS = cpuCoreSamplesInsertColumns()
+const CPU_CORE_TUPLE = entityTuple(['?'], CPU_CORE_LIVE_METRIC_FIELDS.length)
+
+const MEMORY_DETAIL_COLUMNS = memoryDetailSamplesInsertColumns()
+const MEMORY_DETAIL_TUPLE = entityTuple([], MEMORY_DETAIL_METRIC_FIELDS.length)
+
+const HARDWARE_SIGNAL_COLUMNS = hardwareSignalSamplesInsertColumns()
+const HARDWARE_SIGNAL_TUPLE = entityTuple(['?', '?'], 1)
+
+const INGRESS_COLUMNS = ingressSamplesInsertColumns()
+const INGRESS_TUPLE = entityTuple(['?', '?'], INGRESS_METRIC_FIELDS.length)
+
+const DATABASE_PROXY_COLUMNS = databaseProxySamplesInsertColumns()
+const DATABASE_PROXY_TUPLE = entityTuple(['?', '?'], DATABASE_PROXY_METRIC_FIELDS.length)
+
+const EVENT_COLUMNS = metricEventsInsertColumns()
+const EVENT_TUPLE =
+  '(CAST(? AS UUID), ?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?, CAST(? AS INTEGER), ?, ?, ?)'
+
+const STATUS_COLUMNS = ['server_id', `"at"`, 'connected', 'reason']
+const STATUS_TUPLE = '(CAST(? AS UUID), CAST(? AS TIMESTAMP), ?, ?)'
+
+function buildInsertSql(
+  table: string,
+  columns: readonly string[],
+  tuple: string,
+  rowCount: number
+): string {
+  const tuples = new Array<string>(rowCount).fill(tuple).join(', ')
+  return `INSERT INTO ${table} (${columns.join(', ')}) VALUES ${tuples}`
+}
+
+function buildInsertForTable(
+  table: PendingRowTable,
+  rows: DuckDbBindValue[][]
+): { sql: string; values: DuckDbBindValue[] } {
+  const values = rows.flat()
+  switch (table) {
+    case 'host':
+      return {
+        sql: buildInsertSql(HOST_SAMPLES_TABLE, HOST_COLUMNS, HOST_TUPLE, rows.length),
+        values,
+      }
+    case 'network':
+      return {
+        sql: buildInsertSql(NETWORK_SAMPLES_TABLE, NETWORK_COLUMNS, NETWORK_TUPLE, rows.length),
+        values,
+      }
+    case 'filesystem':
+      return {
+        sql: buildInsertSql(
+          FILESYSTEM_SAMPLES_TABLE,
+          FILESYSTEM_COLUMNS,
+          FILESYSTEM_TUPLE,
+          rows.length
+        ),
+        values,
+      }
+    case 'block':
+      return {
+        sql: buildInsertSql(BLOCK_SAMPLES_TABLE, BLOCK_COLUMNS, BLOCK_TUPLE, rows.length),
+        values,
+      }
+    case 'gpu':
+      return {
+        sql: buildInsertSql(GPU_SAMPLES_TABLE, GPU_COLUMNS, GPU_TUPLE, rows.length),
+        values,
+      }
+    case 'cpuHotspot':
+      return {
+        sql: buildInsertSql(
+          CPU_HOTSPOT_SAMPLES_TABLE,
+          CPU_HOTSPOT_COLUMNS,
+          CPU_HOTSPOT_TUPLE,
+          rows.length
+        ),
+        values,
+      }
+    case 'cpuCore':
+      return {
+        sql: buildInsertSql(CPU_CORE_SAMPLES_TABLE, CPU_CORE_COLUMNS, CPU_CORE_TUPLE, rows.length),
+        values,
+      }
+    case 'memoryDetail':
+      return {
+        sql: buildInsertSql(
+          MEMORY_DETAIL_SAMPLES_TABLE,
+          MEMORY_DETAIL_COLUMNS,
+          MEMORY_DETAIL_TUPLE,
+          rows.length
+        ),
+        values,
+      }
+    case 'hardwareSignal':
+      return {
+        sql: buildInsertSql(
+          HARDWARE_SIGNAL_SAMPLES_TABLE,
+          HARDWARE_SIGNAL_COLUMNS,
+          HARDWARE_SIGNAL_TUPLE,
+          rows.length
+        ),
+        values,
+      }
+    case 'ingress':
+      return {
+        sql: buildInsertSql(INGRESS_SAMPLES_TABLE, INGRESS_COLUMNS, INGRESS_TUPLE, rows.length),
+        values,
+      }
+    case 'databaseProxy':
+      return {
+        sql: buildInsertSql(
+          DATABASE_PROXY_SAMPLES_TABLE,
+          DATABASE_PROXY_COLUMNS,
+          DATABASE_PROXY_TUPLE,
+          rows.length
+        ),
+        values,
+      }
+    case 'event':
+      return {
+        sql: buildInsertSql(METRIC_EVENTS_TABLE, EVENT_COLUMNS, EVENT_TUPLE, rows.length),
+        values,
+      }
+    case 'status':
+      return {
+        sql: buildInsertSql(STATUS_EVENTS_TABLE, STATUS_COLUMNS, STATUS_TUPLE, rows.length),
+        values,
+      }
+    default: {
+      const exhaustive: never = table
+      throw new TypeError(`unknown pending row table: ${exhaustive}`)
+    }
+  }
+}
+
+/** DuckDB `TIMESTAMP`-castable UTC string from an ISO timestamp. */
+function toDuckDbTimestamp(iso: string): string {
+  const ms = Date.parse(iso)
+  if (!Number.isFinite(ms)) {
+    throw new TypeError(`invalid timestamp: ${iso}`)
+  }
+  return new Date(ms).toISOString().replace('T', ' ').replace('Z', '')
+}
+
+function toFiniteNumber(raw: unknown): number | null {
+  if (raw === null || raw === undefined) return null
+  const num = typeof raw === 'number' ? raw : Number(raw)
+  return Number.isFinite(num) ? num : null
+}
+
+// ---------------------------------------------------------------------------
+// v3-compat query helpers (`queryHostSeries`/`queryHostSummary`/
+// `queryFleetHostSnapshot`) — bucket aggregation and row parsing over the v4
+// `server_host_samples` shape, restricted to `V3_TO_V4_HOST_COLUMN`'s keys.
+// ---------------------------------------------------------------------------
 
 /**
  * Interval-weighted average over real named columns with real NULLs:
  * `SUM(value * interval_seconds) / SUM(interval_seconds)` restricted to rows
  * where the metric is present — a NULL metric contributes neither value nor
- * weight, so missing never averages as zero.
+ * weight, so missing never averages as zero. `weightColumn` lets a joined
+ * query (`queryHostSeries`'s `md` join) qualify the otherwise-ambiguous
+ * `interval_seconds` name.
  */
-export function intervalWeightedAvgSql(column: string): string {
-  return `SUM(${column} * interval_seconds)` +
-    ` / (SUM(interval_seconds) FILTER (WHERE ${column} IS NOT NULL))`;
+function intervalWeightedAvgSql(column: string, weightColumn = 'interval_seconds'): string {
+  return (
+    `SUM(${column} * ${weightColumn})` +
+    ` / (SUM(${weightColumn}) FILTER (WHERE ${column} IS NOT NULL))`
+  )
 }
 
 /**
  * Latest present value in the group — `arg_max` over `sampled_at` restricted
  * to rows where the metric is present, so a trailing NULL sample never
- * blanks a slow-moving gauge (storage capacity).
+ * blanks a slow-moving gauge. `orderColumn` lets a joined query
+ * (`queryHostSeries`'s `md` join) qualify the otherwise-ambiguous
+ * `sampled_at` name.
  */
-export function lastValueSql(column: string): string {
-  return `arg_max(${column}, sampled_at) FILTER (WHERE ${column} IS NOT NULL)`;
+function lastValueSql(column: string, orderColumn = 'sampled_at'): string {
+  return `arg_max(${column}, ${orderColumn}) FILTER (WHERE ${column} IS NOT NULL)`
 }
 
 /** Group maximum — NULLs are ignored by SQL `MAX` semantics. */
-export function maxValueSql(column: string): string {
-  return `MAX(${column})`;
+function maxValueSql(column: string): string {
+  return `MAX(${column})`
 }
 
 /**
- * Bucket total for a monotonic counter (traffic totals) — each stored value
- * is already a per-interval delta, so summing it is the bucket total; no
- * `interval_seconds` weighting applies (that's for gauges being averaged,
- * not counters being totaled). NULLs are ignored by SQL `SUM` semantics, so
- * an all-missing group correctly sums to NULL rather than a fabricated 0.
+ * Bucket total for a monotonic counter — each stored value is already a
+ * per-interval delta, so summing it is the bucket total. NULLs are ignored
+ * by SQL `SUM` semantics, so an all-missing group correctly sums to NULL
+ * rather than a fabricated 0.
  */
-export function sumValueSql(column: string): string {
-  return `SUM(${column})`;
+function sumValueSql(column: string): string {
+  return `SUM(${column})`
 }
 
 /**
- * Descriptor-driven bucket aggregate for one metric — weighted-average,
- * last, max, or sum per `HOST_METRICS_METRIC_DESCRIPTORS[key].aggregation`.
- */
-export function metricAggregateSql(key: HostMetricKey): string {
-  const column = metricColumnName(key);
-  switch (HOST_METRICS_METRIC_DESCRIPTORS[key].aggregation) {
-    case "last":
-      return lastValueSql(column);
-    case "max":
-      return maxValueSql(column);
-    case "sum":
-      return sumValueSql(column);
-    default:
-      return intervalWeightedAvgSql(column);
-  }
-}
-
-const HOST_INSERT_COLUMNS = hostMetricsInsertColumns();
-const HOST_INSERT_TUPLE = "(" + [
-  "CAST(? AS UUID)",
-  "CAST(? AS TIMESTAMP)",
-  "CAST(? AS TIMESTAMP)",
-  "CAST(? AS SMALLINT)",
-  "?",
-  "CAST(? AS SMALLINT)",
-  "?",
-  ...HOST_METRIC_KEYS.map(() => "?"),
-].join(", ") + ")";
-
-function buildHostInsertSql(rowCount: number): string {
-  const tuples = new Array<string>(rowCount).fill(HOST_INSERT_TUPLE).join(", ");
-  return `INSERT INTO ${HOST_METRICS_TABLE} (${
-    HOST_INSERT_COLUMNS.join(", ")
-  }) VALUES ${tuples}`;
-}
-
-const STATUS_INSERT_TUPLE =
-  "(CAST(? AS UUID), CAST(? AS TIMESTAMP), ?, ?)";
-
-function buildStatusInsertSql(rowCount: number): string {
-  const tuples = new Array<string>(rowCount).fill(STATUS_INSERT_TUPLE)
-    .join(", ");
-  return `INSERT INTO ${STATUS_EVENTS_TABLE} (server_id, "at", connected, reason) VALUES ${tuples}`;
-}
-
-/** DuckDB `TIMESTAMP`-castable UTC string from an ISO timestamp. */
-function toDuckDbTimestamp(iso: string): string {
-  const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) {
-    throw new TypeError(`invalid timestamp: ${iso}`);
-  }
-  return new Date(ms).toISOString().replace("T", " ").replace("Z", "");
-}
-
-function toFiniteNumber(raw: unknown): number | null {
-  if (raw === null || raw === undefined) return null;
-  const num = typeof raw === "number" ? raw : Number(raw);
-  return Number.isFinite(num) ? num : null;
-}
-
-function parseSeriesRows(
-  metrics: readonly HostMetricKey[],
-  rows: DuckDbRow[],
-  resolutionSeconds: number,
-): {
-  points: HostSeriesPoint[];
-  sampleCount: number;
-  hardwareProfileGenerations: number[];
-} {
-  const points: HostSeriesPoint[] = [];
-  let sampleCount = 0;
-  const allGenerations = new Set<number>();
-  for (const row of rows) {
-    const bucketEpochSeconds = toFiniteNumber(row.bucket);
-    if (bucketEpochSeconds === null) continue;
-    const rowSamples = toFiniteNumber(row.sample_count) ?? 0;
-    sampleCount += rowSamples;
-    // Buckets with data expect samples at their observed cadence — a live
-    // (10 s) session must not read as over-full against the 60 s default.
-    const avgIntervalSeconds = toFiniteNumber(row.avg_interval_seconds);
-    const expectedSampleCount = avgIntervalSeconds !== null
-      ? defaultExpectedSamplesPerBucket(resolutionSeconds, avgIntervalSeconds)
-      : defaultExpectedSamplesPerBucket(resolutionSeconds);
-    const bucketGenerations = parseHardwareProfileGenerations(row.hw_gen_raw);
-    for (const generation of bucketGenerations) allGenerations.add(generation);
-    points.push({
-      at: new Date(bucketEpochSeconds * 1000).toISOString(),
-      values: parseMetricValues(metrics, row),
-      sampleCount: rowSamples,
-      expectedSampleCount,
-      partsPresent: parsePartsPresent(row.parts_present_raw),
-      hardwareProfileGeneration: bucketGenerations.length === 1
-        ? bucketGenerations[0]!
-        : null,
-    });
-  }
-  return {
-    points,
-    sampleCount,
-    hardwareProfileGenerations: [...allGenerations].sort((a, b) => a - b),
-  };
-}
-
-const METRIC_PART_SET = new Set<string>(METRIC_PARTS);
-
-/**
- * Parse a `string_agg(DISTINCT parts, ',')` aggregate — each row's `parts`
- * is itself comma-joined, so the concatenation is uniformly comma-delimited
- * regardless of how many rows contributed — into a deduped, sorted set of
- * valid {@link MetricPart} tokens (the column is free-form `VARCHAR`).
- */
-function parsePartsPresent(raw: unknown): MetricPart[] {
-  if (typeof raw !== "string" || raw.length === 0) return [];
-  const parts = new Set<MetricPart>();
-  for (const token of raw.split(",")) {
-    const trimmed = token.trim();
-    if (METRIC_PART_SET.has(trimmed)) parts.add(trimmed as MetricPart);
-  }
-  return [...parts].sort((a, b) => a.localeCompare(b));
-}
-
-/**
- * Parse a `string_agg(DISTINCT CAST(hardware_profile_generation AS VARCHAR), ',')`
+ * Parse a `string_agg(DISTINCT CAST(topology_generation AS VARCHAR), ',')`
  * aggregate into the distinct generations observed, sorted ascending.
  * `string_agg` drops NULLs, so an all-NULL group yields an empty array.
  */
 function parseHardwareProfileGenerations(raw: unknown): number[] {
-  if (typeof raw !== "string" || raw.length === 0) return [];
-  const values = new Set<number>();
-  for (const token of raw.split(",")) {
-    const value = toFiniteNumber(token.trim());
-    if (value !== null) values.add(value);
+  if (typeof raw !== 'string' || raw.length === 0) return []
+  const values = new Set<number>()
+  for (const token of raw.split(',')) {
+    const value = toFiniteNumber(token.trim())
+    if (value !== null) values.add(value)
   }
-  return [...values].sort((a, b) => a - b);
+  return [...values].sort((a, b) => a - b)
 }
 
-function parseMetricValues(
-  metrics: readonly HostMetricKey[],
-  row: DuckDbRow,
-): HostSeriesPoint["values"] {
-  const values: HostSeriesPoint["values"] = {};
-  for (const key of metrics) {
-    values[key] = toFiniteNumber(row[key]);
+// ---------------------------------------------------------------------------
+// Query helpers (`queryHostSeries`/`queryFleetHostSnapshot`,
+// `queryEntitySeries`/`queryEntityIdsSeen`/`queryMetricEvents`) — real
+// per-descriptor aggregation over `HOST_METRICS_METRIC_DESCRIPTORS_V4`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Descriptor-driven bucket aggregate for one v4 canonical metric —
+ * weighted-average/last/max/delta-sum per
+ * `HostMetricsMetricDescriptorV4.aggregation`, over any real column (host or
+ * per-entity). Every v4 canonical name that resolves to a descriptor has a
+ * real column — there is no `NULL`-literal fallback case here.
+ */
+function hostFieldAggregateSqlV4(
+  descriptor: HostMetricsMetricDescriptorV4,
+  column: string,
+  /**
+   * Table-alias prefix (e.g. `"h."`) for the `sampled_at`/`interval_seconds`
+   * metadata columns `last`/`weighted-average` order/weight by — required
+   * whenever the query joins another table exposing its own same-named
+   * metadata columns (`queryHostSeries`'s `md` join), else those bare
+   * names are ambiguous. Empty string (the default) for every other,
+   * unjoined call site.
+   */
+  metaPrefix = ''
+): string {
+  switch (descriptor.aggregation) {
+    case 'last':
+      return lastValueSql(column, `${metaPrefix}sampled_at`)
+    case 'max':
+      return maxValueSql(column)
+    case 'delta-sum':
+      return sumValueSql(column)
+    case 'weighted-average':
+    default:
+      return intervalWeightedAvgSql(column, `${metaPrefix}interval_seconds`)
   }
-  return values;
 }
 
-function parseStatusConnected(raw: unknown): boolean | null {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw === "boolean") return raw;
-  const num = toFiniteNumber(raw);
-  if (num === null) return null;
-  return num >= 0.5;
+/** DuckDB column for a `host.*`-scoped descriptor — `entityScope` minus its `"host."` prefix is the {@link HostMetricGroupV4}. */
+function hostColumnForDescriptorV4(descriptor: HostMetricsMetricDescriptorV4): string {
+  const group = descriptor.entityScope.slice('host.'.length) as HostMetricGroupV4
+  return hostMetricColumnName(group, descriptor.fieldName)
 }
 
-function assertAllowedMetrics(
-  metrics: readonly HostMetricKey[],
-): HostMetricKey[] {
+/**
+ * DuckDB column reference for a `queryHostSeries` descriptor, scoped to
+ * the `h`/`md` aliases that query's SQL declares. `host.*` and `cpuDetail`
+ * scalars both live on the host row (`h` — `cpuDetail`'s via
+ * `cpuDetailHostColumnName`'s `cpu_detail_*` columns); `memoryDetail` fields
+ * live on the left-joined singleton memory-detail row (`md`).
+ */
+function hostSeriesColumnForDescriptorV4(descriptor: HostMetricsMetricDescriptorV4): string {
+  if (descriptor.entityScope === 'cpuDetail') {
+    return `h.${cpuDetailHostColumnName(descriptor.fieldName)}`
+  }
+  if (descriptor.entityScope === 'memoryDetail') {
+    return `md.${entityMetricColumnName(descriptor.fieldName)}`
+  }
+  return `h.${hostColumnForDescriptorV4(descriptor)}`
+}
+
+/** Extra host-singleton scopes `queryHostSeries` accepts beyond `host.*` — see its doc comment. */
+const HOST_SERIES_EXTRA_SCOPES_V4: ReadonlySet<MetricEntityScopeV4> = new Set([
+  'cpuDetail',
+  'memoryDetail',
+])
+
+const NO_EXTRA_SCOPES_V4: ReadonlySet<MetricEntityScopeV4> = new Set()
+
+/**
+ * Validate `metrics` as a non-empty list of v4 canonical names, each
+ * resolving to a `HOST_METRICS_METRIC_DESCRIPTORS_V4` entry scoped to
+ * `host.*` (the only scope `queryFleetHostSnapshot`'s v4 path reads) or, when
+ * `extraScopes` is passed (`queryHostSeries` only), one of those extra
+ * scopes.
+ */
+function assertHostMetricsV4(
+  metrics: readonly string[],
+  extraScopes: ReadonlySet<MetricEntityScopeV4> = NO_EXTRA_SCOPES_V4
+): string[] {
   if (metrics.length === 0) {
-    throw new TypeError("metrics must be a non-empty allowlisted list");
+    throw new TypeError('metrics must be a non-empty list of v4 canonical names')
   }
-  const out: HostMetricKey[] = [];
-  for (const key of metrics) {
-    if (!ALLOWED_METRIC_KEYS.has(key)) {
-      throw new TypeError(`unknown host metrics metric: ${key}`);
+  const out: string[] = []
+  for (const name of metrics) {
+    const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[name]
+    const scopeOk =
+      descriptor !== undefined &&
+      (descriptor.entityScope.startsWith('host.') || extraScopes.has(descriptor.entityScope))
+    if (!scopeOk) {
+      throw new TypeError(`unknown host metrics v4 canonical name: ${name}`)
     }
-    out.push(key);
+    out.push(name)
   }
-  return out;
+  return out
+}
+
+/** `true` when any of `metrics` resolves to a descriptor scoped to `scope`. */
+function requiresEntityScopeV4(metrics: readonly string[], scope: MetricEntityScopeV4): boolean {
+  return metrics.some((name) => HOST_METRICS_METRIC_DESCRIPTORS_V4[name]?.entityScope === scope)
+}
+
+function parseHostSeriesRowsV4(
+  metrics: readonly string[],
+  rows: DuckDbRow[],
+  resolutionSeconds: number,
+  hotspotsByLastSampledAtMs?: Map<number, CpuHotspotPointV4[]>
+): {
+  points: HostSeriesPointV4[]
+  sampleCount: number
+  topologyGenerations: number[]
+} {
+  const points: HostSeriesPointV4[] = []
+  let sampleCount = 0
+  const allGenerations = new Set<number>()
+  for (const row of rows) {
+    const bucketEpochSeconds = toFiniteNumber(row.bucket)
+    if (bucketEpochSeconds === null) continue
+    const rowSamples = toFiniteNumber(row.sample_count) ?? 0
+    sampleCount += rowSamples
+    const avgIntervalSeconds = toFiniteNumber(row.avg_interval_seconds)
+    const expectedSampleCount =
+      avgIntervalSeconds !== null
+        ? defaultExpectedSamplesPerBucket(resolutionSeconds, avgIntervalSeconds)
+        : defaultExpectedSamplesPerBucket(resolutionSeconds)
+    const bucketGenerations = parseHardwareProfileGenerations(row.topology_gen_raw)
+    for (const generation of bucketGenerations) allGenerations.add(generation)
+    const point: HostSeriesPointV4 = {
+      at: new Date(bucketEpochSeconds * 1000).toISOString(),
+      values: parseMetricValuesV4(metrics, row),
+      sampleCount: rowSamples,
+      expectedSampleCount,
+      topologyGeneration: bucketGenerations.length === 1 ? bucketGenerations[0]! : null,
+    }
+    if (hotspotsByLastSampledAtMs !== undefined) {
+      const lastSampledAtMs = toFiniteNumber(row.last_sampled_at_ms)
+      point.cpuHotspots =
+        lastSampledAtMs !== null ? (hotspotsByLastSampledAtMs.get(lastSampledAtMs) ?? []) : []
+    }
+    points.push(point)
+  }
+  return {
+    points,
+    sampleCount,
+    topologyGenerations: [...allGenerations].sort((a, b) => a - b),
+  }
+}
+
+function parseMetricValuesV4(
+  metrics: readonly string[],
+  row: DuckDbRow
+): Partial<Record<string, number | null>> {
+  const values: Partial<Record<string, number | null>> = {}
+  for (const key of metrics) {
+    values[key] = toFiniteNumber(row[key])
+  }
+  return values
+}
+
+/** Per-family static config for `queryEntitySeries`/`queryEntityIdsSeen`. */
+type EntityFamilyConfig = {
+  parquetKey: ParquetFamilyKey
+  /** Physical id column queried/grouped on — `source_id` (not `source_kind`) for the two managed families. */
+  idColumn: string
+  entityScope: MetricEntityScopeV4
+}
+
+/**
+ * Static per-family table/column/entity-scope mapping for
+ * `queryEntitySeries`/`queryEntityIdsSeen` — mirrors
+ * `EntitySeriesQueryV4.entityIds`'s doc comment on what "entity id" means
+ * per family (`source_id`, not `source_kind`, for the two managed families).
+ */
+function entityFamilyConfig(family: PerEntityHostedFamilyV4): EntityFamilyConfig {
+  switch (family) {
+    case 'gpu':
+      return { parquetKey: 'gpu', idColumn: 'gpu_id', entityScope: 'gpu' }
+    case 'network':
+      return {
+        parquetKey: 'network',
+        idColumn: 'device_id',
+        entityScope: 'network',
+      }
+    case 'filesystem':
+      return {
+        parquetKey: 'filesystem',
+        idColumn: 'filesystem_id',
+        entityScope: 'filesystem',
+      }
+    case 'block':
+      return {
+        parquetKey: 'block',
+        idColumn: 'device_id',
+        entityScope: 'block',
+      }
+    case 'cpu.core.live':
+      return {
+        parquetKey: 'cpu-core-live',
+        idColumn: 'core_id',
+        entityScope: 'cpuCore',
+      }
+    case 'hardware.physical':
+      return {
+        parquetKey: 'hardware',
+        idColumn: 'signal_id',
+        entityScope: 'hardwareSignal',
+      }
+    case 'managed.ingress':
+      return {
+        parquetKey: 'ingress',
+        idColumn: 'source_id',
+        entityScope: 'ingress',
+      }
+    case 'managed.database_proxy':
+      return {
+        parquetKey: 'database-proxy',
+        idColumn: 'source_id',
+        entityScope: 'databaseProxy',
+      }
+    default: {
+      const exhaustive: never = family
+      throw new TypeError(`unknown per-entity hosted family: ${exhaustive}`)
+    }
+  }
+}
+
+/** Resolve one requested bare field name to its descriptor, scoped to `family`'s entity scope. */
+function resolveEntityFieldDescriptor(
+  family: PerEntityHostedFamilyV4,
+  entityScope: MetricEntityScopeV4,
+  field: string
+): HostMetricsMetricDescriptorV4 {
+  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[`${entityScope}.${field}`]
+  if (!descriptor) {
+    throw new TypeError(`unknown ${family} metrics field: ${field}`)
+  }
+  return descriptor
+}
+
+/** `hardware.physical` is long-form (one `value` column, not one column per field); every other family uses `entityMetricColumnName`. */
+function entityMetricColumnForFamily(family: PerEntityHostedFamilyV4, field: string): string {
+  return family === 'hardware.physical' ? 'value' : entityMetricColumnName(field)
+}
+
+function assertNonEmptyFields(metrics: readonly string[]): string[] {
+  if (metrics.length === 0) {
+    throw new TypeError('metrics must be a non-empty list of field names')
+  }
+  return [...metrics]
+}
+
+/**
+ * Parse one `server_metric_events` row (see `queryMetricEvents`'s SQL) into
+ * a `MetricEventV4` — omits `entityId`/`source`/`payload` entirely when
+ * absent (never writes an `undefined` value into the object), and treats a
+ * corrupt `payload` JSON string as "no payload" rather than throwing.
+ */
+function parseMetricEventRowV4(row: DuckDbRow): MetricEventV4 {
+  const atMs = toFiniteNumber(row.at_ms) ?? 0
+  const event: MetricEventV4 = {
+    eventId: String(row.event_id ?? ''),
+    at: new Date(atMs).toISOString(),
+    kind: String(row.kind ?? '') as MetricEventKindV4,
+    severity: String(row.severity ?? '') as MetricEventSeverityV4,
+  }
+  if (typeof row.entity_id === 'string' && row.entity_id.length > 0) {
+    event.entityId = row.entity_id
+  }
+  if (typeof row.source === 'string' && row.source.length > 0) {
+    event.source = row.source
+  }
+  if (typeof row.payload === 'string' && row.payload.length > 0) {
+    try {
+      const parsed = JSON.parse(row.payload)
+      if (parsed !== null && typeof parsed === 'object') {
+        event.payload = parsed as Record<string, string | number | boolean | null>
+      }
+    } catch {
+      // Corrupt payload — treated as absent rather than thrown.
+    }
+  }
+  return event
 }
 
 function dedupeServerIds(serverIds: readonly string[]): string[] {
   if (serverIds.length > DUCKDB_MAX_FLEET_SNAPSHOT_SERVERS) {
     throw new TypeError(
-      `serverIds length ${serverIds.length} exceeds max ${DUCKDB_MAX_FLEET_SNAPSHOT_SERVERS}`,
-    );
+      `serverIds length ${serverIds.length} exceeds max ${DUCKDB_MAX_FLEET_SNAPSHOT_SERVERS}`
+    )
   }
-  const seen = new Set<string>();
-  const out: string[] = [];
+  const seen = new Set<string>()
+  const out: string[] = []
   for (const raw of serverIds) {
-    const id = assertSafeServerId(raw);
-    if (seen.has(id)) continue;
-    seen.add(id);
-    out.push(id);
+    const id = assertSafeServerId(raw)
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
   }
   if (out.length === 0) {
-    throw new TypeError("serverIds must be non-empty for fleet snapshot");
+    throw new TypeError('serverIds must be non-empty for fleet snapshot')
   }
-  return out;
+  return out
+}
+
+function parseStatusConnected(raw: unknown): boolean | null {
+  if (raw === null || raw === undefined) return null
+  if (typeof raw === 'boolean') return raw
+  const num = toFiniteNumber(raw)
+  if (num === null) return null
+  return num >= 0.5
 }
 
 function assertSafeServerId(serverId: string): string {
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-      .test(serverId)
-  ) {
-    throw new TypeError(`invalid serverId for DuckDB: ${serverId}`);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(serverId)) {
+    throw new TypeError(`invalid serverId for DuckDB: ${serverId}`)
   }
-  return serverId;
+  return serverId
 }
 
 function assertIsoTimestamp(label: string, value: string): Date {
-  const ms = Date.parse(value);
+  const ms = Date.parse(value)
   if (!Number.isFinite(ms)) {
-    throw new TypeError(`invalid ${label} timestamp: ${value}`);
+    throw new TypeError(`invalid ${label} timestamp: ${value}`)
   }
-  return new Date(ms);
+  return new Date(ms)
 }
 
 function assertRange(from: Date, to: Date): void {
-  const spanSeconds = (to.getTime() - from.getTime()) / 1000;
+  const spanSeconds = (to.getTime() - from.getTime()) / 1000
   if (spanSeconds < 0) {
-    throw new TypeError("from must be <= to");
+    throw new TypeError('from must be <= to')
   }
   if (spanSeconds > AE_DEFAULT_MAX_RANGE_SECONDS) {
     throw new TypeError(
-      `query range ${spanSeconds}s exceeds maxRangeSeconds ${AE_DEFAULT_MAX_RANGE_SECONDS}`,
-    );
+      `query range ${spanSeconds}s exceeds maxRangeSeconds ${AE_DEFAULT_MAX_RANGE_SECONDS}`
+    )
   }
 }
 
 function assertPositiveInt(label: string, value: number): number {
   if (!Number.isInteger(value) || value <= 0) {
-    throw new TypeError(`${label} must be a positive integer`);
+    throw new TypeError(`${label} must be a positive integer`)
   }
-  return value;
+  return value
 }
 
-function assertOptionalPositiveInt(
-  label: string,
-  value: number | undefined,
-): number | undefined {
-  if (value === undefined) return undefined;
-  return assertPositiveInt(label, value);
+function assertOptionalPositiveInt(label: string, value: number | undefined): number | undefined {
+  if (value === undefined) return undefined
+  return assertPositiveInt(label, value)
 }

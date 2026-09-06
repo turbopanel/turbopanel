@@ -3,23 +3,56 @@
  * response shaping without a Hono Context.
  */
 
-import { CloudflareAnalyticsEngineServerMetricsStore } from '../../daemon/metrics/backends/cloudflare/store.ts'
-import { DisabledServerMetricsStore } from '../../daemon/metrics/disabled-store.ts'
+import { CloudflareAnalyticsEngineServerMetricsStoreV4 } from '../../daemon/metrics/backends/cloudflare/store-v4.ts'
+import { DisabledServerMetricsStoreV4 } from '../../daemon/metrics/disabled-store-v4.ts'
 import type {
+  EntitySeriesResultV4,
+  HostSeriesResultV4,
+  MetricEventsResultV4,
   MetricsBackendKind,
-  ServerMetricsStore,
+  PerEntityHostedFamilyV4,
+  ServerMetricsStoreV4,
   StatusHistoryResult,
-} from '../../daemon/metrics/types.ts'
+} from '../../daemon/metrics/types-v4.ts'
+import {
+  HOST_METRICS_METRIC_DESCRIPTORS_V4,
+  type MetricEntityScopeV4,
+} from '../../daemon/metrics/metric-descriptors-v4.ts'
+import {
+  type EntityMetricSelector,
+  parseEntityMetricId,
+} from '../../daemon/metrics/entity-metric-id.ts'
+import {
+  computeDerivedHostValuesV4,
+  type DerivedHostValuesV4,
+  type HostCapacitiesV4,
+} from '../../daemon/metrics/query/derived-metrics-v4.ts'
+import type { HostSeriesChartResponseV4 } from '../../daemon/metrics/query/series-response-v4.ts'
+import { computeSlotMapping } from './topology-slot-mapping.ts'
+import {
+  buildTopologyInventoryV4,
+  rootFilesystemTotalBytesV4,
+  type TopologyInventoryV4,
+} from './topology-inventory.ts'
 import type { AuthRouteOpts } from '../authn/http.ts'
 import {
   type EffectiveCpuThermalLimits,
   HARDWARE_PROFILE_NIC_KEYS,
   HARDWARE_PROFILE_SENSOR_SLOT_KEYS,
+  HARDWARE_PROFILE_TOPOLOGY_ID_KEYS,
   resolveEffectiveCpuThermalLimits,
   type ServerHardwareProfile,
   type ServerHardwareProfileUpdate,
   type ServerSensorSlotAssignment,
 } from '../../lib/db/server-metadata.ts'
+import {
+  EMPTY_TOPOLOGY_OVERRIDES,
+  type FilesystemId,
+  type SlotMapping,
+  type TopologyDeviceId,
+  type TopologyOverrides,
+  type TopologySnapshot,
+} from './topology-types.ts'
 import {
   type OrganizationOptions,
   resolveTemperatureUnit,
@@ -27,20 +60,32 @@ import {
 } from '../../lib/organization-options.ts'
 
 export type IsoTimestampParseResult =
-  { ok: true; ms: number; iso: string } | { ok: false; message: string }
+  | { ok: true; ms: number; iso: string }
+  | {
+      ok: false
+      message: string
+    }
 
 /** Max characters accepted for one hardware-profile chip/label/NIC/path value. */
 export const MAX_HARDWARE_PROFILE_FIELD_CHARS = 512
 
 export type HardwareProfileBodyParse =
-  { ok: true; update: ServerHardwareProfileUpdate } | { ok: false; message: string }
+  | {
+      ok: true
+      update: ServerHardwareProfileUpdate
+    }
+  | { ok: false; message: string }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 type SlotFieldParse =
-  { ok: true; value: ServerSensorSlotAssignment | null } | { ok: false; message: string }
+  | { ok: true; value: ServerSensorSlotAssignment | null }
+  | {
+      ok: false
+      message: string
+    }
 
 /** One sensor-slot field: `null` unassigns, `{chip,label}` pins an identity. */
 function parseSlotField(key: string, value: unknown): SlotFieldParse {
@@ -65,10 +110,18 @@ function parseSlotField(key: string, value: unknown): SlotFieldParse {
   return { ok: true, value: { chip, label } }
 }
 
-type NicFieldParse = { ok: true; value: string | null } | { ok: false; message: string }
+type OptionalStringFieldParse =
+  | { ok: true; value: string | null }
+  | {
+      ok: false
+      message: string
+    }
 
-/** One NIC-binding field: `null` unassigns, a non-blank string names an interface. */
-function parseNicField(key: string, value: unknown): NicFieldParse {
+/**
+ * One NIC-binding or topology-id field: `null` unassigns, a non-blank string
+ * names the interface / pins the opaque device or filesystem id.
+ */
+function parseOptionalStringField(key: string, value: unknown): OptionalStringFieldParse {
   if (value === null) return { ok: true, value: null }
   if (typeof value !== 'string') {
     return { ok: false, message: `${key} must be a string or null` }
@@ -86,6 +139,7 @@ function parseNicField(key: string, value: unknown): NicFieldParse {
 const KNOWN_HARDWARE_PROFILE_KEYS = new Set<string>([
   ...HARDWARE_PROFILE_SENSOR_SLOT_KEYS,
   ...HARDWARE_PROFILE_NIC_KEYS,
+  ...HARDWARE_PROFILE_TOPOLOGY_ID_KEYS,
   'hostingPath',
   'drivetempEnabled',
   'cpuTdpWattsOverride',
@@ -98,7 +152,12 @@ const CPU_TDP_WATTS_MAX = 1000
 const CPU_TJ_MAX_CELSIUS_MIN = 40
 const CPU_TJ_MAX_CELSIUS_MAX = 130
 
-type NumberFieldParse = { ok: true; value: number | null } | { ok: false; message: string }
+type NumberFieldParse =
+  | { ok: true; value: number | null }
+  | {
+      ok: false
+      message: string
+    }
 
 /** `cpuTdpWattsOverride`: `null` clears it, a finite positive number under the ceiling pins it. */
 function parseCpuTdpWattsField(value: unknown): NumberFieldParse {
@@ -160,21 +219,31 @@ function applySensorSlotFields(
   return { ok: true }
 }
 
-function applyNicFields(
+type OptionalStringProfileKey =
+  | (typeof HARDWARE_PROFILE_NIC_KEYS)[number]
+  | (typeof HARDWARE_PROFILE_TOPOLOGY_ID_KEYS)[number]
+
+function applyOptionalStringFields(
+  keys: readonly OptionalStringProfileKey[],
   body: Record<string, unknown>,
   update: ServerHardwareProfileUpdate
 ): HardwareProfileFieldResult {
-  for (const key of HARDWARE_PROFILE_NIC_KEYS) {
+  for (const key of keys) {
     const value = body[key]
     if (value === undefined) continue
-    const parsed = parseNicField(key, value)
+    const parsed = parseOptionalStringField(key, value)
     if (!parsed.ok) return parsed
     update[key] = parsed.value
   }
   return { ok: true }
 }
 
-type HostingPathParse = { ok: true; value: string | null } | { ok: false; message: string }
+type HostingPathParse =
+  | { ok: true; value: string | null }
+  | {
+      ok: false
+      message: string
+    }
 
 /** `hostingPath`: `null` clears it, an absolute path without whitespace pins it. */
 function parseHostingPathField(value: unknown): HostingPathParse {
@@ -195,7 +264,12 @@ function parseHostingPathField(value: unknown): HostingPathParse {
   return { ok: true, value: trimmed.length > 0 ? trimmed : null }
 }
 
-type DrivetempEnabledParse = { ok: true; value: boolean | null } | { ok: false; message: string }
+type DrivetempEnabledParse =
+  | { ok: true; value: boolean | null }
+  | {
+      ok: false
+      message: string
+    }
 
 function parseDrivetempEnabledField(value: unknown): DrivetempEnabledParse {
   if (value !== null && typeof value !== 'boolean') {
@@ -205,15 +279,21 @@ function parseDrivetempEnabledField(value: unknown): DrivetempEnabledParse {
 }
 
 type SimpleUpdateKey =
-  'hostingPath' | 'drivetempEnabled' | 'cpuTdpWattsOverride' | 'cpuTjMaxCelsiusOverride'
+  | 'hostingPath'
+  | 'drivetempEnabled'
+  | 'cpuTdpWattsOverride'
+  | 'cpuTjMaxCelsiusOverride'
 
 /** Applies one `undefined`-skippable, independently-parsed field to `update`. */
 function applyOptionalField<K extends SimpleUpdateKey>(
   value: unknown,
   key: K,
-  parse: (
-    value: unknown
-  ) => { ok: true; value: ServerHardwareProfileUpdate[K] } | { ok: false; message: string },
+  parse: (value: unknown) =>
+    | { ok: true; value: ServerHardwareProfileUpdate[K] }
+    | {
+        ok: false
+        message: string
+      },
   update: ServerHardwareProfileUpdate
 ): HardwareProfileFieldResult {
   if (value === undefined) return { ok: true }
@@ -239,7 +319,10 @@ export function parseHardwareProfileBody(body: unknown): HardwareProfileBodyPars
   }
   const unknownField = findUnknownHardwareProfileField(body)
   if (unknownField) {
-    return { ok: false, message: `unknown hardware-profile field: ${unknownField}` }
+    return {
+      ok: false,
+      message: `unknown hardware-profile field: ${unknownField}`,
+    }
   }
 
   const update: ServerHardwareProfileUpdate = {}
@@ -247,8 +330,15 @@ export function parseHardwareProfileBody(body: unknown): HardwareProfileBodyPars
   const slotResult = applySensorSlotFields(body, update)
   if (!slotResult.ok) return slotResult
 
-  const nicResult = applyNicFields(body, update)
+  const nicResult = applyOptionalStringFields(HARDWARE_PROFILE_NIC_KEYS, body, update)
   if (!nicResult.ok) return nicResult
+
+  const topologyIdResult = applyOptionalStringFields(
+    HARDWARE_PROFILE_TOPOLOGY_ID_KEYS,
+    body,
+    update
+  )
+  if (!topologyIdResult.ok) return topologyIdResult
 
   const simpleFieldAppliers: Array<() => HardwareProfileFieldResult> = [
     () => applyOptionalField(body.hostingPath, 'hostingPath', parseHostingPathField, update),
@@ -282,157 +372,713 @@ export function parseHardwareProfileBody(body: unknown): HardwareProfileBodyPars
   return { ok: true, update }
 }
 
-/** One sensor identity as reported by `metrics-capabilities-request`. */
-export type CapabilitySensorCandidate = { chip: string; label: string }
-
-type CapabilityGpuDevice = {
-  chip: string
-  temperature: CapabilitySensorCandidate[]
-  power: CapabilitySensorCandidate[]
-}
-
-/** Narrowed subset of the daemon's `metrics-capabilities-result` payload used for validation. */
-export type ParsedMetricsCapabilities = {
-  cpuTemperature: CapabilitySensorCandidate[]
-  cpuPower: CapabilitySensorCandidate[]
-  cpuFan: CapabilitySensorCandidate[]
-  gpuFan: CapabilitySensorCandidate[]
-  boardTemperature: CapabilitySensorCandidate[]
-  ambient1Temperature: CapabilitySensorCandidate[]
-  ambient2Temperature: CapabilitySensorCandidate[]
-  disk1Temperature: CapabilitySensorCandidate[]
-  disk2Temperature: CapabilitySensorCandidate[]
-  systemFan1: CapabilitySensorCandidate[]
-  systemFan2: CapabilitySensorCandidate[]
-  gpuDevices: CapabilityGpuDevice[]
-  networkInterfaceNames: Set<string>
-}
-
-function parseCandidateList(value: unknown): CapabilitySensorCandidate[] {
-  if (!Array.isArray(value)) return []
-  const out: CapabilitySensorCandidate[] = []
-  for (const entry of value) {
-    if (isRecord(entry) && typeof entry.chip === 'string' && typeof entry.label === 'string') {
-      out.push({ chip: entry.chip, label: entry.label })
-    }
-  }
-  return out
-}
-
-function parseGpuDeviceList(value: unknown): CapabilityGpuDevice[] {
-  if (!Array.isArray(value)) return []
-  const out: CapabilityGpuDevice[] = []
-  for (const entry of value) {
-    if (!isRecord(entry) || typeof entry.chip !== 'string') continue
-    out.push({
-      chip: entry.chip,
-      temperature: parseCandidateList(entry.temperature),
-      power: parseCandidateList(entry.power),
-    })
-  }
-  return out
-}
-
-function parseNetworkInterfaceNames(value: unknown): Set<string> {
-  const names = new Set<string>()
-  if (!Array.isArray(value)) return names
-  for (const entry of value) {
-    if (isRecord(entry) && typeof entry.name === 'string') names.add(entry.name)
-  }
-  return names
-}
-
-/** Narrow the daemon's opaque `capabilities` result for identity validation. */
-export function parseMetricsCapabilities(value: unknown): ParsedMetricsCapabilities {
-  const record = isRecord(value) ? value : {}
-  const sensors = isRecord(record.sensors) ? record.sensors : {}
-  return {
-    cpuTemperature: parseCandidateList(sensors.cpuTemperature),
-    cpuPower: parseCandidateList(sensors.cpuPower),
-    cpuFan: parseCandidateList(sensors.cpuFan),
-    gpuFan: parseCandidateList(sensors.gpuFan),
-    boardTemperature: parseCandidateList(sensors.boardTemperature),
-    ambient1Temperature: parseCandidateList(sensors.ambient1Temperature),
-    ambient2Temperature: parseCandidateList(sensors.ambient2Temperature),
-    disk1Temperature: parseCandidateList(sensors.disk1Temperature),
-    disk2Temperature: parseCandidateList(sensors.disk2Temperature),
-    systemFan1: parseCandidateList(sensors.systemFan1),
-    systemFan2: parseCandidateList(sensors.systemFan2),
-    gpuDevices: parseGpuDeviceList(sensors.gpuDevices),
-    networkInterfaceNames: parseNetworkInterfaceNames(record.networkInterfaces),
-  }
-}
-
-function slotMatches(
-  candidates: CapabilitySensorCandidate[],
-  slot: ServerSensorSlotAssignment
+/**
+ * True when `update` assigns at least one stable topology-id override
+ * (`nicSlot1DeviceId` / `nicSlot2DeviceId` / `hostingFilesystemId`) — checked
+ * against the last recorded topology generation, never a live daemon round
+ * trip, so it never requires a connected daemon.
+ */
+export function hardwareProfileUpdateNeedsTopologyValidation(
+  update: ServerHardwareProfileUpdate
 ): boolean {
-  return candidates.some((c) => c.chip === slot.chip && c.label === slot.label)
+  return HARDWARE_PROFILE_TOPOLOGY_ID_KEYS.some((key) => Boolean(update[key]))
 }
 
-function gpuDeviceMatches(
-  devices: CapabilityGpuDevice[],
-  slot: ServerSensorSlotAssignment
-): boolean {
-  return devices.some(
-    (device) =>
-      device.chip === slot.chip &&
-      (device.temperature.some((c) => c.label === slot.label) ||
-        device.power.some((c) => c.label === slot.label))
-  )
-}
+/** Narrowed subset of a recorded `TopologySnapshot` used for topology-id validation. */
+export type TopologyIdValidationSnapshot = Pick<TopologySnapshot, 'networks' | 'filesystems'>
 
 /**
- * Find the first assigned slot/NIC in `update` that does not match a
- * daemon-reported candidate. Every sensor-slot key in
- * {@link HARDWARE_PROFILE_SENSOR_SLOT_KEYS} is cross-checked against its
- * matching flat candidate pool on `capabilities`, except `gpuDevice`, which
- * is cross-referenced against `capabilities.gpuDevices` via
- * {@link gpuDeviceMatches} instead. Returns `null` when every assigned
- * identity is valid (or nothing was assigned).
+ * Find the first assigned topology-id override in `update` that does not
+ * match a device/filesystem id in `snapshot` — the last topology generation
+ * this server reported (`getLatestTopologyGeneration`,
+ * `server-topology-records.ts`). Returns `null` when every assigned id is
+ * valid, or when nothing was assigned.
  */
-export function findStaleHardwareProfileSlot(
+export function findInvalidTopologyIdField(
   update: ServerHardwareProfileUpdate,
-  capabilities: ParsedMetricsCapabilities
+  snapshot: TopologyIdValidationSnapshot | undefined
 ): string | null {
-  for (const key of HARDWARE_PROFILE_SENSOR_SLOT_KEYS) {
-    const slot = update[key]
-    if (!slot) continue
-    if (key === 'gpuDevice') {
-      if (!gpuDeviceMatches(capabilities.gpuDevices, slot)) return key
-      continue
-    }
-    if (!slotMatches(capabilities[key], slot)) return key
+  const networkIds = new Set<TopologyDeviceId>((snapshot?.networks ?? []).map((n) => n.deviceId))
+  const filesystemIds = new Set<FilesystemId>(
+    (snapshot?.filesystems ?? []).map((fs) => fs.filesystemId)
+  )
+  if (update.nicSlot1DeviceId && !networkIds.has(update.nicSlot1DeviceId)) {
+    return 'nicSlot1DeviceId'
   }
-  if (update.nic1 && !capabilities.networkInterfaceNames.has(update.nic1)) {
-    return 'nic1'
+  if (update.nicSlot2DeviceId && !networkIds.has(update.nicSlot2DeviceId)) {
+    return 'nicSlot2DeviceId'
   }
-  if (update.nic2 && !capabilities.networkInterfaceNames.has(update.nic2)) {
-    return 'nic2'
+  if (update.hostingFilesystemId && !filesystemIds.has(update.hostingFilesystemId)) {
+    return 'hostingFilesystemId'
   }
   return null
 }
 
-/** True when `update` assigns at least one identity that needs capability validation. */
-export function hardwareProfileUpdateNeedsValidation(update: ServerHardwareProfileUpdate): boolean {
-  return (
-    HARDWARE_PROFILE_SENSOR_SLOT_KEYS.some((key) => Boolean(update[key])) ||
-    HARDWARE_PROFILE_NIC_KEYS.some((key) => Boolean(update[key]))
-  )
-}
-
-export function resolveStoreBackendKind(
-  store: ServerMetricsStore | undefined,
+export function resolveStoreBackendKindV4(
+  store: ServerMetricsStoreV4 | undefined,
   runtime: AuthRouteOpts['runtime']
 ): MetricsBackendKind {
   if (!store) return 'disabled'
-  if (store instanceof DisabledServerMetricsStore) return 'disabled'
-  if (store instanceof CloudflareAnalyticsEngineServerMetricsStore) {
+  if (store instanceof DisabledServerMetricsStoreV4) return 'disabled'
+  if (store instanceof CloudflareAnalyticsEngineServerMetricsStoreV4) {
     return 'analytics-engine'
   }
   // Deno → DuckDB (or unavailable DuckDB). Workers bundles must not import the
   // native DuckDB store — runtime is the only discriminator left here.
   return runtime === 'workers' ? 'analytics-engine' : 'duckdb'
+}
+
+// ---------------------------------------------------------------------------
+// v4 entity-metric selector parsing — `/servers/:id/metrics/series`'s
+// `metrics` query param, one wire identity per selector
+// (`entity-metric-id.ts`), grouped into a host-singleton request plus a
+// per-`PerEntityHostedFamilyV4` request.
+// ---------------------------------------------------------------------------
+
+/** At most this many `metrics` selectors per `/series` request — same defensive-cap idiom as the v4 ingest entity-array caps. */
+export const MAX_SERIES_METRIC_SELECTORS_V4 = 128
+
+/** `host.*` scopes actually packed/queryable (`field-map-v4.ts` / `queryHostSeries`) — the default `metrics` selection when the query param is absent. */
+const HOST_SINGLETON_QUERYABLE_SCOPES_V4: ReadonlySet<MetricEntityScopeV4> = new Set([
+  'host.cpu',
+  'host.kernel',
+  'host.memory',
+  'host.storage',
+  'host.network',
+])
+
+/**
+ * `cpuDetail`/`memoryDetail` are queryable singleton scopes, but capability-
+ * gated and not part of the default selection — a caller must request them
+ * explicitly (`cpuDetail.averageFrequencyMHz`, …), since most plans don't
+ * enable them and the org servers overview shouldn't pay for columns it
+ * never renders.
+ */
+const HOST_SINGLETON_EXPLICIT_ONLY_SCOPES_V4: ReadonlySet<MetricEntityScopeV4> = new Set([
+  'cpuDetail',
+  'memoryDetail',
+])
+
+/** Per-entity scope -> the `PerEntityHostedFamilyV4` its entity id/metrics are queried under. */
+const ENTITY_SCOPE_TO_FAMILY_V4: Partial<Record<MetricEntityScopeV4, PerEntityHostedFamilyV4>> = {
+  network: 'network',
+  filesystem: 'filesystem',
+  block: 'block',
+  gpu: 'gpu',
+  hardwareSignal: 'hardware.physical',
+  ingress: 'managed.ingress',
+  databaseProxy: 'managed.database_proxy',
+  cpuCore: 'cpu.core.live',
+}
+
+/** Every queryable `host.*` canonical name — the default `metrics` selection when the query param is absent. */
+export function defaultHostCanonicalNamesV4(): string[] {
+  return Object.values(HOST_METRICS_METRIC_DESCRIPTORS_V4)
+    .filter((descriptor) => HOST_SINGLETON_QUERYABLE_SCOPES_V4.has(descriptor.entityScope))
+    .map((descriptor) => descriptor.canonicalName)
+}
+
+export type EntityFamilySelectionV4 = {
+  entityIds: Set<string>
+  fields: Set<string>
+}
+
+export type SeriesMetricSelectorsV4 = {
+  hostCanonicalNames: string[]
+  entityFamilies: Map<PerEntityHostedFamilyV4, EntityFamilySelectionV4>
+}
+
+export type ParseSeriesMetricSelectorsResultV4 =
+  | { ok: true; value: SeriesMetricSelectorsV4 }
+  | { ok: false; error: string }
+
+type SelectorApplyResult = { ok: true } | { ok: false; error: string }
+
+function applyHostSingletonSelectorV4(
+  id: string,
+  scope: MetricEntityScopeV4,
+  hostCanonicalNames: Set<string>
+): SelectorApplyResult {
+  if (
+    !HOST_SINGLETON_QUERYABLE_SCOPES_V4.has(scope) &&
+    !HOST_SINGLETON_EXPLICIT_ONLY_SCOPES_V4.has(scope)
+  ) {
+    return {
+      ok: false,
+      error: `metric scope "${scope}" is reserved and not collected`,
+    }
+  }
+  hostCanonicalNames.add(id)
+  return { ok: true }
+}
+
+function applyEntityFamilySelectorV4(
+  selector: EntityMetricSelector,
+  entityId: string,
+  entityFamilies: Map<PerEntityHostedFamilyV4, EntityFamilySelectionV4>
+): SelectorApplyResult {
+  const family = ENTITY_SCOPE_TO_FAMILY_V4[selector.scope]
+  if (!family) {
+    return {
+      ok: false,
+      error: `metric scope "${selector.scope}" has no entity-series mapping`,
+    }
+  }
+  const selection = entityFamilies.get(family) ?? {
+    entityIds: new Set<string>(),
+    fields: new Set<string>(),
+  }
+  selection.entityIds.add(entityId)
+  selection.fields.add(selector.field)
+  entityFamilies.set(family, selection)
+  return { ok: true }
+}
+
+function applySeriesMetricSelectorV4(
+  id: string,
+  hostCanonicalNames: Set<string>,
+  entityFamilies: Map<PerEntityHostedFamilyV4, EntityFamilySelectionV4>
+): SelectorApplyResult {
+  let selector: EntityMetricSelector
+  try {
+    selector = parseEntityMetricId(id)
+  } catch (err) {
+    return { ok: false, error: metricsQueryErrorMessage(err) }
+  }
+  if (selector.entityId === undefined) {
+    return applyHostSingletonSelectorV4(id, selector.scope, hostCanonicalNames)
+  }
+  return applyEntityFamilySelectorV4(selector, selector.entityId, entityFamilies)
+}
+
+/**
+ * Parses `/servers/:id/metrics/series`'s `metrics` query param: a
+ * comma-separated list of `entity-metric-id.ts` wire identities
+ * (`host.cpu.busyPercent`, `network:eth0.receiveBytesPerSecond`,
+ * `cpuDetail.averageFrequencyMHz`, `cpuCore:cpu3.busyPercent`, …). Absent or
+ * blank defaults to every queryable `host.*` canonical name (never includes
+ * the explicit-only `cpuDetail`/`memoryDetail` scopes — see
+ * {@link HOST_SINGLETON_EXPLICIT_ONLY_SCOPES_V4}). Rejects an unparseable id,
+ * an unknown/unqueryable scope, or too many selectors.
+ */
+export function parseSeriesMetricSelectorsV4(
+  raw: string | undefined
+): ParseSeriesMetricSelectorsResultV4 {
+  const ids =
+    raw === undefined
+      ? []
+      : raw
+          .split(',')
+          .map((part) => part.trim())
+          .filter(Boolean)
+  if (ids.length === 0) {
+    return {
+      ok: true,
+      value: {
+        hostCanonicalNames: defaultHostCanonicalNamesV4(),
+        entityFamilies: new Map(),
+      },
+    }
+  }
+  if (ids.length > MAX_SERIES_METRIC_SELECTORS_V4) {
+    return {
+      ok: false,
+      error: `at most ${MAX_SERIES_METRIC_SELECTORS_V4} metrics may be requested at once`,
+    }
+  }
+
+  const hostCanonicalNames = new Set<string>()
+  const entityFamilies = new Map<PerEntityHostedFamilyV4, EntityFamilySelectionV4>()
+
+  for (const id of ids) {
+    const applied = applySeriesMetricSelectorV4(id, hostCanonicalNames, entityFamilies)
+    if (!applied.ok) return applied
+  }
+
+  return {
+    ok: true,
+    value: { hostCanonicalNames: [...hostCanonicalNames], entityFamilies },
+  }
+}
+
+/** Cache-key token list for `/series`: host canonical names plus `family:entityId.field` entity selectors. */
+export function seriesCacheMetricsListV4(selectors: SeriesMetricSelectorsV4): string[] {
+  return [
+    ...selectors.hostCanonicalNames,
+    ...[...selectors.entityFamilies.entries()].flatMap(([family, selection]) =>
+      [...selection.entityIds].flatMap((entityId) =>
+        [...selection.fields].map((field) => `${family}:${entityId}.${field}`)
+      )
+    ),
+  ]
+}
+
+/**
+ * The first requested `network`-family entity id that is a TurboFabric mesh
+ * interface per the current topology inventory — such a device has no
+ * reconstruction path on either backend (never embedded in `host.io`, never
+ * paged as a standalone `network` row on Cloudflare; DuckDB does store it as
+ * a full row, so this is a genuine cross-backend asymmetry, unlike a normal
+ * NIC slot). Rejecting it here keeps the two backends answering the same
+ * request the same way.
+ *
+ * A `normalNicSlot1`/`normalNicSlot2` device is deliberately NOT rejected
+ * here (unlike the pre-reconstruction behavior this replaces): Cloudflare
+ * now reconstructs its `receiveBytesPerSecond`/`transmitBytesPerSecond` from
+ * `host.io`'s own rows when `queryEntitySeries` is called with a resolved
+ * `slotMapping`/`topologyGeneration` (see `types-v4.ts`'s
+ * `EntitySeriesQueryV4` doc comment), and DuckDB already had the full row —
+ * so both backends can answer, even though Cloudflare's answer is partial
+ * (every other requested field resolves to `null` for that entity).
+ *
+ * Returns `null` when every requested id is independently addressable, or
+ * when there is no topology inventory yet to check against (nothing to
+ * reject without one).
+ */
+export function findFabricNetworkEntityId(
+  entityIds: Iterable<string>,
+  inventory: TopologyInventoryV4 | null
+): string | null {
+  if (!inventory) return null
+  const fabric = new Set(
+    inventory.networks.filter((device) => device.role === 'fabric').map((device) => device.deviceId)
+  )
+  for (const id of entityIds) {
+    if (fabric.has(id)) return id
+  }
+  return null
+}
+
+/**
+ * Error text when `/series` asked for a TurboFabric mesh interface as a
+ * standalone `network` entity — same rejection {@link findFabricNetworkEntityId}
+ * encodes, shaped for the HTTP 400 body.
+ */
+export function fabricNetworkSelectionErrorV4(
+  selectors: SeriesMetricSelectorsV4,
+  inventory: TopologyInventoryV4 | null
+): string | null {
+  const networkSelection = selectors.entityFamilies.get('network')
+  if (!networkSelection) return null
+  const fabricId = findFabricNetworkEntityId(networkSelection.entityIds, inventory)
+  if (!fabricId) return null
+  return (
+    `network device "${fabricId}" is a fabric mesh interface per the current topology ` +
+    `and cannot be queried as a standalone entity`
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Topology context — inventory + slot mapping + host capacities for a single
+// server's `/series` route, built from its latest recorded topology
+// generation plus the operator-assigned hardware-profile overrides.
+// ---------------------------------------------------------------------------
+
+/** `hardwareProfile`'s topology-id overrides, projected into `computeSlotMapping`'s input shape — mirrors the daemon ingest route's `resolveSlotMappingForIngest` construction (`api-routes.ts`), never imported from there (daemon-side, ingest-scoped). */
+export function topologyOverridesFromHardwareProfile(
+  hardwareProfile: ServerHardwareProfile | undefined
+): TopologyOverrides {
+  return {
+    ...EMPTY_TOPOLOGY_OVERRIDES,
+    nicSlot1DeviceId: hardwareProfile?.nicSlot1DeviceId ?? null,
+    nicSlot2DeviceId: hardwareProfile?.nicSlot2DeviceId ?? null,
+    hostingFilesystemId: hardwareProfile?.hostingFilesystemId ?? null,
+    drivetempEnabled: hardwareProfile?.drivetempEnabled ?? false,
+  }
+}
+
+/** A snapshot is only usable for slot mapping once it carries every array `computeSlotMapping` reads — mirrors `api-routes.ts`'s `isSlotMappableTopologySnapshot`. */
+function isSlotMappableTopologySnapshotV4(value: unknown): value is TopologySnapshot {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    Array.isArray(record.networks) &&
+    Array.isArray(record.filesystems) &&
+    Array.isArray(record.blockDevices) &&
+    Array.isArray(record.gpus) &&
+    Array.isArray(record.hardwareSignals)
+  )
+}
+
+export const EMPTY_HOST_CAPACITIES_V4: HostCapacitiesV4 = {
+  memoryTotalBytes: null,
+  swapTotalBytes: null,
+  rootFilesystemTotalBytes: null,
+}
+
+export type TopologyContextV4 = {
+  topologyGeneration: number | null
+  slotMapping: SlotMapping | null
+  inventory: TopologyInventoryV4 | null
+  capacities: HostCapacitiesV4
+}
+
+const EMPTY_TOPOLOGY_CONTEXT_V4: Omit<TopologyContextV4, 'topologyGeneration'> = {
+  slotMapping: null,
+  inventory: null,
+  capacities: EMPTY_HOST_CAPACITIES_V4,
+}
+
+/**
+ * Build the full topology context (`inventory`/`slotMapping`/host capacities)
+ * a single-server `/series` route needs from its latest recorded topology
+ * generation, or an empty-but-present context (never a throw) when there is
+ * no usable snapshot yet — a server that has never reported topology, or
+ * whose recorded snapshot predates `computeSlotMapping`'s required arrays.
+ */
+export function buildTopologyContextV4(
+  record: { generation: number; snapshot: unknown } | undefined,
+  hardwareProfile: ServerHardwareProfile | undefined
+): TopologyContextV4 {
+  const topologyGeneration = record?.generation ?? null
+  if (!isSlotMappableTopologySnapshotV4(record?.snapshot)) {
+    return { topologyGeneration, ...EMPTY_TOPOLOGY_CONTEXT_V4 }
+  }
+  const snapshot = record!.snapshot
+  const overrides = topologyOverridesFromHardwareProfile(hardwareProfile)
+  let slotMapping: SlotMapping
+  try {
+    slotMapping = computeSlotMapping(snapshot, overrides)
+  } catch {
+    return { topologyGeneration, ...EMPTY_TOPOLOGY_CONTEXT_V4 }
+  }
+  return {
+    topologyGeneration,
+    slotMapping,
+    inventory: buildTopologyInventoryV4(snapshot, slotMapping),
+    capacities: {
+      memoryTotalBytes: snapshot.memoryTotalBytes,
+      swapTotalBytes: snapshot.swapTotalBytes,
+      rootFilesystemTotalBytes: rootFilesystemTotalBytesV4(snapshot, slotMapping),
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// `/servers/:id/metrics/series` response shaping — bundles the v4 host chart
+// response with per-family entity series results and the topology context.
+// ---------------------------------------------------------------------------
+
+export type SeriesRouteResponseV4 = {
+  ok: true
+  serverId: string
+  from: string
+  to: string
+  backend: MetricsBackendKind
+  available: boolean
+  resolutionSeconds: number | null
+  host: HostSeriesChartResponseV4 | null
+  entities: EntitySeriesResultV4[]
+  inventory: TopologyInventoryV4 | null
+  topologyGeneration: number | null
+  cpuLimits: EffectiveCpuThermalLimits
+  temperatureUnit: TemperatureUnit
+}
+
+export function buildSeriesRouteResponseV4(
+  params: Readonly<{
+    serverId: string
+    from: string
+    to: string
+    backend: MetricsBackendKind
+    resolutionSeconds: number | null
+    host: HostSeriesChartResponseV4 | null
+    entities: EntitySeriesResultV4[]
+    context: TopologyContextV4
+    envelope: CpuLimitsEnvelope
+  }>
+): SeriesRouteResponseV4 {
+  const available =
+    (params.host?.available ?? true) && params.entities.every((entity) => entity.available)
+  return {
+    ok: true,
+    serverId: params.serverId,
+    from: params.from,
+    to: params.to,
+    backend: params.backend,
+    available,
+    resolutionSeconds: params.resolutionSeconds,
+    host: params.host,
+    entities: params.entities,
+    inventory: params.context.inventory,
+    topologyGeneration: params.context.topologyGeneration,
+    cpuLimits: params.envelope.cpuLimits,
+    temperatureUnit: params.envelope.temperatureUnit,
+  }
+}
+
+/** Synthesized `HostSeriesResultV4`-shaped unavailable result when the resolved store has no `queryHostSeries` (e.g. `DisabledServerMetricsStoreV4`) — never a throw. */
+export function unavailableHostSeriesResultV4(input: {
+  serverId: string
+  metrics: readonly string[]
+  backend: MetricsBackendKind
+}): {
+  kind: MetricsBackendKind
+  available: boolean
+  serverId: string
+  metrics: readonly string[]
+  points: never[]
+  resolutionSeconds: null
+  gapCount: number
+  sampleCount: number
+} {
+  return {
+    kind: input.backend,
+    available: false,
+    serverId: input.serverId,
+    metrics: input.metrics,
+    points: [],
+    resolutionSeconds: null,
+    gapCount: 0,
+    sampleCount: 0,
+  }
+}
+
+/** Synthesized `EntitySeriesResultV4`-shaped unavailable result when the resolved store has no `queryEntitySeries` — never a throw. */
+export function unavailableEntitySeriesResultV4(input: {
+  serverId: string
+  family: PerEntityHostedFamilyV4
+  metrics: readonly string[]
+  backend: MetricsBackendKind
+}): EntitySeriesResultV4 {
+  return {
+    kind: input.backend,
+    available: false,
+    serverId: input.serverId,
+    family: input.family,
+    metrics: input.metrics,
+    resolutionSeconds: null,
+    entities: [],
+  }
+}
+
+export type SeriesQueryInputV4 = {
+  store: ServerMetricsStoreV4 | undefined
+  backend: MetricsBackendKind
+  serverId: string
+  selectors: SeriesMetricSelectorsV4
+  fromIso: string
+  toIso: string
+  resolutionSeconds: number
+  context: TopologyContextV4
+}
+
+export type SeriesQueryOutcomeV4 =
+  | {
+      ok: true
+      hostResult: HostSeriesResultV4 | null
+      entityResults: EntitySeriesResultV4[]
+    }
+  | { ok: false }
+
+/**
+ * Fan-in host + per-family entity series reads for `/servers/:id/metrics/series`.
+ * A store throw (backend unavailable) becomes `{ ok: false }` so the route can
+ * 503 without duplicating the try/catch per family.
+ */
+export async function querySeriesResultsV4(
+  input: SeriesQueryInputV4
+): Promise<SeriesQueryOutcomeV4> {
+  const hostOutcome = await queryHostSeriesForRouteV4(input)
+  if (!hostOutcome.ok) return { ok: false }
+
+  const entityResults: EntitySeriesResultV4[] = []
+  for (const [family, selection] of input.selectors.entityFamilies) {
+    const outcome = await queryOneEntityFamilySeriesV4(input, family, selection)
+    if (!outcome.ok) return { ok: false }
+    entityResults.push(outcome.result)
+  }
+
+  return { ok: true, hostResult: hostOutcome.hostResult, entityResults }
+}
+
+type HostSeriesQueryOutcomeV4 = { ok: true; hostResult: HostSeriesResultV4 | null } | { ok: false }
+
+async function queryHostSeriesForRouteV4(
+  input: SeriesQueryInputV4
+): Promise<HostSeriesQueryOutcomeV4> {
+  if (input.selectors.hostCanonicalNames.length === 0) {
+    return { ok: true, hostResult: null }
+  }
+  try {
+    const queryHostSeries = input.store?.queryHostSeries
+    if (!queryHostSeries) {
+      return {
+        ok: true,
+        hostResult: unavailableHostSeriesResultV4({
+          serverId: input.serverId,
+          metrics: input.selectors.hostCanonicalNames,
+          backend: input.backend,
+        }),
+      }
+    }
+    return {
+      ok: true,
+      hostResult: await queryHostSeries({
+        serverId: input.serverId,
+        metrics: input.selectors.hostCanonicalNames,
+        from: input.fromIso,
+        to: input.toIso,
+        resolutionSeconds: input.resolutionSeconds,
+      }),
+    }
+  } catch (err) {
+    const message = metricsQueryErrorMessage(err)
+    console.error(
+      `metrics queryHostSeries failed backend=${input.backend} serverId=${input.serverId}: ${message}`
+    )
+    return { ok: false }
+  }
+}
+
+type EntityFamilyQueryOutcomeV4 = { ok: true; result: EntitySeriesResultV4 } | { ok: false }
+
+async function queryOneEntityFamilySeriesV4(
+  input: SeriesQueryInputV4,
+  family: PerEntityHostedFamilyV4,
+  selection: EntityFamilySelectionV4
+): Promise<EntityFamilyQueryOutcomeV4> {
+  const entityIds = [...selection.entityIds]
+  const fields = [...selection.fields]
+  const networkExtra =
+    family === 'network'
+      ? {
+          slotMapping: input.context.slotMapping ?? undefined,
+          topologyGeneration: input.context.topologyGeneration,
+        }
+      : {}
+  try {
+    const queryEntitySeries = input.store?.queryEntitySeries
+    if (!queryEntitySeries) {
+      return {
+        ok: true,
+        result: unavailableEntitySeriesResultV4({
+          serverId: input.serverId,
+          family,
+          metrics: fields,
+          backend: input.backend,
+        }),
+      }
+    }
+    return {
+      ok: true,
+      result: await queryEntitySeries({
+        serverId: input.serverId,
+        family,
+        entityIds,
+        metrics: fields,
+        from: input.fromIso,
+        to: input.toIso,
+        resolutionSeconds: input.resolutionSeconds,
+        ...networkExtra,
+      }),
+    }
+  } catch (err) {
+    const message = metricsQueryErrorMessage(err)
+    console.error(
+      `metrics queryEntitySeries failed backend=${input.backend} serverId=${input.serverId} family=${family}: ${message}`
+    )
+    return { ok: false }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// `/servers/metrics/latest` (fleet snapshot) — v4 host metric set + derived
+// values from a batched topology-capacity join, kept O(1) in server count
+// (one metrics query + one topology-generations query, never N).
+// ---------------------------------------------------------------------------
+
+/**
+ * Metrics shown on the org servers overview (CPU stack + memory/swap).
+ * Canonical v4 host names only — derived percentages (`memoryUsedPercent`,
+ * `swapUsedPercent`) are computed by {@link buildFleetLatestPayloadV4} from
+ * these plus each server's topology capacity, never stored/requested as
+ * their own metric. v3's load-average fields (`load1`/`load5`/`load15`) have
+ * no v4 analogue — the daemon contract carries no load-average metric at
+ * all — so the fleet overview's load column has nothing to show post-cutover;
+ * this is a known, deliberate capability gap, not an oversight.
+ */
+export const FLEET_HOST_METRICS_V4 = [
+  'host.cpu.busyPercent',
+  'host.cpu.userPercent',
+  'host.cpu.systemPercent',
+  'host.cpu.iowaitPercent',
+  'host.memory.availableBytes',
+  'host.memory.swapUsedBytes',
+] as const
+
+/**
+ * `HostCapacitiesV4` for the fleet route from one server's topology
+ * snapshot — memory/swap totals only (never `rootFilesystemTotalBytes`,
+ * which needs a per-server `SlotMapping`/hardware-profile-override lookup
+ * that would break this route's O(1)-in-server-count invariant; the fleet
+ * overview never showed disk usage even pre-cutover).
+ */
+export function fleetHostCapacitiesFromSnapshotV4(snapshot: unknown): HostCapacitiesV4 {
+  if (typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) {
+    return EMPTY_HOST_CAPACITIES_V4
+  }
+  const record = snapshot as Record<string, unknown>
+  return {
+    memoryTotalBytes: typeof record.memoryTotalBytes === 'number' ? record.memoryTotalBytes : null,
+    swapTotalBytes: typeof record.swapTotalBytes === 'number' ? record.swapTotalBytes : null,
+    rootFilesystemTotalBytes: null,
+  }
+}
+
+export type FleetServerUsageRecordV4 = {
+  serverId: string
+  latestAt: string | null
+  values: Partial<Record<string, number | null>>
+  sampleCount: number
+  topologyGeneration?: number | null
+  derived: DerivedHostValuesV4
+}
+
+export type FleetLatestResponseV4 = {
+  ok: true
+  from: string
+  to: string
+  backend: MetricsBackendKind
+  available: boolean
+  metrics: readonly string[]
+  servers: FleetServerUsageRecordV4[]
+}
+
+export function buildFleetLatestPayloadV4(
+  params: Readonly<{
+    from: string
+    to: string
+    backend: MetricsBackendKind
+    available: boolean
+    metrics: readonly string[]
+    servers: Array<{
+      serverId: string
+      latestAt: string | null
+      values: Partial<Record<string, number | null>>
+      sampleCount: number
+      topologyGeneration?: number | null
+    }>
+    capacitiesByServer: ReadonlyMap<string, HostCapacitiesV4>
+  }>
+): FleetLatestResponseV4 {
+  return {
+    ok: true,
+    from: params.from,
+    to: params.to,
+    backend: params.backend,
+    available: params.available,
+    metrics: params.metrics,
+    servers: params.servers.map((row) => ({
+      ...row,
+      derived: computeDerivedHostValuesV4(
+        row.values,
+        params.capacitiesByServer.get(row.serverId) ?? EMPTY_HOST_CAPACITIES_V4
+      ),
+    })),
+  }
 }
 
 export function parseIsoTimestampQuery(
@@ -568,4 +1214,41 @@ export function buildHostSummaryPayload(
 
 export function metricsQueryErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+export type MetricEventsResponse = {
+  ok: true
+  serverId: string
+  from: string
+  to: string
+  backend: MetricsBackendKind
+  available: boolean
+  events: MetricEventsResultV4['events']
+  truncated: boolean
+}
+
+export function buildMetricEventsPayload(
+  params: Readonly<{
+    serverId: string
+    from: string
+    to: string
+    result: MetricEventsResultV4
+  }>
+): MetricEventsResponse {
+  const { result } = params
+  return {
+    ok: true,
+    serverId: params.serverId,
+    from: params.from,
+    to: params.to,
+    backend: result.kind,
+    available: result.available,
+    events: result.events,
+    truncated: result.truncated,
+  }
+}
+
+/** True when metric-events history has something worth caching. */
+export function metricEventsHasCacheableData(result: MetricEventsResultV4): boolean {
+  return result.events.length > 0
 }

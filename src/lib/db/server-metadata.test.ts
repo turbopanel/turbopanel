@@ -6,7 +6,6 @@ import {
   serverIpsEquals,
 } from '../../server-addresses.ts'
 import {
-  parseServerRuntimeMetadata,
   formatServerOsDisplay,
   mergeServerHardwareProfile,
   osColumnsFromMetadata,
@@ -17,9 +16,10 @@ import {
   parseServerHostResources,
   parseServerOptions,
   parseServerOsMetadata,
-  redactServerOptions,
-  REDACTED_SERVER_OPTION_KEYS,
+  parseServerRuntimeMetadata,
   parseServerTimeSync,
+  REDACTED_SERVER_OPTION_KEYS,
+  redactServerOptions,
   resolveEffectiveCpuThermalLimits,
   resolveEffectiveServerTimezone,
   resolveServerOsLogoKey,
@@ -50,7 +50,7 @@ test('formatServerOsDisplay formats Debian with point release', () => {
       codename: 'trixie',
       prettyName: 'Debian GNU/Linux 13 (trixie)',
     }),
-    'Debian 13.5 (Trixie)',
+    'Debian 13.5 (Trixie)'
   )
 })
 
@@ -63,7 +63,7 @@ test('formatServerOsDisplay formats Raspberry Pi OS from variant', () => {
       version: '12.11',
       codename: 'bookworm',
     }),
-    'Raspberry Pi OS 12.11 (Bookworm)',
+    'Raspberry Pi OS 12.11 (Bookworm)'
   )
 })
 
@@ -75,46 +75,37 @@ test('formatServerOsDisplay formats raspbian ID as Raspberry Pi OS', () => {
       version: '11',
       codename: 'bullseye',
     }),
-    'Raspberry Pi OS 11 (Bullseye)',
+    'Raspberry Pi OS 11 (Bullseye)'
   )
 })
 
 test('formatServerOsDisplay falls back when fields are sparse', () => {
   assertEquals(
     formatServerOsDisplay({ family: 'linux', id: 'ubuntu', version: '24.04' }),
-    'Ubuntu 24.04',
+    'Ubuntu 24.04'
   )
-  assertEquals(
-    formatServerOsDisplay({ family: 'linux', id: 'debian' }),
-    'Debian',
-  )
+  assertEquals(formatServerOsDisplay({ family: 'linux', id: 'debian' }), 'Debian')
   assertEquals(
     formatServerOsDisplay({
       prettyName: 'Debian GNU/Linux 13 (trixie)',
     }),
-    'Debian',
+    'Debian'
   )
   assertEquals(formatServerOsDisplay(null), null)
   assertEquals(formatServerOsDisplay(undefined), null)
 })
 
 test('resolveServerOsLogoKey picks debian vs raspberry-pi-os', () => {
-  assertEquals(
-    resolveServerOsLogoKey({ family: 'linux', id: 'debian' }),
-    'debian',
-  )
+  assertEquals(resolveServerOsLogoKey({ family: 'linux', id: 'debian' }), 'debian')
   assertEquals(
     resolveServerOsLogoKey({
       family: 'linux',
       id: 'debian',
       variant: 'raspberry-pi-os',
     }),
-    'raspberry-pi-os',
+    'raspberry-pi-os'
   )
-  assertEquals(
-    resolveServerOsLogoKey({ family: 'linux', id: 'raspbian' }),
-    'raspberry-pi-os',
-  )
+  assertEquals(resolveServerOsLogoKey({ family: 'linux', id: 'raspbian' }), 'raspberry-pi-os')
   assertEquals(resolveServerOsLogoKey({ family: 'linux', id: 'ubuntu' }), null)
 })
 
@@ -137,7 +128,7 @@ test('parseServerOsMetadata accepts daemon hello os blocks', () => {
       codename: 'trixie',
       prettyName: 'Debian GNU/Linux 13 (trixie)',
       architecture: 'aarch64',
-    },
+    }
   )
   assertEquals(parseServerOsMetadata({ family: 'solaris' }), undefined)
   assertEquals(parseServerOsMetadata('nope'), undefined)
@@ -166,12 +157,9 @@ test('parseServerHostResources accepts capacity totals', () => {
       ],
       memory: { totalBytes: 16_384_000_000 },
       swap: { totalBytes: 0 },
-    },
+    }
   )
-  assertEquals(
-    parseServerHostResources({ memory: { totalBytes: -1 } }),
-    undefined,
-  )
+  assertEquals(parseServerHostResources({ memory: { totalBytes: -1 } }), undefined)
   assertEquals(parseServerHostResources(null), undefined)
 })
 
@@ -200,7 +188,7 @@ test('parseServerHostResources accepts gpus', () => {
           pciSlot: '0000:01:00.0',
         },
       ],
-    },
+    }
   )
 })
 
@@ -210,23 +198,20 @@ test('serverHostResourcesEquals compares field-wise', () => {
     memory: { totalBytes: 100 },
     swap: { totalBytes: 0 },
   }
-  assertEquals(
-    serverHostResourcesEquals(a, { ...a, cpus: [{ ...a.cpus[0] }] }),
-    true,
-  )
+  assertEquals(serverHostResourcesEquals(a, { ...a, cpus: [{ ...a.cpus[0] }] }), true)
   assertEquals(
     serverHostResourcesEquals(a, {
       ...a,
       cpus: [{ cores: { total: 8 }, threads: { total: 8 } }],
     }),
-    false,
+    false
   )
   assertEquals(
     serverHostResourcesEquals(a, {
       ...a,
       cpus: [{ cores: { total: 4 }, threads: { total: 4 } }],
     }),
-    false,
+    false
   )
   assertEquals(serverHostResourcesEquals(a, null), false)
 })
@@ -258,7 +243,7 @@ test('parseServerTimeSync accepts daemon time-sync blocks', () => {
       ntpSynced: false,
       ntpServers: ['time.cloudflare.com'],
       fallbackNtpServers: ['203.0.113.10'],
-    },
+    }
   )
   assertEquals(parseServerTimeSync({ timezone: '  ' }), undefined)
   assertEquals(parseServerTimeSync('nope'), undefined)
@@ -270,14 +255,8 @@ test('serverTimeSyncEquals compares field-wise', () => {
     ntpEnabled: true,
     ntpServers: ['time.cloudflare.com'],
   }
-  assertEquals(
-    serverTimeSyncEquals(a, { ...a, ntpSynced: true }),
-    false,
-  )
-  assertEquals(
-    serverTimeSyncEquals(a, { ...a, timezone: 'Europe/London' }),
-    false,
-  )
+  assertEquals(serverTimeSyncEquals(a, { ...a, ntpSynced: true }), false)
+  assertEquals(serverTimeSyncEquals(a, { ...a, timezone: 'Europe/London' }), false)
 })
 
 test('parseServerDockerMetadata accepts daemon docker blocks', () => {
@@ -286,31 +265,21 @@ test('parseServerDockerMetadata accepts daemon docker blocks', () => {
       version: '28.3.3',
       composeVersion: 'v2.39.1',
     }),
-    { version: '28.3.3', composeVersion: '2.39.1' },
+    { version: '28.3.3', composeVersion: '2.39.1' }
   )
-  assertEquals(
-    parseServerDockerMetadata({ version: '28.3.3' }),
-    { version: '28.3.3' },
-  )
-  assertEquals(
-    parseServerDockerMetadata({ composeVersion: '2.39.1-desktop.1' }),
-    { composeVersion: '2.39.1-desktop.1' },
-  )
+  assertEquals(parseServerDockerMetadata({ version: '28.3.3' }), { version: '28.3.3' })
+  assertEquals(parseServerDockerMetadata({ composeVersion: '2.39.1-desktop.1' }), {
+    composeVersion: '2.39.1-desktop.1',
+  })
   assertEquals(parseServerDockerMetadata({}), undefined)
-  assertEquals(
-    parseServerDockerMetadata({ version: 'not a version' }),
-    undefined,
-  )
+  assertEquals(parseServerDockerMetadata({ version: 'not a version' }), undefined)
   assertEquals(parseServerDockerMetadata('nope'), undefined)
 })
 
 test('serverDockerMetadataEquals compares field-wise', () => {
   const a = { version: '28.3.3', composeVersion: '2.39.1' }
   assertEquals(serverDockerMetadataEquals(a, { ...a }), true)
-  assertEquals(
-    serverDockerMetadataEquals(a, { version: '28.3.3' }),
-    false,
-  )
+  assertEquals(serverDockerMetadataEquals(a, { version: '28.3.3' }), false)
   assertEquals(serverDockerMetadataEquals(a, null), false)
   assertEquals(serverDockerMetadataEquals(undefined, undefined), true)
 })
@@ -328,7 +297,7 @@ test('parseServerOptions and resolveEffectiveServerTimezone', () => {
     {
       sshPort: 2222,
       ntp: { enabled: true, servers: ['pool.ntp.org'] },
-    },
+    }
   )
   assertEquals(parseServerOptions(null), null)
   assertEquals(parseServerOptions({}), {})
@@ -336,21 +305,21 @@ test('parseServerOptions and resolveEffectiveServerTimezone', () => {
   assertEquals(
     resolveEffectiveServerTimezone(
       { timezone: 'America/Chicago' },
-      { defaultServerTimezone: 'UTC', enforceServerTimezone: false },
+      { defaultServerTimezone: 'UTC', enforceServerTimezone: false }
     ),
-    { timezone: 'America/Chicago', source: 'server' },
+    { timezone: 'America/Chicago', source: 'server' }
   )
   assertEquals(
     resolveEffectiveServerTimezone(
       { timezone: 'America/Chicago' },
-      { defaultServerTimezone: 'UTC', enforceServerTimezone: true },
+      { defaultServerTimezone: 'UTC', enforceServerTimezone: true }
     ),
-    { timezone: 'UTC', source: 'organization' },
+    { timezone: 'UTC', source: 'organization' }
   )
-  assertEquals(
-    resolveEffectiveServerTimezone({}, { defaultServerTimezone: 'UTC' }),
-    { timezone: null, source: null },
-  )
+  assertEquals(resolveEffectiveServerTimezone({}, { defaultServerTimezone: 'UTC' }), {
+    timezone: null,
+    source: null,
+  })
   assertEquals(resolveEffectiveServerTimezone({}, {}), {
     timezone: null,
     source: null,
@@ -400,26 +369,20 @@ test('resolveEffectiveServerTimezone datacenter precedence matrix', () => {
 })
 
 test('resolveServerResponseTimezone falls back to daemon-reported zone', () => {
-  assertEquals(
-    resolveServerResponseTimezone(
-      { timezone: null, source: null },
-      'Europe/Berlin',
-    ),
-    { timezone: 'Europe/Berlin', source: null },
-  )
-  assertEquals(
-    resolveServerResponseTimezone(
-      { timezone: null, source: null },
-      '  ',
-    ),
-    { timezone: null, source: null },
-  )
+  assertEquals(resolveServerResponseTimezone({ timezone: null, source: null }, 'Europe/Berlin'), {
+    timezone: 'Europe/Berlin',
+    source: null,
+  })
+  assertEquals(resolveServerResponseTimezone({ timezone: null, source: null }, '  '), {
+    timezone: null,
+    source: null,
+  })
   assertEquals(
     resolveServerResponseTimezone(
       { timezone: 'America/Chicago', source: 'server' },
-      'Europe/Berlin',
+      'Europe/Berlin'
     ),
-    { timezone: 'America/Chicago', source: 'server' },
+    { timezone: 'America/Chicago', source: 'server' }
   )
   assertEquals(
     resolveServerResponseTimezone(
@@ -429,11 +392,11 @@ test('resolveServerResponseTimezone falls back to daemon-reported zone', () => {
         {
           defaultServerTimezone: 'Europe/Berlin',
           enforceServerTimezone: false,
-        },
+        }
       ),
-      'Europe/Berlin',
+      'Europe/Berlin'
     ),
-    { timezone: 'Europe/Berlin', source: null },
+    { timezone: 'Europe/Berlin', source: null }
   )
 })
 
@@ -467,7 +430,7 @@ test('parseServerIps and serverIpsEquals', () => {
         scope: 'private',
         cidr: '10.0.0.0/24',
       },
-    ],
+    ]
   )
   assertEquals(serverIpsEquals(ips, ips), true)
   assertEquals(
@@ -475,7 +438,7 @@ test('parseServerIps and serverIpsEquals', () => {
       ...(ips ?? []),
       { address: '203.0.113.11', version: 4, scope: 'public' },
     ]),
-    false,
+    false
   )
 })
 
@@ -483,17 +446,17 @@ test('ipsFromDaemonPresence reads resources.ips only', () => {
   assertEquals(
     ipsFromDaemonPresence({
       resources: {
-        ips: [{
-          address: '10.0.0.4',
-          version: 4,
-          scope: 'private',
-          interface: 'eth0',
-        }],
+        ips: [
+          {
+            address: '10.0.0.4',
+            version: 4,
+            scope: 'private',
+            interface: 'eth0',
+          },
+        ],
       },
     }),
-    [
-      { address: '10.0.0.4', version: 4, scope: 'private', interface: 'eth0' },
-    ],
+    [{ address: '10.0.0.4', version: 4, scope: 'private', interface: 'eth0' }]
   )
   assertEquals(ipsFromDaemonPresence({}), undefined)
   assertEquals(ipsFromDaemonPresence({ ips: [] }), undefined)
@@ -503,27 +466,29 @@ test('reportedIpsFromServerMetadata prefers resources.ips and falls back to left
   assertEquals(
     reportedIpsFromServerMetadata({
       resources: {
-        ips: [{
-          address: '10.0.0.4',
-          version: 4,
-          scope: 'private',
-          interface: 'eth0',
-        }],
+        ips: [
+          {
+            address: '10.0.0.4',
+            version: 4,
+            scope: 'private',
+            interface: 'eth0',
+          },
+        ],
       },
       ips: [{ address: '203.0.113.10', version: 4, scope: 'public' }],
     }),
-    [
-      { address: '10.0.0.4', version: 4, scope: 'private', interface: 'eth0' },
-    ],
+    [{ address: '10.0.0.4', version: 4, scope: 'private', interface: 'eth0' }]
   )
   assertEquals(
     reportedIpsFromServerMetadata({
-      ips: [{
-        address: '10.0.0.10',
-        version: 4,
-        scope: 'private',
-        cidr: '10.0.0.10/24',
-      }],
+      ips: [
+        {
+          address: '10.0.0.10',
+          version: 4,
+          scope: 'private',
+          cidr: '10.0.0.10/24',
+        },
+      ],
     }),
     [
       {
@@ -532,7 +497,7 @@ test('reportedIpsFromServerMetadata prefers resources.ips and falls back to left
         scope: 'private',
         cidr: '10.0.0.0/24',
       },
-    ],
+    ]
   )
   assertEquals(reportedIpsFromServerMetadata({}), undefined)
   assertEquals(reportedIpsFromServerMetadata({ resources: {} }), undefined)
@@ -546,7 +511,7 @@ test('resourcesFromDaemonPresence reads resources only', () => {
       },
       inventory: { cpuCores: 2, cpuThreads: 4 },
     }),
-    { cpus: [{ cores: { total: 8 }, threads: { total: 16 } }] },
+    { cpus: [{ cores: { total: 8 }, threads: { total: 16 } }] }
   )
   assertEquals(
     resourcesFromDaemonPresence({
@@ -557,7 +522,7 @@ test('resourcesFromDaemonPresence reads resources only', () => {
         swapTotalBytes: 0,
       },
     }),
-    undefined,
+    undefined
   )
   assertEquals(
     resourcesFromDaemonPresence({
@@ -570,7 +535,7 @@ test('resourcesFromDaemonPresence reads resources only', () => {
     {
       cpus: [{ cores: { total: 2 } }],
       ips: [{ address: '10.0.0.8', version: 4, scope: 'private' }],
-    },
+    }
   )
 })
 
@@ -608,10 +573,7 @@ test('parseNtpServersColumn accepts object arrays and string arrays', () => {
       { host: 'time.cloudflare.com' },
       { host: 'pool.ntp.org', fallback: true },
     ]),
-    [
-      { host: 'time.cloudflare.com' },
-      { host: 'pool.ntp.org', fallback: true },
-    ],
+    [{ host: 'time.cloudflare.com' }, { host: 'pool.ntp.org', fallback: true }]
   )
   assertEquals(parseNtpServersColumn(['a.example', 'b.example']), [
     { host: 'a.example' },
@@ -630,26 +592,24 @@ test('timeSyncColumnPatch does not rewrite last-sync on every synced heartbeat',
     timeSyncColumnPatch(
       { timezone: 'UTC', ntpEnabled: true, ntpSynced: true },
       current,
-      '2026-08-17T12:00:00.000Z',
+      '2026-08-17T12:00:00.000Z'
     ),
-    null,
+    null
   )
-  assertEquals(
-    timeSyncColumnPatch(
-      { ntpSynced: false },
-      current,
-      '2026-08-17T12:00:00.000Z',
-    ),
-    { ntpLastSyncedAt: null },
-  )
+  assertEquals(timeSyncColumnPatch({ ntpSynced: false }, current, '2026-08-17T12:00:00.000Z'), {
+    ntpLastSyncedAt: null,
+  })
   assertEquals(
     timeSyncFromColumns({
       timezone: 'UTC',
       isTimeSyncEnabled: true,
-      ntpServers: [{ host: 'a.example' }, {
-        host: 'b.example',
-        fallback: true,
-      }],
+      ntpServers: [
+        { host: 'a.example' },
+        {
+          host: 'b.example',
+          fallback: true,
+        },
+      ],
       ntpLastSyncedAt: '2026-01-01T00:00:00.000Z',
     }),
     {
@@ -659,7 +619,7 @@ test('timeSyncColumnPatch does not rewrite last-sync on every synced heartbeat',
       ntpServers: ['a.example'],
       fallbackNtpServers: ['b.example'],
       lastSyncedAt: '2026-01-01T00:00:00.000Z',
-    },
+    }
   )
 })
 
@@ -686,7 +646,7 @@ test('parseServerHostResources keeps ips including interface', () => {
           interface: 'enp1s0',
         },
       ],
-    },
+    }
   )
 })
 
@@ -695,7 +655,7 @@ test('parseServerRuntimeMetadata keeps well-formed areas and drops the rest', ()
     parseServerRuntimeMetadata({
       php: {
         series: ['8.4', '8.3', '8.4', 'nonsense'],
-        extensions: { '8.4': ['intl', 'REDIS', 'bad name'], 'x': ['intl'] },
+        extensions: { '8.4': ['intl', 'REDIS', 'bad name'], x: ['intl'] },
       },
       node: { series: ['24'] },
       lsphp: { series: [] },
@@ -704,7 +664,7 @@ test('parseServerRuntimeMetadata keeps well-formed areas and drops the rest', ()
     {
       php: { series: ['8.3', '8.4'], extensions: { '8.4': ['intl', 'redis'] } },
       node: { series: ['24'] },
-    },
+    }
   )
 })
 
@@ -770,7 +730,7 @@ test('parseServerHardwareProfile parses cpuModel and cpu overrides', () => {
       cpuModel: 'Intel Xeon Gold 6338',
       cpuTdpWattsOverride: 215,
       cpuTjMaxCelsiusOverride: 100,
-    },
+    }
   )
 })
 
@@ -780,38 +740,105 @@ test('parseServerHardwareProfile drops out-of-range cpu overrides', () => {
       cpuTdpWattsOverride: -5,
       cpuTjMaxCelsiusOverride: 999,
     }),
-    undefined,
+    undefined
   )
-  assertEquals(
-    parseServerHardwareProfile({ cpuTdpWattsOverride: 0 }),
-    undefined,
-  )
+  assertEquals(parseServerHardwareProfile({ cpuTdpWattsOverride: 0 }), undefined)
 })
 
 test('parseServerHardwareProfile keeps an explicit null cpu override', () => {
-  assertEquals(
-    parseServerHardwareProfile({ cpuTdpWattsOverride: null }),
-    { cpuTdpWattsOverride: null },
-  )
+  assertEquals(parseServerHardwareProfile({ cpuTdpWattsOverride: null }), {
+    cpuTdpWattsOverride: null,
+  })
 })
 
 test('mergeServerHardwareProfile sets and clears cpu overrides without bumping generation', () => {
   const now = '2026-01-01T00:00:00.000Z'
-  const set = mergeServerHardwareProfile(undefined, {
-    cpuTdpWattsOverride: 200,
-    cpuTjMaxCelsiusOverride: 95,
-  }, now)
+  const set = mergeServerHardwareProfile(
+    undefined,
+    {
+      cpuTdpWattsOverride: 200,
+      cpuTjMaxCelsiusOverride: 95,
+    },
+    now
+  )
   assertEquals(set.identityChanged, false)
   assertEquals(set.profile?.cpuTdpWattsOverride, 200)
   assertEquals(set.profile?.cpuTjMaxCelsiusOverride, 95)
   assertEquals(set.profile?.generation, undefined)
 
-  const cleared = mergeServerHardwareProfile(set.profile, {
-    cpuTdpWattsOverride: null,
-  }, now)
+  const cleared = mergeServerHardwareProfile(
+    set.profile,
+    {
+      cpuTdpWattsOverride: null,
+    },
+    now
+  )
   assertEquals(cleared.identityChanged, false)
   assertEquals(cleared.profile?.cpuTdpWattsOverride, undefined)
   assertEquals(cleared.profile?.cpuTjMaxCelsiusOverride, 95)
+})
+
+test('parseServerHardwareProfile parses topology-id fields', () => {
+  assertEquals(
+    parseServerHardwareProfile({
+      nicSlot1DeviceId: '  eth-topo-1  ',
+      nicSlot2DeviceId: null,
+      hostingFilesystemId: 'fs-topo-1',
+    }),
+    {
+      nicSlot1DeviceId: 'eth-topo-1',
+      nicSlot2DeviceId: null,
+      hostingFilesystemId: 'fs-topo-1',
+    }
+  )
+})
+
+test('mergeServerHardwareProfile bumps generation when topology-id fields change', () => {
+  const now = '2026-01-01T00:00:00.000Z'
+  const set = mergeServerHardwareProfile(
+    undefined,
+    {
+      nicSlot1DeviceId: 'eth-topo-1',
+      nicSlot2DeviceId: 'eth-topo-2',
+      hostingFilesystemId: 'fs-topo-1',
+    },
+    now
+  )
+  assertEquals(set.identityChanged, true)
+  assertEquals(set.profile?.generation, 1)
+  assertEquals(set.profile?.generationAppliedAt, now)
+  assertEquals(set.profile?.nicSlot1DeviceId, 'eth-topo-1')
+  assertEquals(set.profile?.nicSlot2DeviceId, 'eth-topo-2')
+  assertEquals(set.profile?.hostingFilesystemId, 'fs-topo-1')
+
+  const later = '2026-01-02T00:00:00.000Z'
+  const unassigned = mergeServerHardwareProfile(
+    set.profile,
+    {
+      nicSlot1DeviceId: null,
+    },
+    later
+  )
+  assertEquals(unassigned.identityChanged, true)
+  assertEquals(unassigned.profile?.generation, 2)
+  assertEquals(unassigned.profile?.generationAppliedAt, later)
+  assertEquals(unassigned.profile?.nicSlot1DeviceId, null)
+})
+
+test('mergeServerHardwareProfile does not bump generation for hostingPath/drivetempEnabled (topology-id case alongside)', () => {
+  const now = '2026-01-01T00:00:00.000Z'
+  const merged = mergeServerHardwareProfile(
+    undefined,
+    {
+      hostingPath: '/srv/data',
+      drivetempEnabled: true,
+    },
+    now
+  )
+  assertEquals(merged.identityChanged, false)
+  assertEquals(merged.profile?.generation, undefined)
+  assertEquals(merged.profile?.hostingPath, '/srv/data')
+  assertEquals(merged.profile?.drivetempEnabled, true)
 })
 
 test('resolveEffectiveCpuThermalLimits: override-only (no cpuModel)', () => {
@@ -820,22 +847,24 @@ test('resolveEffectiveCpuThermalLimits: override-only (no cpuModel)', () => {
       cpuTdpWattsOverride: 300,
       cpuTjMaxCelsiusOverride: 90,
     }),
-    { tdpWatts: 300, tjMaxCelsius: 90, source: 'override' },
+    { tdpWatts: 300, tjMaxCelsius: 90, source: 'override' }
   )
 })
 
 test('resolveEffectiveCpuThermalLimits: catalog-only, exact model match', () => {
-  assertEquals(
-    resolveEffectiveCpuThermalLimits({ cpuModel: 'AMD EPYC 7763' }),
-    { tdpWatts: 280, tjMaxCelsius: 95, source: 'catalog-exact' },
-  )
+  assertEquals(resolveEffectiveCpuThermalLimits({ cpuModel: 'AMD EPYC 7763' }), {
+    tdpWatts: 280,
+    tjMaxCelsius: 95,
+    source: 'catalog-exact',
+  })
 })
 
 test('resolveEffectiveCpuThermalLimits: catalog-only, family regex fallback', () => {
-  assertEquals(
-    resolveEffectiveCpuThermalLimits({ cpuModel: 'AMD EPYC 9999' }),
-    { tdpWatts: 200, tjMaxCelsius: 95, source: 'catalog-family' },
-  )
+  assertEquals(resolveEffectiveCpuThermalLimits({ cpuModel: 'AMD EPYC 9999' }), {
+    tdpWatts: 200,
+    tjMaxCelsius: 95,
+    source: 'catalog-family',
+  })
 })
 
 test('resolveEffectiveCpuThermalLimits: mixed override+catalog fills only the overridden field', () => {
@@ -844,17 +873,19 @@ test('resolveEffectiveCpuThermalLimits: mixed override+catalog fills only the ov
       cpuModel: 'AMD EPYC 7763',
       cpuTdpWattsOverride: 240,
     }),
-    { tdpWatts: 240, tjMaxCelsius: 95, source: 'override' },
+    { tdpWatts: 240, tjMaxCelsius: 95, source: 'override' }
   )
 })
 
 test('resolveEffectiveCpuThermalLimits: neither override nor recognized cpuModel', () => {
-  assertEquals(
-    resolveEffectiveCpuThermalLimits({ cpuModel: 'Totally Unknown Silicon' }),
-    { tdpWatts: null, tjMaxCelsius: null, source: 'none' },
-  )
-  assertEquals(
-    resolveEffectiveCpuThermalLimits(undefined),
-    { tdpWatts: null, tjMaxCelsius: null, source: 'none' },
-  )
+  assertEquals(resolveEffectiveCpuThermalLimits({ cpuModel: 'Totally Unknown Silicon' }), {
+    tdpWatts: null,
+    tjMaxCelsius: null,
+    source: 'none',
+  })
+  assertEquals(resolveEffectiveCpuThermalLimits(undefined), {
+    tdpWatts: null,
+    tjMaxCelsius: null,
+    source: 'none',
+  })
 })

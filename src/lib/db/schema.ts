@@ -17,20 +17,20 @@
 
 import { sql } from 'drizzle-orm'
 import {
-  pgTable,
-  index,
-  uniqueIndex,
-  foreignKey,
-  uuid,
-  timestamp,
-  varchar,
-  text,
-  unique,
-  check,
-  jsonb,
-  integer,
-  boolean,
   type AnyPgColumn,
+  boolean,
+  check,
+  foreignKey,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  unique,
+  uniqueIndex,
+  uuid,
+  varchar,
 } from 'drizzle-orm/pg-core'
 import { cidr, inet } from './net-types.ts'
 
@@ -41,7 +41,11 @@ export const invitation = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     userId: uuid('user_id').notNull(),
@@ -58,14 +62,8 @@ export const invitation = pgTable(
   },
   (table) => [
     index('idx_invitation_email').using('btree', table.email.asc().nullsLast().op('text_ops')),
-    index('idx_invitation_user_id').using(
-      'btree',
-      table.userId.asc().nullsLast().op('uuid_ops')
-    ),
-    index('idx_invitation_team_id').using(
-      'btree',
-      table.teamId.asc().nullsLast().op('uuid_ops')
-    ),
+    index('idx_invitation_user_id').using('btree', table.userId.asc().nullsLast().op('uuid_ops')),
+    index('idx_invitation_team_id').using('btree', table.teamId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.userId],
       foreignColumns: [user.id],
@@ -85,10 +83,18 @@ export const organization = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -96,9 +102,7 @@ export const organization = pgTable(
     name: varchar({ length: 255 }),
     slug: varchar({ length: 255 }),
   },
-  (table) => [
-    unique('organization_slug_unique').on(table.slug),
-  ]
+  (table) => [unique('organization_slug_unique').on(table.slug)]
 )
 /**
  * Organization TLS certificate library (upload / Let's Encrypt / self-signed).
@@ -112,10 +116,18 @@ export const tls = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -130,7 +142,11 @@ export const tls = pgTable(
     privateKeyPem: text('private_key_pem'),
     /** `ready` | `pending` | `expired` | `failed` | `revoked` */
     status: text().default('ready').notNull(),
-    notAfter: timestamp('not_after', { precision: 3, withTimezone: true, mode: 'string' }),
+    notAfter: timestamp('not_after', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
     fingerprintSha256: text('fingerprint_sha256'),
     /**
      * Organization CA lifecycle: `active` | `retired` | `revoked`.
@@ -199,10 +215,18 @@ export const changeover = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -212,17 +236,25 @@ export const changeover = pgTable(
     toCaGeneration: integer('to_ca_generation').default(0).notNull(),
     /** `in_progress` | `awaiting_retire` | `completed` | `failed` */
     state: text().notNull(),
-    startedAt: timestamp('started_at', { precision: 3, withTimezone: true, mode: 'string' })
+    startedAt: timestamp('started_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    completedAt: timestamp('completed_at', { precision: 3, withTimezone: true, mode: 'string' }),
+    completedAt: timestamp('completed_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
     /** Per-server / per-cluster fan-out rows (`ingress` | `apply`). */
     results: jsonb().default([]),
   },
   (table) => [
     index('idx_changeover_organization_id').using(
       'btree',
-      table.organizationId.asc().nullsLast().op('uuid_ops'),
+      table.organizationId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.organizationId],
@@ -234,9 +266,9 @@ export const changeover = pgTable(
       .where(sql`${table.state} = 'in_progress'`),
     check(
       'changeover_state_check',
-      sql`${table.state} IN ('in_progress','awaiting_retire','completed','failed')`,
+      sql`${table.state} IN ('in_progress','awaiting_retire','completed','failed')`
     ),
-  ],
+  ]
 )
 export const passkey = pgTable(
   'passkey',
@@ -288,10 +320,18 @@ export const datacenter = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -401,10 +441,7 @@ export const server = pgTable(
       'btree',
       table.machineKey.asc().nullsLast().op('text_ops')
     ),
-    index('idx_server_hostname').using(
-      'btree',
-      table.hostname.asc().nullsLast().op('text_ops')
-    ),
+    index('idx_server_hostname').using('btree', table.hostname.asc().nullsLast().op('text_ops')),
     index('idx_server_connected')
       .on(table.id)
       .where(sql`${table.isConnected}`),
@@ -426,10 +463,18 @@ export const license = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     organizationId: uuid('organization_id').notNull(),
@@ -439,7 +484,11 @@ export const license = pgTable(
     /** Argon2id PHC hashed token — same format as account.password */
     token: text().notNull(),
     /** Soft-delete */
-    revokedAt: timestamp('revoked_at', { precision: 3, withTimezone: true, mode: 'string' }),
+    revokedAt: timestamp('revoked_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
   },
   (table) => [
     index('idx_license_organization_id').using(
@@ -469,10 +518,18 @@ export const command = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -494,17 +551,41 @@ export const command = pgTable(
     resultSummary: jsonb('result_summary'),
     errorCode: text('error_code'),
     errorMessage: text('error_message'),
-    queuedAt: timestamp('queued_at', { precision: 3, withTimezone: true, mode: 'string' }),
+    queuedAt: timestamp('queued_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
     dispatchStartedAt: timestamp('dispatch_started_at', {
       precision: 3,
       withTimezone: true,
       mode: 'string',
     }),
-    sentAt: timestamp('sent_at', { precision: 3, withTimezone: true, mode: 'string' }),
-    ackedAt: timestamp('acked_at', { precision: 3, withTimezone: true, mode: 'string' }),
-    startedAt: timestamp('started_at', { precision: 3, withTimezone: true, mode: 'string' }),
-    finishedAt: timestamp('finished_at', { precision: 3, withTimezone: true, mode: 'string' }),
-    expiresAt: timestamp('expires_at', { precision: 3, withTimezone: true, mode: 'string' }),
+    sentAt: timestamp('sent_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
+    ackedAt: timestamp('acked_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
+    startedAt: timestamp('started_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
+    finishedAt: timestamp('finished_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
+    expiresAt: timestamp('expires_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
   },
   (table) => [
     index('idx_command_server_id_created_at').using(
@@ -522,11 +603,9 @@ export const command = pgTable(
      * `environment.deploy` rows, keyed on the allowlisted
      * `context->>'environmentId'` rather than a denormalized column.
      */
-    index('idx_command_deploy_environment_created').using(
-      'btree',
-      sql`((context ->> 'environmentId'))`,
-      table.createdAt.desc()
-    ).where(sql`name = 'environment.deploy'`),
+    index('idx_command_deploy_environment_created')
+      .using('btree', sql`((context ->> 'environmentId'))`, table.createdAt.desc())
+      .where(sql`name = 'environment.deploy'`),
     foreignKey({
       columns: [table.serverId],
       foreignColumns: [server.id],
@@ -545,11 +624,19 @@ export const dispatch = pgTable(
   'dispatch',
   {
     commandId: uuid('command_id').primaryKey().notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     payload: jsonb().notNull(),
-    expiresAt: timestamp('expires_at', { precision: 3, withTimezone: true, mode: 'string' }),
+    expiresAt: timestamp('expires_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
   },
   (table) => [
     index('idx_dispatch_expires_at').using('btree', table.expiresAt.asc()),
@@ -579,10 +666,18 @@ export const network = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -612,7 +707,7 @@ export const network = pgTable(
     ),
     index('idx_network_environment_id').using(
       'btree',
-      table.environmentId.asc().nullsLast().op('uuid_ops'),
+      table.environmentId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.organizationId],
@@ -629,10 +724,7 @@ export const network = pgTable(
       foreignColumns: [server.id],
       name: 'network_server_id_server_id_fk',
     }).onDelete('restrict'),
-    check(
-      'network_kind_check',
-      sql`kind IN ('datacenter', 'docker', 'compose', 'managed')`
-    ),
+    check('network_kind_check', sql`kind IN ('datacenter', 'docker', 'compose', 'managed')`),
     check(
       'network_single_scope_check',
       sql`(
@@ -669,10 +761,18 @@ export const fabric = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -686,7 +786,7 @@ export const fabric = pgTable(
     uniqueIndex('uniq_fabric_organization_id').on(table.organizationId),
     index('idx_fabric_organization_id').using(
       'btree',
-      table.organizationId.asc().nullsLast().op('uuid_ops'),
+      table.organizationId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.organizationId],
@@ -697,7 +797,7 @@ export const fabric = pgTable(
       'fabric_name_format_check',
       sql`(name IS NULL) OR (((char_length((name)::text) >= 1) AND (char_length((name)::text) <= 255)) AND ((name)::text ~ '^[A-Za-z0-9 ._-]+$'::text))`
     ),
-  ],
+  ]
 )
 /**
  * Single source of truth for every managed address. Two non-overlapping private
@@ -719,10 +819,18 @@ export const ip = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -823,10 +931,18 @@ export const relay = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -847,19 +963,16 @@ export const relay = pgTable(
     /** Container aggregate CIDR forwarded via this relay (e.g. `10.192.0.0/16`). */
     prefix: cidr().notNull(),
     /** Operator-configured LAN CIDRs advertised by gateway relays. */
-    advertisedCidrs: jsonb('advertised_cidrs').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    advertisedCidrs: jsonb('advertised_cidrs')
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     /** Sealed `tpsecret` envelope — write-only, same handling as `principal.password`. */
     presharedKey: text('preshared_key'),
   },
   (table) => [
-    index('idx_relay_fabric_id').using(
-      'btree',
-      table.fabricId.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('idx_relay_server_id').using(
-      'btree',
-      table.serverId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_relay_fabric_id').using('btree', table.fabricId.asc().nullsLast().op('uuid_ops')),
+    index('idx_relay_server_id').using('btree', table.serverId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.fabricId],
       foreignColumns: [fabric.id],
@@ -876,13 +989,13 @@ export const relay = pgTable(
     check('relay_role_check', sql`role IN ('gateway', 'member')`),
     check(
       'relay_keepalive_check',
-      sql`${table.keepalive} IS NULL OR (${table.keepalive} BETWEEN 1 AND 65535)`,
+      sql`${table.keepalive} IS NULL OR (${table.keepalive} BETWEEN 1 AND 65535)`
     ),
     check(
       'relay_member_advertised_cidrs_empty_check',
-      sql`${table.role} <> 'member' OR ${table.advertisedCidrs} = '[]'::jsonb`,
+      sql`${table.role} <> 'member' OR ${table.advertisedCidrs} = '[]'::jsonb`
     ),
-  ],
+  ]
 )
 /**
  * Server-local realization of a `kind='compose'` spanning network (today a
@@ -896,10 +1009,18 @@ export const subnet = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -910,14 +1031,8 @@ export const subnet = pgTable(
     cidr: cidr().notNull(),
   },
   (table) => [
-    index('idx_subnet_network_id').using(
-      'btree',
-      table.networkId.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('idx_subnet_server_id').using(
-      'btree',
-      table.serverId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_subnet_network_id').using('btree', table.networkId.asc().nullsLast().op('uuid_ops')),
+    index('idx_subnet_server_id').using('btree', table.serverId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.networkId],
       foreignColumns: [network.id],
@@ -929,7 +1044,7 @@ export const subnet = pgTable(
       name: 'subnet_server_id_server_id_fk',
     }).onDelete('restrict'),
     unique('subnet_network_server_unique').on(table.networkId, table.serverId),
-  ],
+  ]
 )
 export const workspace = pgTable(
   'workspace',
@@ -938,10 +1053,18 @@ export const workspace = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     organizationId: uuid('organization_id').notNull(),
@@ -976,10 +1099,18 @@ export const project = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -1019,7 +1150,7 @@ export const project = pgTable(
       // inline rather than in `foreignKey()` below for the same reason: the
       // annotation has to sit on the reference itself.
       (): AnyPgColumn => repository.id,
-      { onDelete: 'restrict' },
+      { onDelete: 'restrict' }
     ),
     name: varchar({ length: 255 }),
     description: varchar('description', { length: 255 }),
@@ -1059,10 +1190,18 @@ export const environment = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -1111,15 +1250,23 @@ export const managed = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
     options: jsonb(),
-  
+
     /** Environment-scoped managed engine service (1:1 with environment). */
     environmentId: uuid('environment_id').notNull(),
     /**
@@ -1139,14 +1286,8 @@ export const managed = pgTable(
       'btree',
       table.environmentId.asc().nullsLast().op('uuid_ops')
     ),
-    index('idx_managed_server_id').using(
-      'btree',
-      table.serverId.asc().nullsLast().op('uuid_ops')
-    ),
-    index('idx_managed_engine').using(
-      'btree',
-      table.engine.asc().nullsLast().op('text_ops')
-    ),
+    index('idx_managed_server_id').using('btree', table.serverId.asc().nullsLast().op('uuid_ops')),
+    index('idx_managed_engine').using('btree', table.engine.asc().nullsLast().op('text_ops')),
     foreignKey({
       columns: [table.environmentId],
       foreignColumns: [environment.id],
@@ -1160,11 +1301,11 @@ export const managed = pgTable(
     uniqueIndex('managed_environment_id_unique').on(table.environmentId),
     check(
       'managed_name_format_check',
-      sql`(${table.name} IS NULL) OR (((char_length((${table.name})::text) >= 1) AND (char_length((${table.name})::text) <= 255)) AND ((${table.name})::text ~ '^[A-Za-z0-9 ._-]+$'::text))`,
+      sql`(${table.name} IS NULL) OR (((char_length((${table.name})::text) >= 1) AND (char_length((${table.name})::text) <= 255)) AND ((${table.name})::text ~ '^[A-Za-z0-9 ._-]+$'::text))`
     ),
     check(
       'managed_status_check',
-      sql`status IS NULL OR status IN ('provisioning','applying','ready','stopped','failed')`,
+      sql`status IS NULL OR status IN ('provisioning','applying','ready','stopped','failed')`
     ),
   ]
 )
@@ -1180,10 +1321,18 @@ export const replica = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -1218,12 +1367,9 @@ export const replica = pgTable(
   (table) => [
     index('idx_replica_managed_id').using(
       'btree',
-      table.managedId.asc().nullsLast().op('uuid_ops'),
+      table.managedId.asc().nullsLast().op('uuid_ops')
     ),
-    index('idx_replica_server_id').using(
-      'btree',
-      table.serverId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_replica_server_id').using('btree', table.serverId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.managedId],
       foreignColumns: [managed.id],
@@ -1242,27 +1388,21 @@ export const replica = pgTable(
       .where(sql`${table.privatePort} IS NOT NULL`),
     unique('uniq_replica_managed_ordinal').on(table.managedId, table.ordinal),
     unique('uniq_replica_managed_server').on(table.managedId, table.serverId),
-    check(
-      'replica_role_check',
-      sql`${table.role} IN ('primary','replica')`,
-    ),
+    check('replica_role_check', sql`${table.role} IN ('primary','replica')`),
     check(
       'replica_replica_class_check',
-      sql`${table.replicaClass} IS NULL OR ${table.replicaClass} IN ('failover','read')`,
+      sql`${table.replicaClass} IS NULL OR ${table.replicaClass} IN ('failover','read')`
     ),
-    check(
-      'replica_ordinal_positive_check',
-      sql`${table.ordinal} >= 1`,
-    ),
+    check('replica_ordinal_positive_check', sql`${table.ordinal} >= 1`),
     check(
       'replica_transport_check',
-      sql`${table.replicationTransport} IS NULL OR ${table.replicationTransport} IN ('local','fabric','datacenter','public')`,
+      sql`${table.replicationTransport} IS NULL OR ${table.replicationTransport} IN ('local','fabric','datacenter','public')`
     ),
     check(
       'replica_status_check',
-      sql`status IS NULL OR status IN ('provisioning','applying','ready','stopped','failed','needs_resync')`,
+      sql`status IS NULL OR status IN ('provisioning','applying','ready','stopped','failed','needs_resync')`
     ),
-  ],
+  ]
 )
 /**
  * Tracking row for Organization-CA-signed managed leaves (ProxySQL frontend
@@ -1288,20 +1428,27 @@ export const leaf = pgTable(
     /** Signing Organization CA row (`tls.id`). */
     caId: uuid('ca_id').notNull(),
     caGeneration: integer('ca_generation').notNull(),
-    notAfter: timestamp('not_after', { precision: 3, withTimezone: true, mode: 'string' })
-      .notNull(),
-    issuedAt: timestamp('issued_at', { precision: 3, withTimezone: true, mode: 'string' })
+    notAfter: timestamp('not_after', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }).notNull(),
+    issuedAt: timestamp('issued_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
   },
   (table) => [
     index('idx_leaf_not_after').using(
       'btree',
-      table.notAfter.asc().nullsLast().op('timestamptz_ops'),
+      table.notAfter.asc().nullsLast().op('timestamptz_ops')
     ),
     index('idx_leaf_organization_id').using(
       'btree',
-      table.organizationId.asc().nullsLast().op('uuid_ops'),
+      table.organizationId.asc().nullsLast().op('uuid_ops')
     ),
     uniqueIndex('uniq_leaf_ingress_server')
       .on(table.serverId)
@@ -1334,19 +1481,16 @@ export const leaf = pgTable(
       foreignColumns: [tls.id],
       name: 'leaf_ca_id_tls_id_fk',
     }).onDelete('cascade'),
-    check(
-      'leaf_kind_check',
-      sql`${table.kind} IN ('ingress','engine')`,
-    ),
+    check('leaf_kind_check', sql`${table.kind} IN ('ingress','engine')`),
     check(
       'leaf_kind_keys_check',
       sql`(
         (${table.kind} = 'ingress' AND ${table.replicaId} IS NULL AND ${table.managedId} IS NULL)
         OR
         (${table.kind} = 'engine' AND ${table.replicaId} IS NOT NULL AND ${table.managedId} IS NOT NULL)
-      )`,
+      )`
     ),
-  ],
+  ]
 )
 /**
  * Per-server ProxySQL backend monitor credential (control-plane minted).
@@ -1369,10 +1513,18 @@ export const monitor = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     serverId: uuid('server_id').notNull(),
@@ -1391,7 +1543,7 @@ export const monitor = pgTable(
       foreignColumns: [server.id],
       name: 'monitor_server_id_server_id_fk',
     }).onDelete('cascade'),
-  ],
+  ]
 )
 
 /**
@@ -1406,10 +1558,18 @@ export const recovery = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -1424,15 +1584,23 @@ export const recovery = pgTable(
      * `reconciling-ingress` | `verifying` | `completed` | `failed` | `blocked`
      */
     state: text().notNull(),
-    startedAt: timestamp('started_at', { precision: 3, withTimezone: true, mode: 'string' })
+    startedAt: timestamp('started_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    completedAt: timestamp('completed_at', { precision: 3, withTimezone: true, mode: 'string' }),
+    completedAt: timestamp('completed_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
   },
   (table) => [
     index('idx_recovery_managed_id').using(
       'btree',
-      table.managedId.asc().nullsLast().op('uuid_ops'),
+      table.managedId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.managedId],
@@ -1444,13 +1612,13 @@ export const recovery = pgTable(
       .where(sql`${table.state} NOT IN ('completed','failed','blocked')`),
     check(
       'recovery_kind_check',
-      sql`${table.kind} IN ('automatic-failover','switchover','disaster-recovery')`,
+      sql`${table.kind} IN ('automatic-failover','switchover','disaster-recovery')`
     ),
     check(
       'recovery_state_check',
-      sql`${table.state} IN ('detecting','fencing','promoting','repointing','reconciling-ingress','verifying','completed','failed','blocked')`,
+      sql`${table.state} IN ('detecting','fencing','promoting','repointing','reconciling-ingress','verifying','completed','failed','blocked')`
     ),
-  ],
+  ]
 )
 export const variable = pgTable(
   'variable',
@@ -1459,10 +1627,18 @@ export const variable = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     organizationId: uuid('organization_id'),
@@ -1515,7 +1691,7 @@ export const variable = pgTable(
     index('idx_variable_server_id').using('btree', table.serverId.asc().nullsLast().op('uuid_ops')),
     index('idx_variable_binding_id').using(
       'btree',
-      table.bindingId.asc().nullsLast().op('uuid_ops'),
+      table.bindingId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.organizationId],
@@ -1601,10 +1777,18 @@ export const service = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -1634,7 +1818,7 @@ export const service = pgTable(
     /** Unique per environment. */
     uniqueIndex('uniq_service_environment_compose_name').on(
       table.environmentId,
-      table.composeServiceName,
+      table.composeServiceName
     ),
     foreignKey({
       columns: [table.environmentId],
@@ -1664,10 +1848,18 @@ export const deployment = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     /** Last failure message / planner warnings. */
@@ -1687,7 +1879,11 @@ export const deployment = pgTable(
      */
     lastCommandId: uuid('last_command_id'),
     /** When the last apply attempt reached a terminal state. */
-    finishedAt: timestamp('finished_at', { precision: 3, withTimezone: true, mode: 'string' }),
+    finishedAt: timestamp('finished_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }),
     /** Wall-clock duration of the last apply attempt, in milliseconds. */
     durationMs: integer('duration_ms'),
     /** Terminal outcome of the last apply attempt; NULL until one finishes. */
@@ -1697,11 +1893,11 @@ export const deployment = pgTable(
     unique('uniq_deployment_environment_server').on(table.environmentId, table.serverId),
     index('idx_deployment_environment_id').using(
       'btree',
-      table.environmentId.asc().nullsLast().op('uuid_ops'),
+      table.environmentId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_deployment_server_id').using(
       'btree',
-      table.serverId.asc().nullsLast().op('uuid_ops'),
+      table.serverId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.environmentId],
@@ -1715,17 +1911,17 @@ export const deployment = pgTable(
     }).onDelete('restrict'),
     check(
       'deployment_status_check',
-      sql`${table.status} IN ('pending','applying','applied','failed','draining')`,
+      sql`${table.status} IN ('pending','applying','applied','failed','draining')`
     ),
     check(
       'deployment_generation_check',
-      sql`${table.desiredGeneration} >= 0 AND (${table.appliedGeneration} IS NULL OR ${table.appliedGeneration} >= 0)`,
+      sql`${table.desiredGeneration} >= 0 AND (${table.appliedGeneration} IS NULL OR ${table.appliedGeneration} >= 0)`
     ),
     check(
       'deployment_outcome_check',
-      sql`${table.outcome} IS NULL OR ${table.outcome} IN ('applied','failed','timed_out')`,
+      sql`${table.outcome} IS NULL OR ${table.outcome} IN ('applied','failed','timed_out')`
     ),
-  ],
+  ]
 )
 /**
  * One scheduled instance of a logical service. Never mint a `service` row per
@@ -1740,10 +1936,18 @@ export const slot = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -1766,12 +1970,9 @@ export const slot = pgTable(
     index('idx_slot_environment_generation').using(
       'btree',
       table.environmentId.asc(),
-      table.generation.asc(),
+      table.generation.asc()
     ),
-    index('idx_slot_server_id').using(
-      'btree',
-      table.serverId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_slot_server_id').using('btree', table.serverId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.environmentId],
       foreignColumns: [environment.id],
@@ -1790,9 +1991,9 @@ export const slot = pgTable(
     check('slot_slot_nonnegative_check', sql`${table.slot} >= 0`),
     check(
       'slot_desired_state_check',
-      sql`${table.desiredState} IN ('running','stopped','removed')`,
+      sql`${table.desiredState} IN ('running','stopped','removed')`
     ),
-  ],
+  ]
 )
 /**
  * Cron-style scheduled command on a service. No execution columns (no
@@ -1805,10 +2006,18 @@ export const task = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -1826,10 +2035,7 @@ export const task = pgTable(
   },
   (table) => [
     unique('uniq_task_service_name').on(table.serviceId, table.name),
-    index('idx_task_service_id').using(
-      'btree',
-      table.serviceId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_task_service_id').using('btree', table.serviceId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.serviceId],
       foreignColumns: [service.id],
@@ -1837,9 +2043,9 @@ export const task = pgTable(
     }).onDelete('cascade'),
     check(
       'task_concurrency_policy_check',
-      sql`${table.concurrencyPolicy} IN ('allow','forbid','replace')`,
+      sql`${table.concurrencyPolicy} IN ('allow','forbid','replace')`
     ),
-  ],
+  ]
 )
 /**
  * Server label source for `placement.constraints` (`node.labels.*`). Org is
@@ -1852,10 +2058,18 @@ export const label = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     serverId: uuid('server_id').notNull(),
@@ -1864,10 +2078,7 @@ export const label = pgTable(
   },
   (table) => [
     unique('uniq_label_server_key').on(table.serverId, table.key),
-    index('idx_label_server_id').using(
-      'btree',
-      table.serverId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_label_server_id').using('btree', table.serverId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.serverId],
       foreignColumns: [server.id],
@@ -1875,9 +2086,9 @@ export const label = pgTable(
     }).onDelete('cascade'),
     check(
       'label_key_format_check',
-      sql`(char_length((${table.key})::text) >= 1) AND (char_length((${table.key})::text) <= 255) AND ((${table.key})::text ~ '^[A-Za-z0-9][A-Za-z0-9._-]*$'::text)`,
+      sql`(char_length((${table.key})::text) >= 1) AND (char_length((${table.key})::text) <= 255) AND ((${table.key})::text ~ '^[A-Za-z0-9][A-Za-z0-9._-]*$'::text)`
     ),
-  ],
+  ]
 )
 export const hosting = pgTable(
   'hosting',
@@ -1886,10 +2097,18 @@ export const hosting = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -1933,10 +2152,18 @@ export const container = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -1978,17 +2205,14 @@ export const container = pgTable(
       'btree',
       table.serverId.asc().nullsLast().op('uuid_ops')
     ),
-    index('idx_container_status').using(
-      'btree',
-      table.status.asc().nullsLast().op('text_ops')
-    ),
+    index('idx_container_status').using('btree', table.status.asc().nullsLast().op('text_ops')),
     uniqueIndex('uniq_container_server_container_id')
       .on(table.serverId, table.containerId)
       .where(sql`container_id IS NOT NULL`),
     uniqueIndex('uniq_container_service_role_ordinal').on(
       table.serviceId,
       table.role,
-      table.ordinal,
+      table.ordinal
     ),
     check('container_ordinal_positive_check', sql`ordinal >= 1`),
     check('container_role_check', sql`role IN ('service', 'ingress', 'turbopanel')`),
@@ -2018,10 +2242,18 @@ export const principal = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     /**
@@ -2030,7 +2262,7 @@ export const principal = pgTable(
      */
     metadata: jsonb(),
     options: jsonb(),
-  
+
     /** `system` (Linux/server host account) | `database` (engine account) */
     kind: text().notNull(),
     /** `server` | `postgres` | `mysql` | `redis` | `clickhouse` */
@@ -2065,11 +2297,11 @@ export const principal = pgTable(
   (table) => [
     index('idx_principal_project_id').using(
       'btree',
-      table.projectId.asc().nullsLast().op('uuid_ops'),
+      table.projectId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_principal_managed_id').using(
       'btree',
-      table.managedId.asc().nullsLast().op('uuid_ops'),
+      table.managedId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.projectId],
@@ -2127,10 +2359,18 @@ export const entitlement = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     principalId: uuid('principal_id').notNull(),
@@ -2149,11 +2389,7 @@ export const entitlement = pgTable(
       foreignColumns: [principal.id],
       name: 'entitlement_principal_id_principal_id_fk',
     }).onDelete('cascade'),
-    unique('entitlement_unique').on(
-      table.principalId,
-      table.runtime,
-      table.series
-    ),
+    unique('entitlement_unique').on(table.principalId, table.runtime, table.series),
     check('entitlement_runtime_check', sql`${table.runtime} IN ('php', 'node')`),
     check(
       'entitlement_series_check',
@@ -2161,10 +2397,7 @@ export const entitlement = pgTable(
       // would match any character. A character class keeps it literal.
       sql`${table.series} ~ '^[0-9]{1,3}([.][0-9]{1,3})?$'`
     ),
-    check(
-      'entitlement_granted_by_check',
-      sql`${table.grantedBy} IN ('operator', 'deploy')`
-    ),
+    check('entitlement_granted_by_check', sql`${table.grantedBy} IN ('operator', 'deploy')`),
   ]
 )
 
@@ -2206,10 +2439,18 @@ export const sshKey = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     principalId: uuid('principal_id').notNull(),
@@ -2233,10 +2474,7 @@ export const sshKey = pgTable(
       table.principalId.asc().nullsLast().op('uuid_ops')
     ),
     // The lost-laptop query: every account one fingerprint opens.
-    index('idx_ssh_fingerprint').using(
-      'btree',
-      table.fingerprint.asc().nullsLast().op('text_ops')
-    ),
+    index('idx_ssh_fingerprint').using('btree', table.fingerprint.asc().nullsLast().op('text_ops')),
     foreignKey({
       columns: [table.principalId],
       foreignColumns: [principal.id],
@@ -2250,18 +2488,12 @@ export const sshKey = pgTable(
     // Keyed on the fingerprint rather than the key text: the fingerprint is
     // over the decoded bytes, so two spellings of one key collide here as they
     // should.
-    unique('ssh_fingerprint_unique').on(
-      table.principalId,
-      table.fingerprint
-    ),
+    unique('ssh_fingerprint_unique').on(table.principalId, table.fingerprint),
     check(
       'ssh_type_check',
       sql`${table.keyType} IN ('ssh-ed25519', 'sk-ssh-ed25519@openssh.com', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521', 'sk-ecdsa-sha2-nistp256@openssh.com', 'ssh-rsa')`
     ),
-    check(
-      'ssh_fingerprint_check',
-      sql`${table.fingerprint} ~ '^SHA256:[A-Za-z0-9+/]{43}$'`
-    ),
+    check('ssh_fingerprint_check', sql`${table.fingerprint} ~ '^SHA256:[A-Za-z0-9+/]{43}$'`),
     // A newline in the stored key would be a second authorized_keys entry. The
     // application parser already refuses one; this is the backstop that makes a
     // bug there unable to reach the file.
@@ -2287,10 +2519,18 @@ export const tenancy = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     principalId: uuid('principal_id').notNull(),
@@ -2333,10 +2573,18 @@ export const binding = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -2351,11 +2599,11 @@ export const binding = pgTable(
   (table) => [
     index('idx_binding_principal_id').using(
       'btree',
-      table.principalId.asc().nullsLast().op('uuid_ops'),
+      table.principalId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_binding_service_id').using(
       'btree',
-      table.serviceId.asc().nullsLast().op('uuid_ops'),
+      table.serviceId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.principalId],
@@ -2373,13 +2621,13 @@ export const binding = pgTable(
       .where(sql`${table.isEmitEngineDefaults}`),
     check(
       'binding_key_prefix_format_check',
-      sql`(char_length((key_prefix)::text) >= 1) AND (char_length((key_prefix)::text) <= 64) AND ((key_prefix)::text ~ '^[A-Za-z_][A-Za-z0-9_]*$'::text)`,
+      sql`(char_length((key_prefix)::text) >= 1) AND (char_length((key_prefix)::text) <= 64) AND ((key_prefix)::text ~ '^[A-Za-z_][A-Za-z0-9_]*$'::text)`
     ),
     check(
       'binding_database_name_format_check',
-      sql`(char_length((database_name)::text) >= 1) AND (char_length((database_name)::text) <= 63) AND ((database_name)::text ~ '^[A-Za-z_][A-Za-z0-9_]*$'::text)`,
+      sql`(char_length((database_name)::text) >= 1) AND (char_length((database_name)::text) <= 63) AND ((database_name)::text ~ '^[A-Za-z_][A-Za-z0-9_]*$'::text)`
     ),
-  ],
+  ]
 )
 /**
  * Org-owned sealed secret for storage (and later other) providers.
@@ -2399,10 +2647,18 @@ export const secret = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -2416,11 +2672,11 @@ export const secret = pgTable(
   (table) => [
     index('idx_secret_organization_id').using(
       'btree',
-      table.organizationId.asc().nullsLast().op('uuid_ops'),
+      table.organizationId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_secret_principal_id').using(
       'btree',
-      table.principalId.asc().nullsLast().op('uuid_ops'),
+      table.principalId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.organizationId],
@@ -2435,9 +2691,9 @@ export const secret = pgTable(
     check(
       'secret_provider_check',
       sql`provider IN ('s3', 's3_compatible', 'nfs', 'cifs', 'sftp', 'ftp', 'webdav',
-        'git_deploy_key')`,
+        'git_deploy_key')`
     ),
-  ],
+  ]
 )
 /**
  * Logical identity of persistent data. Physical copies live on `copy`;
@@ -2451,10 +2707,18 @@ export const storage = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -2476,23 +2740,23 @@ export const storage = pgTable(
   (table) => [
     index('idx_storage_organization_id').using(
       'btree',
-      table.organizationId.asc().nullsLast().op('uuid_ops'),
+      table.organizationId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_storage_workspace_id').using(
       'btree',
-      table.workspaceId.asc().nullsLast().op('uuid_ops'),
+      table.workspaceId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_storage_project_id').using(
       'btree',
-      table.projectId.asc().nullsLast().op('uuid_ops'),
+      table.projectId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_storage_environment_id').using(
       'btree',
-      table.environmentId.asc().nullsLast().op('uuid_ops'),
+      table.environmentId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_storage_service_id').using(
       'btree',
-      table.serviceId.asc().nullsLast().op('uuid_ops'),
+      table.serviceId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.organizationId],
@@ -2524,24 +2788,18 @@ export const storage = pgTable(
       foreignColumns: [principal.id],
       name: 'storage_principal_id_principal_id_fk',
     }).onDelete('restrict'),
-    check(
-      'storage_kind_check',
-      sql`kind IN ('volume', 'directory', 'file', 'object')`,
-    ),
+    check('storage_kind_check', sql`kind IN ('volume', 'directory', 'file', 'object')`),
     check(
       'storage_access_mode_check',
-      sql`access_mode IN ('single_writer', 'multi_reader', 'multi_writer')`,
+      sql`access_mode IN ('single_writer', 'multi_reader', 'multi_writer')`
     ),
-    check(
-      'storage_retention_check',
-      sql`retention IN ('retain', 'delete')`,
-    ),
+    check('storage_retention_check', sql`retention IN ('retain', 'delete')`),
     check(
       'storage_at_most_one_parent_check',
       sql`((workspace_id IS NOT NULL)::int +
         (project_id IS NOT NULL)::int +
         (environment_id IS NOT NULL)::int +
-        (service_id IS NOT NULL)::int) <= 1`,
+        (service_id IS NOT NULL)::int) <= 1`
     ),
     /**
      * Compose auto-register idempotency: one `volume` row per
@@ -2551,14 +2809,14 @@ export const storage = pgTable(
       .using(
         'btree',
         table.environmentId.asc().nullsLast().op('uuid_ops'),
-        sql`(${table.metadata} ->> 'composeVolumeKey')`,
+        sql`(${table.metadata} ->> 'composeVolumeKey')`
       )
       .where(
         sql`kind = 'volume'
           AND environment_id IS NOT NULL
-          AND COALESCE(metadata->>'composeVolumeKey', '') <> ''`,
+          AND COALESCE(metadata->>'composeVolumeKey', '') <> ''`
       ),
-  ],
+  ]
 )
 /**
  * One physical copy / materialization of a storage identity. Local docker/path
@@ -2571,10 +2829,18 @@ export const storageCopy = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -2590,18 +2856,9 @@ export const storageCopy = pgTable(
     generation: integer().default(0).notNull(),
   },
   (table) => [
-    index('idx_copy_storage_id').using(
-      'btree',
-      table.storageId.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('idx_copy_server_id').using(
-      'btree',
-      table.serverId.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('idx_copy_secret_id').using(
-      'btree',
-      table.secretId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_copy_storage_id').using('btree', table.storageId.asc().nullsLast().op('uuid_ops')),
+    index('idx_copy_server_id').using('btree', table.serverId.asc().nullsLast().op('uuid_ops')),
+    index('idx_copy_secret_id').using('btree', table.secretId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.storageId],
       foreignColumns: [storage.id],
@@ -2625,17 +2882,14 @@ export const storageCopy = pgTable(
       .where(sql`${table.serverId} IS NOT NULL`),
     check(
       'copy_provider_check',
-      sql`provider IN ('docker', 'path', 'block', 'nfs', 'cifs', 's3', 's3_compatible', 'sftp', 'ftp', 'webdav')`,
+      sql`provider IN ('docker', 'path', 'block', 'nfs', 'cifs', 's3', 's3_compatible', 'sftp', 'ftp', 'webdav')`
     ),
-    check(
-      'copy_role_check',
-      sql`role IN ('primary', 'replica', 'scratch', 'archive')`,
-    ),
+    check('copy_role_check', sql`role IN ('primary', 'replica', 'scratch', 'archive')`),
     check(
       'copy_state_check',
-      sql`state IN ('pending', 'materializing', 'ready', 'syncing', 'stale', 'failed', 'retiring')`,
+      sql`state IN ('pending', 'materializing', 'ready', 'syncing', 'stale', 'failed', 'retiring')`
     ),
-  ],
+  ]
 )
 /**
  * Service attachment of a storage identity at a container destination path.
@@ -2647,10 +2901,18 @@ export const mount = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -2663,14 +2925,8 @@ export const mount = pgTable(
     isReadOnly: boolean('is_read_only').default(false).notNull(),
   },
   (table) => [
-    index('idx_mount_storage_id').using(
-      'btree',
-      table.storageId.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('idx_mount_service_id').using(
-      'btree',
-      table.serviceId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_mount_storage_id').using('btree', table.storageId.asc().nullsLast().op('uuid_ops')),
+    index('idx_mount_service_id').using('btree', table.serviceId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.storageId],
       foreignColumns: [storage.id],
@@ -2682,7 +2938,7 @@ export const mount = pgTable(
       name: 'mount_service_id_service_id_fk',
     }).onDelete('restrict'),
     unique('uniq_mount_service_destination').on(table.serviceId, table.destinationPath),
-  ],
+  ]
 )
 /**
  * Org-owned tag definition. Names are labels (app-enforced uniqueness via the
@@ -2695,10 +2951,18 @@ export const tag = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -2711,18 +2975,18 @@ export const tag = pgTable(
   (table) => [
     index('idx_tag_organization_id').using(
       'btree',
-      table.organizationId.asc().nullsLast().op('uuid_ops'),
+      table.organizationId.asc().nullsLast().op('uuid_ops')
     ),
     uniqueIndex('uniq_tag_organization_name').on(
       table.organizationId,
-      sql`lower(btrim((${table.name})::text))`,
+      sql`lower(btrim((${table.name})::text))`
     ),
     foreignKey({
       columns: [table.organizationId],
       foreignColumns: [organization.id],
       name: 'tag_organization_id_organization_id_fk',
     }).onDelete('cascade'),
-  ],
+  ]
 )
 /**
  * Join edge: one tag applied to exactly one taggable parent. Org is derived
@@ -2735,10 +2999,18 @@ export const marker = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     tagId: uuid('tag_id').notNull(),
@@ -2751,38 +3023,23 @@ export const marker = pgTable(
     storageId: uuid('storage_id'),
   },
   (table) => [
-    index('idx_marker_tag_id').using(
-      'btree',
-      table.tagId.asc().nullsLast().op('uuid_ops'),
-    ),
-    index('idx_marker_server_id').using(
-      'btree',
-      table.serverId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_marker_tag_id').using('btree', table.tagId.asc().nullsLast().op('uuid_ops')),
+    index('idx_marker_server_id').using('btree', table.serverId.asc().nullsLast().op('uuid_ops')),
     index('idx_marker_workspace_id').using(
       'btree',
-      table.workspaceId.asc().nullsLast().op('uuid_ops'),
+      table.workspaceId.asc().nullsLast().op('uuid_ops')
     ),
-    index('idx_marker_project_id').using(
-      'btree',
-      table.projectId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_marker_project_id').using('btree', table.projectId.asc().nullsLast().op('uuid_ops')),
     index('idx_marker_environment_id').using(
       'btree',
-      table.environmentId.asc().nullsLast().op('uuid_ops'),
+      table.environmentId.asc().nullsLast().op('uuid_ops')
     ),
-    index('idx_marker_service_id').using(
-      'btree',
-      table.serviceId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_marker_service_id').using('btree', table.serviceId.asc().nullsLast().op('uuid_ops')),
     index('idx_marker_datacenter_id').using(
       'btree',
-      table.datacenterId.asc().nullsLast().op('uuid_ops'),
+      table.datacenterId.asc().nullsLast().op('uuid_ops')
     ),
-    index('idx_marker_storage_id').using(
-      'btree',
-      table.storageId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_marker_storage_id').using('btree', table.storageId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.tagId],
       foreignColumns: [tag.id],
@@ -2852,9 +3109,9 @@ export const marker = pgTable(
         (environment_id IS NOT NULL)::int +
         (service_id IS NOT NULL)::int +
         (datacenter_id IS NOT NULL)::int +
-        (storage_id IS NOT NULL)::int) = 1`,
+        (storage_id IS NOT NULL)::int) = 1`
     ),
-  ],
+  ]
 )
 /**
  * A registered Git provider application — a GitHub App, or a GitLab OAuth
@@ -2893,10 +3150,18 @@ export const forge = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -2971,7 +3236,7 @@ export const forge = pgTable(
   (table) => [
     index('idx_forge_organization_id').using(
       'btree',
-      table.organizationId.asc().nullsLast().op('uuid_ops'),
+      table.organizationId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_forge_provider').using('btree', table.provider.asc().nullsLast().op('text_ops')),
     foreignKey({
@@ -2984,10 +3249,10 @@ export const forge = pgTable(
     unique('uniq_forge_provider_base_external').on(
       table.provider,
       table.baseUrl,
-      table.externalAppId,
+      table.externalAppId
     ),
     unique('uniq_forge_webhook_token_hash').on(table.webhookTokenHash),
-  ],
+  ]
 )
 /**
  * A Git provider connection granted to one organization.
@@ -3024,10 +3289,18 @@ export const gitConnection = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -3057,12 +3330,9 @@ export const gitConnection = pgTable(
   (table) => [
     index('idx_connection_organization_id').using(
       'btree',
-      table.organizationId.asc().nullsLast().op('uuid_ops'),
+      table.organizationId.asc().nullsLast().op('uuid_ops')
     ),
-    index('idx_connection_forge_id').using(
-      'btree',
-      table.forgeId.asc().nullsLast().op('uuid_ops'),
-    ),
+    index('idx_connection_forge_id').using('btree', table.forgeId.asc().nullsLast().op('uuid_ops')),
     foreignKey({
       columns: [table.organizationId],
       foreignColumns: [organization.id],
@@ -3077,9 +3347,9 @@ export const gitConnection = pgTable(
     unique('uniq_connection_organization_forge_external').on(
       table.organizationId,
       table.forgeId,
-      table.externalInstallationId,
+      table.externalInstallationId
     ),
-  ],
+  ]
 )
 /**
  * A Git repository connected to an organization — exactly one row per
@@ -3111,10 +3381,18 @@ export const repository = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -3149,15 +3427,15 @@ export const repository = pgTable(
   (table) => [
     index('idx_repository_organization_id').using(
       'btree',
-      table.organizationId.asc().nullsLast().op('uuid_ops'),
+      table.organizationId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_repository_connection_id').using(
       'btree',
-      table.connectionId.asc().nullsLast().op('uuid_ops'),
+      table.connectionId.asc().nullsLast().op('uuid_ops')
     ),
     index('idx_repository_secret_id').using(
       'btree',
-      table.secretId.asc().nullsLast().op('uuid_ops'),
+      table.secretId.asc().nullsLast().op('uuid_ops')
     ),
     foreignKey({
       columns: [table.organizationId],
@@ -3184,10 +3462,7 @@ export const repository = pgTable(
      * also what makes the find-or-create in `POST /repositories` and
      * `POST /repositories/attach` atomic rather than a check-then-insert race.
      */
-    unique('uniq_repository_organization_url').on(
-      table.organizationId,
-      table.repositoryUrl,
-    ),
+    unique('uniq_repository_organization_url').on(table.organizationId, table.repositoryUrl),
     /**
      * Same guarantee keyed the way webhooks match: the provider-side repo id
      * survives renames and transfers, which change `repository_url`.
@@ -3195,14 +3470,14 @@ export const repository = pgTable(
     unique('uniq_repository_organization_connection_repository').on(
       table.organizationId,
       table.connectionId,
-      table.repositoryExternalId,
+      table.repositoryExternalId
     ),
     check('repository_provider_check', sql`provider IN ('github', 'gitlab', 'git')`),
     check(
       'repository_auto_deploy_check',
-      sql`auto_deploy IN ('immediate', 'checks_passed', 'disabled')`,
+      sql`auto_deploy IN ('immediate', 'checks_passed', 'disabled')`
     ),
-  ],
+  ]
 )
 /**
  * Inbound provider-webhook delivery ledger — replay protection only.
@@ -3230,7 +3505,11 @@ export const webhookDelivery = pgTable(
       .primaryKey()
       .notNull(),
     /** Moment the delivery was accepted; doubles as the sweep's age cursor. */
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     provider: text().notNull(),
@@ -3243,11 +3522,8 @@ export const webhookDelivery = pgTable(
   (table) => [
     index('idx_delivery_created_at').using('btree', table.createdAt.asc()),
     check('delivery_provider_check', sql`provider IN ('github', 'gitlab')`),
-    unique('uniq_delivery_provider_external').on(
-      table.provider,
-      table.externalDeliveryId,
-    ),
-  ],
+    unique('uniq_delivery_provider_external').on(table.provider, table.externalDeliveryId),
+  ]
 )
 export const grant = pgTable(
   'grant',
@@ -3256,7 +3532,11 @@ export const grant = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     actorType: text('actor_type').notNull(),
@@ -3284,10 +3564,18 @@ export const session = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     userId: uuid('user_id').notNull(),
@@ -3317,10 +3605,18 @@ export const setting = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     key: text().notNull(),
@@ -3335,10 +3631,18 @@ export const account = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     userId: uuid('user_id').notNull(),
@@ -3376,7 +3680,11 @@ export const teammate = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     teamId: uuid('team_id').notNull(),
@@ -3405,10 +3713,18 @@ export const team = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -3439,10 +3755,18 @@ export const user = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     metadata: jsonb(),
@@ -3469,7 +3793,11 @@ export const twoFactor = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     userId: uuid('user_id').notNull(),
@@ -3493,10 +3821,18 @@ export const verification = pgTable(
       .default(sql`uuidv7()`)
       .primaryKey()
       .notNull(),
-    createdAt: timestamp('created_at', { precision: 3, withTimezone: true, mode: 'string' })
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp('updated_at', { precision: 3, withTimezone: true, mode: 'string' })
+    updatedAt: timestamp('updated_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
       .defaultNow()
       .notNull(),
     expiresAt: timestamp('expires_at', {
@@ -3507,7 +3843,112 @@ export const verification = pgTable(
     identifier: varchar({ length: 255 }).notNull(),
     value: text().notNull(),
   },
+  (table) => [unique('verification_identifier_unique').on(table.identifier)]
+)
+/**
+ * Append-only history of every topology generation a server has ever
+ * reported (stable device/filesystem/GPU/signal identity + a generation
+ * counter, pushed by the daemon over the `topology-report` cell message).
+ * One row per (server, generation) — never updated in place, so later
+ * "resolve historical generation N" query-reconstruction work can replay
+ * exactly what the daemon saw at that generation.
+ *
+ * `snapshot` is the full topology snapshot as reported by the daemon, minus
+ * daemon-internal-only fields. jsonb, so no migration for its shape.
+ *
+ * No pruning/retention logic yet — this table has no partner `options`
+ * column (that jsonb-pairing convention only applies to columns literally
+ * named `metadata`/`options`; ours is `snapshot`). Future concern: add a
+ * retention sweep once history size/growth is understood.
+ */
+export const topologyGeneration = pgTable(
+  'generation',
+  {
+    id: uuid()
+      .default(sql`uuidv7()`)
+      .primaryKey()
+      .notNull(),
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
+      .defaultNow()
+      .notNull(),
+    serverId: uuid('server_id').notNull(),
+    generation: integer().notNull(),
+    bootGeneration: integer('boot_generation').notNull(),
+    snapshot: jsonb(),
+    appliedAt: timestamp('applied_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }).notNull(),
+  },
   (table) => [
-    unique('verification_identifier_unique').on(table.identifier),
+    unique('uniq_generation_server_generation').on(table.serverId, table.generation),
+    index('idx_generation_server_generation').using(
+      'btree',
+      table.serverId.asc(),
+      table.generation.desc()
+    ),
+    foreignKey({
+      columns: [table.serverId],
+      foreignColumns: [server.id],
+      name: 'generation_server_id_server_id_fk',
+    }).onDelete('cascade'),
+  ]
+)
+
+/**
+ * Append-only history of resolved v4 metrics-capability-plan generations
+ * (see `../../daemon/metrics/capability-plan.ts`) — one row per
+ * `(server, generation)`, written only when the *resolved* plan for a server
+ * actually changes (`plan_hash` differs from the last recorded row), never
+ * on every sample. Mirrors `topologyGeneration`'s shape/spirit, scoped to
+ * capability-plan config instead of daemon-reported topology.
+ *
+ * `plan` is the full resolved `MetricsCapabilityPlanV4` snapshot, stored for
+ * audit/debugging; `plan_hash` is the cheap "did it change" comparison key.
+ * jsonb, so no migration for the plan shape.
+ *
+ * No pruning/retention logic yet — same future concern as `topologyGeneration`.
+ */
+export const capabilityPlanGeneration = pgTable(
+  'capability',
+  {
+    id: uuid()
+      .default(sql`uuidv7()`)
+      .primaryKey()
+      .notNull(),
+    createdAt: timestamp('created_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    })
+      .defaultNow()
+      .notNull(),
+    serverId: uuid('server_id').notNull(),
+    generation: integer().notNull(),
+    planHash: text('plan_hash').notNull(),
+    plan: jsonb(),
+    appliedAt: timestamp('applied_at', {
+      precision: 3,
+      withTimezone: true,
+      mode: 'string',
+    }).notNull(),
+  },
+  (table) => [
+    unique('uniq_capability_server_generation').on(table.serverId, table.generation),
+    index('idx_capability_server_generation').using(
+      'btree',
+      table.serverId.asc(),
+      table.generation.desc()
+    ),
+    foreignKey({
+      columns: [table.serverId],
+      foreignColumns: [server.id],
+      name: 'capability_server_id_server_id_fk',
+    }).onDelete('cascade'),
   ]
 )

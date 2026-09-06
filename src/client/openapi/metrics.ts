@@ -1,16 +1,17 @@
-import { HOST_METRIC_KEYS, type HostMetricKey } from '../../daemon/metrics/contract.ts'
 import {
   HARDWARE_PROFILE_NIC_KEYS,
   HARDWARE_PROFILE_SENSOR_SLOT_KEYS,
+  HARDWARE_PROFILE_TOPOLOGY_ID_KEYS,
 } from '../../lib/db/server-metadata.ts'
 import { clientErrorJson } from './shared.ts'
 
-const hostMetricValueProperties = Object.fromEntries(
-  HOST_METRIC_KEYS.map((key) => [key, { type: ['number', 'null'] as const }])
-) as Record<HostMetricKey, { type: readonly ['number', 'null'] }>
-
 const sensorSlotOrNullSchema = {
-  oneOf: [{ $ref: '#/components/schemas/ServerSensorSlotAssignment' }, { type: 'null' }],
+  oneOf: [
+    { $ref: '#/components/schemas/ServerSensorSlotAssignment' },
+    {
+      type: 'null',
+    },
+  ],
   description:
     'Assignment pins the sensor identity; `null` marks it explicitly unassigned; omit to leave untouched.',
 }
@@ -18,6 +19,12 @@ const sensorSlotOrNullSchema = {
 const nicOrNullSchema = {
   type: ['string', 'null'],
   description: 'Network interface name; `null` unassigns; omit to leave untouched.',
+}
+
+const topologyIdOrNullSchema = {
+  type: ['string', 'null'],
+  description:
+    'Opaque, daemon-derived stable topology device/filesystem id (never a raw interface name or path); `null` unassigns; omit to leave untouched. Validated against the server’s last recorded topology generation before it is saved.',
 }
 
 const sensorSlotProperties = Object.fromEntries(
@@ -28,14 +35,19 @@ const nicProperties = Object.fromEntries(
   HARDWARE_PROFILE_NIC_KEYS.map((key) => [key, nicOrNullSchema])
 )
 
+const topologyIdProperties = Object.fromEntries(
+  HARDWARE_PROFILE_TOPOLOGY_ID_KEYS.map((key) => [key, topologyIdOrNullSchema])
+)
+
 /**
- * Fields {@link ServerHardwareProfile} carries once persisted — same slot/NIC
- * shape as the update request, plus generation bookkeeping and the
- * daemon-detected `cpuModel` (never accepted through the PUT body).
+ * Fields {@link ServerHardwareProfile} carries once persisted — same slot/NIC/
+ * topology-id shape as the update request, plus generation bookkeeping and
+ * the daemon-detected `cpuModel` (never accepted through the PUT body).
  */
 const hardwareProfileProperties = {
   ...sensorSlotProperties,
   ...nicProperties,
+  ...topologyIdProperties,
   hostingPath: { type: 'string' },
   drivetempEnabled: { type: 'boolean' },
   generation: {
@@ -52,6 +64,11 @@ const hardwareProfileProperties = {
   cpuTjMaxCelsiusOverride: { type: ['number', 'null'] },
 }
 
+const backendEnumSchema = {
+  type: 'string',
+  enum: ['disabled', 'analytics-engine', 'duckdb'],
+}
+
 export const metricsSchemas = {
   ServerSensorSlotAssignment: {
     type: 'object',
@@ -64,55 +81,45 @@ export const metricsSchemas = {
   HostMetricValues: {
     type: 'object',
     description:
-      'Raw per-metric values keyed by HostMetricKey — only requested/collected keys are guaranteed present.',
-    properties: hostMetricValueProperties,
-    additionalProperties: false,
+      'Per-metric values keyed by requested canonical name (`host.cpu.busyPercent`) or bare entity field name (for a `network:eth0.receiveBytesPerSecond`-style entity selector, the entity-scoped result keys by the bare field name, e.g. `receiveBytesPerSecond`) — see the `metrics` query parameter grammar on `/series`. Only requested/collected keys are guaranteed present.',
+    additionalProperties: { type: ['number', 'null'] },
   },
   HostSeriesChartPointDerived: {
     type: 'object',
     description:
-      'Server-computed presentation values so the UI never reimplements CPU busy / memory-swap-storage used / HTTP error rate / average latency, or CPU thermal/power headroom. A value is `null` whenever an input it needs is missing.',
+      'Server-computed presentation values so the UI never reimplements v4’s used-from-available/used-percent math. A value is `null` whenever an input it needs is missing — in particular, `memoryUsedPercent`/`swapUsedPercent`/`rootFilesystemUsedPercent` are `null` until the server’s topology has reported the matching total (memory/swap totals, or the root filesystem’s `totalBytes`).',
     required: [
       'cpuUsagePercent',
       'memoryUsedBytes',
       'memoryUsedPercent',
-      'swapUsedBytes',
       'swapUsedPercent',
-      'systemStorageUsedBytes',
-      'systemStorageUsedPercent',
-      'hostingStorageUsedBytes',
-      'hostingStorageUsedPercent',
-      'dockerStorageUsedBytes',
-      'dockerStorageUsedPercent',
-      'httpErrorRatePercent',
-      'httpAverageLatencyMs',
-      'cpuThermalHeadroomPercent',
-      'cpuPowerHeadroomPercent',
+      'rootFilesystemUsedBytes',
+      'rootFilesystemUsedPercent',
     ],
     properties: {
-      cpuUsagePercent: { type: ['number', 'null'] },
+      cpuUsagePercent: {
+        type: ['number', 'null'],
+        description:
+          'Direct passthrough of `host.cpu.busyPercent` — unlike v3’s `cpuIdlePercent`, v4 already reports the "used" semantic, no `100 − idle` inversion.',
+      },
       memoryUsedBytes: { type: ['number', 'null'] },
       memoryUsedPercent: { type: ['number', 'null'] },
-      swapUsedBytes: { type: ['number', 'null'] },
       swapUsedPercent: { type: ['number', 'null'] },
-      systemStorageUsedBytes: { type: ['number', 'null'] },
-      systemStorageUsedPercent: { type: ['number', 'null'] },
-      hostingStorageUsedBytes: { type: ['number', 'null'] },
-      hostingStorageUsedPercent: { type: ['number', 'null'] },
-      dockerStorageUsedBytes: { type: ['number', 'null'] },
-      dockerStorageUsedPercent: { type: ['number', 'null'] },
-      httpErrorRatePercent: { type: ['number', 'null'] },
-      httpAverageLatencyMs: { type: ['number', 'null'] },
-      cpuThermalHeadroomPercent: {
-        type: ['number', 'null'],
+      rootFilesystemUsedBytes: { type: ['number', 'null'] },
+      rootFilesystemUsedPercent: { type: ['number', 'null'] },
+    },
+  },
+  HostSeriesCpuHotspotPoint: {
+    type: 'object',
+    description: 'One `cpu.detail` embedded hotspot slot’s last-observed values within a bucket.',
+    required: ['coreId', 'values'],
+    properties: {
+      coreId: {
+        type: ['string', 'null'],
         description:
-          '`null` when cpuLimits has no resolved Tjmax for this host, or the point has no temperature reading.',
+          'The core this slot was reporting for at the last-observed sample in the bucket — can legitimately change bucket-to-bucket (the daemon re-selects the busiest cores every interval). `null` means the slot had no hotspot at that observation.',
       },
-      cpuPowerHeadroomPercent: {
-        type: ['number', 'null'],
-        description:
-          '`null` when cpuLimits has no resolved TDP for this host, or the point has no power reading.',
-      },
+      values: { $ref: '#/components/schemas/HostMetricValues' },
     },
   },
   HostSeriesChartPoint: {
@@ -121,23 +128,19 @@ export const metricsSchemas = {
     properties: {
       at: { type: 'string', format: 'date-time' },
       values: { $ref: '#/components/schemas/HostMetricValues' },
-      minimums: {
-        $ref: '#/components/schemas/HostMetricValues',
-        description:
-          'Deferred — not populated until min/max aggregates are unified across backends.',
-      },
-      maximums: {
-        $ref: '#/components/schemas/HostMetricValues',
-        description:
-          'Deferred — not populated until min/max aggregates are unified across backends.',
-      },
       derived: { $ref: '#/components/schemas/HostSeriesChartPointDerived' },
       sampleCount: { type: 'integer' },
       expectedSampleCount: { type: 'integer' },
-      hardwareProfileGeneration: {
+      topologyGeneration: {
         type: ['integer', 'null'],
         description:
-          'Hardware-profile generation shared by every contributing sample in this bucket. Omitted when the backend doesn’t track generations.',
+          'Topology generation shared by every contributing sample in this bucket — `null` means unknown or the bucket spans a topology reassignment (mixed generations). Omitted when the backend doesn’t track generations.',
+      },
+      cpuHotspots: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/HostSeriesCpuHotspotPoint' },
+        description:
+          '`cpu.detail`’s up-to-4 embedded busiest-core hotspot slots for this bucket — present only when the request’s `metrics` selector included a `cpuDetail.*` id and a `cpu.detail` row exists in this bucket.',
       },
     },
   },
@@ -155,6 +158,121 @@ export const metricsSchemas = {
       },
     },
   },
+  HostSeriesResult: {
+    type: 'object',
+    description:
+      'Host-singleton series (`host.*` metrics) — present only when the request’s `metrics` selector included at least one `host.*` id.',
+    required: ['metrics', 'sampleCount', 'gapCount', 'points', 'topologyGenerationBreaks'],
+    properties: {
+      metrics: { type: 'array', items: { type: 'string' } },
+      sampleCount: { type: 'integer' },
+      gapCount: { type: 'integer' },
+      points: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/HostSeriesChartPoint' },
+      },
+      topologyGenerationBreaks: {
+        type: 'array',
+        items: { type: 'integer' },
+        description:
+          'Point indices where `topologyGeneration` differs from the previous known generation — a chart-continuity boundary marker (v4 analogue of v3’s `generationBreaks`).',
+      },
+      topologyGenerations: {
+        type: 'array',
+        items: { type: 'integer' },
+        description:
+          'Distinct topology generations observed anywhere in the queried range. Omitted when the backend doesn’t track generations.',
+      },
+    },
+  },
+  EntitySeriesPoint: {
+    type: 'object',
+    required: ['at', 'values', 'sampleCount'],
+    properties: {
+      at: { type: 'string', format: 'date-time' },
+      values: { $ref: '#/components/schemas/HostMetricValues' },
+      sampleCount: { type: 'integer' },
+      expectedSampleCount: { type: 'integer' },
+    },
+  },
+  EntitySeriesEntity: {
+    type: 'object',
+    required: ['entityId', 'points', 'sampleCount', 'gapCount'],
+    properties: {
+      entityId: {
+        type: 'string',
+        description:
+          'The contract entity id for this family — `deviceId`/`filesystemId`/`gpuId`/`signalId`, `coreId` for `cpu.core.live`, or `sourceId` for `managed.ingress`/`managed.database_proxy` (distinct source instances stay distinct entities even when they share a `sourceKind`).',
+      },
+      points: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/EntitySeriesPoint' },
+      },
+      sampleCount: { type: 'integer' },
+      gapCount: { type: 'integer' },
+    },
+  },
+  EntitySeriesResult: {
+    type: 'object',
+    description: 'One requested per-entity family’s series — one entry per family in `metrics`.',
+    required: ['family', 'metrics', 'available', 'entities'],
+    properties: {
+      family: {
+        type: 'string',
+        enum: [
+          'gpu',
+          'network',
+          'filesystem',
+          'block',
+          'hardware.physical',
+          'managed.ingress',
+          'managed.database_proxy',
+          'cpu.core.live',
+        ],
+      },
+      metrics: { type: 'array', items: { type: 'string' } },
+      available: { type: 'boolean' },
+      resolutionSeconds: { type: ['integer', 'null'] },
+      entities: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/EntitySeriesEntity' },
+      },
+    },
+  },
+  TopologyInventory: {
+    type: 'object',
+    description:
+      'Entity label/role metadata from the server’s latest recorded topology, attached so an entity series never has to show a bare device id with no name/role context. `managed.ingress`/`managed.database_proxy` have no topology concept — presence-only, discovered from the queried range itself, never listed here.',
+    required: ['networks', 'filesystems', 'blockDevices', 'gpus', 'hardwareSignals'],
+    properties: {
+      networks: {
+        type: 'array',
+        items: { type: 'object' },
+        description:
+          '`{deviceId, name, kind, role, speedMbps?, mtu?}[]` — `role` is `normalNicSlot1`/`normalNicSlot2`/`fabric`/`other`; only `other` pages as a standalone `network` entity series (the rest are embedded in `host.*` metrics and rejected by `/series` if requested as an entity id).',
+      },
+      filesystems: {
+        type: 'array',
+        items: { type: 'object' },
+        description: '`{filesystemId, mountpoint, roles, totalBytes, isRoot}[]`.',
+      },
+      blockDevices: {
+        type: 'array',
+        items: { type: 'object' },
+        description: '`{deviceId, kernelName, model?, deviceType, isServiceDevice}[]`.',
+      },
+      gpus: {
+        type: 'array',
+        items: { type: 'object' },
+        description: '`{gpuId, kind, vendor, chip}[]`.',
+      },
+      hardwareSignals: {
+        type: 'array',
+        items: { type: 'object' },
+        description: '`{signalId, kind, unit, label, thresholds?}[]`.',
+      },
+    },
+  },
   HostSeriesChartResponse: {
     type: 'object',
     required: [
@@ -162,49 +280,52 @@ export const metricsSchemas = {
       'serverId',
       'from',
       'to',
-      'resolutionSeconds',
       'backend',
       'available',
-      'metrics',
-      'sampleCount',
-      'gapCount',
-      'points',
-      'generationBreaks',
+      'resolutionSeconds',
+      'host',
+      'entities',
+      'inventory',
+      'topologyGeneration',
       'cpuLimits',
       'temperatureUnit',
-      'sensorsAvailable',
     ],
     properties: {
       ok: { type: 'boolean', const: true },
       serverId: { type: 'string', format: 'uuid' },
       from: { type: 'string', format: 'date-time' },
       to: { type: 'string', format: 'date-time' },
-      resolutionSeconds: { type: ['integer', 'null'] },
-      backend: { type: 'string', enum: ['disabled', 'analytics-engine', 'duckdb'] },
+      backend: backendEnumSchema,
       available: { type: 'boolean' },
-      metrics: { type: 'array', items: { type: 'string', enum: [...HOST_METRIC_KEYS] } },
-      sampleCount: { type: 'integer' },
-      gapCount: { type: 'integer' },
-      points: { type: 'array', items: { $ref: '#/components/schemas/HostSeriesChartPoint' } },
-      generationBreaks: {
-        type: 'array',
-        items: { type: 'integer' },
-        description:
-          'Point indices where hardwareProfileGeneration differs from the previous known generation — a chart-continuity boundary marker.',
+      resolutionSeconds: { type: ['integer', 'null'] },
+      host: {
+        oneOf: [
+          { $ref: '#/components/schemas/HostSeriesResult' },
+          {
+            type: 'null',
+          },
+        ],
+        description: '`null` when the request’s `metrics` selector had no `host.*` id.',
       },
-      hardwareProfileGenerations: {
+      entities: {
         type: 'array',
-        items: { type: 'integer' },
-        description:
-          'Distinct hardware-profile generations observed anywhere in the queried range. Omitted when the backend doesn’t track generations.',
+        items: { $ref: '#/components/schemas/EntitySeriesResult' },
+      },
+      inventory: {
+        oneOf: [
+          { $ref: '#/components/schemas/TopologyInventory' },
+          {
+            type: 'null',
+          },
+        ],
+        description: '`null` when the server has not reported a usable topology generation yet.',
+      },
+      topologyGeneration: {
+        type: ['integer', 'null'],
+        description: 'The server’s latest recorded topology generation, or `null` if none yet.',
       },
       cpuLimits: { $ref: '#/components/schemas/EffectiveCpuThermalLimits' },
       temperatureUnit: { type: 'string', enum: ['celsius', 'fahrenheit'] },
-      sensorsAvailable: {
-        type: 'boolean',
-        description:
-          'True when at least one point in the queried range declared the "sensors" part.',
-      },
     },
   },
   HostSummaryChartResponse: {
@@ -226,12 +347,49 @@ export const metricsSchemas = {
       serverId: { type: 'string', format: 'uuid' },
       from: { type: 'string', format: 'date-time' },
       to: { type: 'string', format: 'date-time' },
-      backend: { type: 'string', enum: ['disabled', 'analytics-engine', 'duckdb'] },
+      backend: backendEnumSchema,
       available: { type: 'boolean' },
       sampleCount: { type: 'integer' },
       latestAt: { type: ['string', 'null'], format: 'date-time' },
       cpuLimits: { $ref: '#/components/schemas/EffectiveCpuThermalLimits' },
       temperatureUnit: { type: 'string', enum: ['celsius', 'fahrenheit'] },
+    },
+  },
+  FleetServerUsageRecord: {
+    type: 'object',
+    required: ['serverId', 'latestAt', 'values', 'sampleCount', 'derived'],
+    properties: {
+      serverId: { type: 'string', format: 'uuid' },
+      latestAt: { type: ['string', 'null'], format: 'date-time' },
+      values: { $ref: '#/components/schemas/HostMetricValues' },
+      sampleCount: { type: 'integer' },
+      topologyGeneration: {
+        type: ['integer', 'null'],
+        description:
+          'Topology generation shared by every contributing sample in the queried window, or `null` when unknown/mixed. Omitted when the backend doesn’t track generations.',
+      },
+      derived: { $ref: '#/components/schemas/HostSeriesChartPointDerived' },
+    },
+  },
+  FleetHostSnapshotResponse: {
+    type: 'object',
+    required: ['ok', 'from', 'to', 'backend', 'available', 'metrics', 'servers'],
+    properties: {
+      ok: { type: 'boolean', const: true },
+      from: { type: 'string', format: 'date-time' },
+      to: { type: 'string', format: 'date-time' },
+      backend: backendEnumSchema,
+      available: { type: 'boolean' },
+      metrics: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'The fixed v4 fleet host metric set (CPU stack + memory/swap) — never per-request. v3’s load-average fields (`load1`/`load5`/`load15`) have no v4 analogue and are not present.',
+      },
+      servers: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/FleetServerUsageRecord' },
+      },
     },
   },
   StatusHistoryEvent: {
@@ -240,7 +398,10 @@ export const metricsSchemas = {
     properties: {
       at: { type: 'string', format: 'date-time' },
       connected: { type: 'boolean' },
-      reason: { type: 'string', enum: ['connect', 'disconnect', 'sweep_stale', 'self_heal'] },
+      reason: {
+        type: 'string',
+        enum: ['connect', 'disconnect', 'sweep_stale', 'self_heal'],
+      },
     },
   },
   ConnectionHistoryChartResponse: {
@@ -265,7 +426,7 @@ export const metricsSchemas = {
       serverId: { type: 'string', format: 'uuid' },
       from: { type: 'string', format: 'date-time' },
       to: { type: 'string', format: 'date-time' },
-      backend: { type: 'string', enum: ['disabled', 'analytics-engine', 'duckdb'] },
+      backend: backendEnumSchema,
       available: { type: 'boolean' },
       initialConnected: {
         type: ['boolean', 'null'],
@@ -276,7 +437,10 @@ export const metricsSchemas = {
       unknownSeconds: { type: 'number' },
       uptimePercent: { type: ['number', 'null'] },
       truncated: { type: 'boolean' },
-      events: { type: 'array', items: { $ref: '#/components/schemas/StatusHistoryEvent' } },
+      events: {
+        type: 'array',
+        items: { $ref: '#/components/schemas/StatusHistoryEvent' },
+      },
     },
   },
   MetricsBackendUnavailableResponse: {
@@ -285,7 +449,7 @@ export const metricsSchemas = {
     properties: {
       ok: { type: 'boolean', const: false },
       error: { type: 'string', const: 'metrics_backend_unavailable' },
-      backend: { type: 'string', enum: ['disabled', 'analytics-engine', 'duckdb'] },
+      backend: backendEnumSchema,
     },
   },
   ServerHardwareProfileUpdateRequest: {
@@ -295,6 +459,7 @@ export const metricsSchemas = {
     properties: {
       ...sensorSlotProperties,
       ...nicProperties,
+      ...topologyIdProperties,
       hostingPath: {
         type: ['string', 'null'],
         description: 'Absolute path without whitespace; `null` clears it.',
@@ -369,7 +534,9 @@ const metricsQueryErrorResponses = {
     description: 'Database or metrics backend unavailable',
     content: {
       'application/json': {
-        schema: { $ref: '#/components/schemas/MetricsBackendUnavailableResponse' },
+        schema: {
+          $ref: '#/components/schemas/MetricsBackendUnavailableResponse',
+        },
       },
     },
   },
@@ -379,9 +546,9 @@ export const metricsPaths: Record<string, unknown> = {
   '/api/client/v1/servers/{id}/metrics/series': {
     get: {
       tags: ['Servers'],
-      summary: 'Get charted host-metrics series for a visible server',
+      summary: 'Get charted host and entity metrics series for a visible server',
       description:
-        'Bucketed series with derived presentation values and CPU thermal/power headroom, resolved from the server’s hardware profile.',
+        'Bucketed series with derived presentation values and CPU thermal/power headroom, resolved from the server’s hardware profile, plus per-entity-family series and the topology inventory used to label them.',
       security: [{ cookieAuth: [] }],
       parameters: [
         serverIdParam,
@@ -391,7 +558,8 @@ export const metricsPaths: Record<string, unknown> = {
           in: 'query',
           required: false,
           schema: { type: 'string' },
-          description: 'Comma-separated HostMetricKey allowlist; omit for all metrics.',
+          description:
+            'Comma-separated entity-metric-id list — a host-singleton canonical name (`host.cpu.busyPercent`) or an entity-scoped id (`<family alias>:<entityId>.<field>`, e.g. `network:eth0.receiveBytesPerSecond`, `hardware:psu1.value`, `ingress:caddy-1.requests`). Omit for every `host.*` canonical metric. A `network` entity id that is a TurboFabric mesh device per the current topology is rejected with 400 — see `inventory`. A NIC in a normal slot is queryable like any other `network` entity, but only `receiveBytesPerSecond`/`transmitBytesPerSecond` resolve on the Cloudflare backend; every other `network` field is `null` for it there (DuckDB always resolves the full field set).',
         },
         {
           name: 'resolution',
@@ -409,7 +577,7 @@ export const metricsPaths: Record<string, unknown> = {
       ],
       responses: {
         '200': {
-          description: 'Host metrics series',
+          description: 'Host and entity metrics series',
           content: {
             'application/json': {
               schema: { $ref: '#/components/schemas/HostSeriesChartResponse' },
@@ -439,6 +607,49 @@ export const metricsPaths: Record<string, unknown> = {
       },
     },
   },
+  '/api/client/v1/servers/metrics/latest': {
+    get: {
+      tags: ['Servers'],
+      summary: 'Get one fleet-wide host usage snapshot for the org servers overview',
+      description:
+        'CPU stack + memory/swap for every server visible to the caller, in one query — never N per-server calls. Authorization is server-side via listVisible; no serverIds are ever accepted from the client. Carries no per-server cpuLimits (unlike /series and /summary) — see FLEET_HOST_METRICS_V4’s doc comment.',
+      security: [{ cookieAuth: [] }],
+      parameters: [
+        {
+          name: 'organizationId',
+          in: 'query',
+          required: false,
+          schema: { type: 'string', format: 'uuid' },
+        },
+      ],
+      responses: {
+        '200': {
+          description: 'Fleet host usage snapshot',
+          content: {
+            'application/json': {
+              schema: {
+                $ref: '#/components/schemas/FleetHostSnapshotResponse',
+              },
+            },
+          },
+        },
+        '401': {
+          description: 'Unauthorized',
+          content: { 'application/json': { schema: clientErrorJson } },
+        },
+        '503': {
+          description: 'Database or metrics backend unavailable',
+          content: {
+            'application/json': {
+              schema: {
+                $ref: '#/components/schemas/MetricsBackendUnavailableResponse',
+              },
+            },
+          },
+        },
+      },
+    },
+  },
   '/api/client/v1/servers/{id}/metrics/connection': {
     get: {
       tags: ['Servers'],
@@ -450,7 +661,9 @@ export const metricsPaths: Record<string, unknown> = {
           description: 'Connection history and uptime totals',
           content: {
             'application/json': {
-              schema: { $ref: '#/components/schemas/ConnectionHistoryChartResponse' },
+              schema: {
+                $ref: '#/components/schemas/ConnectionHistoryChartResponse',
+              },
             },
           },
         },
@@ -463,14 +676,16 @@ export const metricsPaths: Record<string, unknown> = {
       tags: ['Servers'],
       summary: 'Set the operator-assigned hardware profile for a server',
       description:
-        'Persists sensor-slot/NIC assignments, hosting path, drivetemp opt-in, and CPU TDP/Tjmax overrides. Assigning a sensor/NIC identity is validated against a fresh daemon capability round trip and requires the daemon to be connected; clearing slots or touching hostingPath/drivetempEnabled/overrides does not.',
+        'Persists sensor-slot/NIC assignments, stable topology-id pins, hosting path, drivetemp opt-in, and CPU TDP/Tjmax overrides. Assigning a topology-id pin (nicSlot1DeviceId/nicSlot2DeviceId/hostingFilesystemId) is validated against the server’s last recorded topology generation and does not require the daemon to be connected; sensor/NIC slot assignments and all other fields are persisted without validation.',
       security: [{ cookieAuth: [] }],
       parameters: [serverIdParam],
       requestBody: {
         required: true,
         content: {
           'application/json': {
-            schema: { $ref: '#/components/schemas/ServerHardwareProfileUpdateRequest' },
+            schema: {
+              $ref: '#/components/schemas/ServerHardwareProfileUpdateRequest',
+            },
           },
         },
       },
@@ -479,12 +694,14 @@ export const metricsPaths: Record<string, unknown> = {
           description: 'Hardware profile saved',
           content: {
             'application/json': {
-              schema: { $ref: '#/components/schemas/ServerHardwareProfileUpdateResponse' },
+              schema: {
+                $ref: '#/components/schemas/ServerHardwareProfileUpdateResponse',
+              },
             },
           },
         },
         '400': {
-          description: 'Invalid body, unknown field, or a stale sensor/NIC identity',
+          description: 'Invalid body, unknown field, or a stale topology-id override',
           content: { 'application/json': { schema: clientErrorJson } },
         },
         '401': {
@@ -499,12 +716,8 @@ export const metricsPaths: Record<string, unknown> = {
           description: 'Server not found',
           content: { 'application/json': { schema: clientErrorJson } },
         },
-        '409': {
-          description: 'Server offline — required for identity validation',
-          content: { 'application/json': { schema: clientErrorJson } },
-        },
         '503': {
-          description: 'Database or daemon cell registry unavailable',
+          description: 'Database unavailable',
           content: { 'application/json': { schema: clientErrorJson } },
         },
       },

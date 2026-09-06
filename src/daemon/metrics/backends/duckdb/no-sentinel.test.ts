@@ -1,0 +1,245 @@
+/**
+ * DuckDB never leaks the Cloudflare Analytics Engine v4 missing-metric
+ * sentinel (`AE_V4_MISSING_METRIC_SENTINEL`, `-1e308`) through its query
+ * surface — a value absent from a written sample must come back as a real
+ * SQL `NULL` (JS `null`), never AE's positional-packing placeholder. DuckDB
+ * has no positional slot layout at all (`schema.ts`'s doc comment), so this
+ * is a pure regression guard against ever importing AE's sentinel discipline
+ * into the DuckDB write/read path.
+ *
+ * `store.test.ts` already asserts this at the raw-SQL level for one sample
+ * (`"writeSample persists the host row and every entity row with real
+ * NULLs, never the AE sentinel"`); this file broadens the same invariant
+ * across several representative-machine shapes and the full query surface
+ * (`queryHostSeries` / `queryEntitySeries`), not just a raw `SELECT`.
+ */
+import { assertEquals } from '@std/assert'
+import { it } from '@std/testing/bdd'
+import { buildMetricsSampleV4 } from '../../contract-v4.ts'
+import { truncateSampleToCapabilityPlanV4 } from '../../capability-plan.ts'
+import type { AuthenticatedMetricsSampleV4 } from '../../types-v4.ts'
+import { representativeMachineFixtures } from '../../testing/representative-machines.ts'
+import {
+  AE_V4_MISSING_METRIC_SENTINEL,
+  PER_ENTITY_FIELD_ORDER_V4,
+  SINGLE_ROW_FIELD_ORDER_V4,
+} from '../cloudflare/field-map-v4.ts'
+import { HOST_METRIC_FIELD_REFS } from './schema.ts'
+import { DuckDbParquetServerMetricsStore } from './store.ts'
+
+const SERVER_ID = '11111111-2222-4333-8444-555555555555'
+const FROM_MS = Date.UTC(2026, 5, 2)
+const TO_MS = FROM_MS + 3_600_000
+
+const HOST_CANONICAL_METRICS = HOST_METRIC_FIELD_REFS.map((ref) => `host.${ref.group}.${ref.field}`)
+
+async function withStore(
+  run: (store: DuckDbParquetServerMetricsStore) => Promise<void>
+): Promise<void> {
+  const metricsDir = await Deno.makeTempDir({
+    prefix: 'tp-duckdb-no-sentinel-',
+  })
+  const store = new DuckDbParquetServerMetricsStore({ metricsDir }, { writeBatchMaxRows: 1 })
+  try {
+    await run(store)
+  } finally {
+    await store.close()
+    await Deno.remove(metricsDir, { recursive: true })
+  }
+}
+
+function authenticate(
+  built: ReturnType<typeof buildMetricsSampleV4>,
+  atMs: number
+): AuthenticatedMetricsSampleV4 {
+  return {
+    ...built,
+    serverId: SERVER_ID,
+    receivedAt: new Date(atMs).toISOString(),
+  }
+}
+
+function assertNoSentinel(value: unknown, label: string): void {
+  assertEquals(value === AE_V4_MISSING_METRIC_SENTINEL, false, label)
+}
+
+// A handful of shapes covering every per-entity family plus a fixture with
+// genuinely-absent metrics (host fields intentionally left `null`).
+const FIXTURES_TO_CHECK = [
+  '1-gpu-vm',
+  '4-nic',
+  'bare-metal-low-signals',
+  '12-extra-filesystems',
+  '24-block-devices',
+  'web-vm',
+  'db-proxysql-vm',
+] as const
+
+for (const name of FIXTURES_TO_CHECK) {
+  const fixture = representativeMachineFixtures().find((f) => f.name === name)!
+
+  it(`no-sentinel: "${fixture.name}" host series + entity series never surface AE_V4_MISSING_METRIC_SENTINEL`, async () => {
+    await withStore(async (store) => {
+      const built = buildMetricsSampleV4(fixture.input)
+      const truncated = truncateSampleToCapabilityPlanV4(built, fixture.plan)
+      await store.writeSample(authenticate(truncated, FROM_MS + 60_000))
+
+      const hostResult = await store.queryHostSeries({
+        serverId: SERVER_ID,
+        metrics: HOST_CANONICAL_METRICS,
+        from: new Date(FROM_MS).toISOString(),
+        to: new Date(TO_MS).toISOString(),
+        resolutionSeconds: 3600,
+      })
+      for (const point of hostResult.points) {
+        for (const [key, value] of Object.entries(point.values)) {
+          assertNoSentinel(value, `${fixture.name}: host.${key}`)
+        }
+      }
+
+      for (const family of [
+        'gpu',
+        'network',
+        'filesystem',
+        'block',
+        'hardware.physical',
+      ] as const) {
+        const entityIds = entityIdsForFamily(truncated, family)
+        if (entityIds.length === 0) continue
+        const entityResult = await store.queryEntitySeries({
+          serverId: SERVER_ID,
+          family,
+          entityIds,
+          metrics: PER_ENTITY_FIELD_ORDER_V4[family],
+          from: new Date(FROM_MS).toISOString(),
+          to: new Date(TO_MS).toISOString(),
+          resolutionSeconds: 3600,
+        })
+        for (const entity of entityResult.entities) {
+          for (const point of entity.points) {
+            for (const [key, value] of Object.entries(point.values)) {
+              assertNoSentinel(value, `${fixture.name}: ${family}.${key}`)
+            }
+          }
+        }
+      }
+
+      for (const family of ['managed.ingress', 'managed.database_proxy'] as const) {
+        const entityIds =
+          family === 'managed.ingress'
+            ? truncated.ingressSources.map((s) => s.sourceId)
+            : truncated.databaseProxies.map((s) => s.sourceId)
+        if (entityIds.length === 0) continue
+        const entityResult = await store.queryEntitySeries({
+          serverId: SERVER_ID,
+          family,
+          entityIds,
+          metrics: SINGLE_ROW_FIELD_ORDER_V4[family],
+          from: new Date(FROM_MS).toISOString(),
+          to: new Date(TO_MS).toISOString(),
+          resolutionSeconds: 3600,
+        })
+        for (const entity of entityResult.entities) {
+          for (const point of entity.points) {
+            for (const [key, value] of Object.entries(point.values)) {
+              assertNoSentinel(value, `${fixture.name}: ${family}.${key}`)
+            }
+          }
+        }
+      }
+    })
+  })
+}
+
+function entityIdsForFamily(
+  sample: ReturnType<typeof buildMetricsSampleV4>,
+  family: 'gpu' | 'network' | 'filesystem' | 'block' | 'hardware.physical'
+): string[] {
+  switch (family) {
+    case 'gpu':
+      return sample.gpus.map((g) => g.gpuId)
+    case 'network':
+      return sample.networks.map((n) => n.deviceId)
+    case 'filesystem':
+      return sample.filesystems.map((f) => f.filesystemId)
+    case 'block':
+      return sample.blockDevices.map((d) => d.deviceId)
+    case 'hardware.physical':
+      return sample.hardwareSignals.map((s) => s.signalId)
+  }
+}
+
+it('no-sentinel: a sample with every host metric explicitly null never surfaces the sentinel through queryHostSeries', async () => {
+  await withStore(async (store) => {
+    const nullHost = {
+      cpu: {
+        busyPercent: null,
+        userPercent: null,
+        systemPercent: null,
+        iowaitPercent: null,
+        stealPercent: null,
+        softirqPercent: null,
+        pressureSomePercent: null,
+        maxCoreBusyPercent: null,
+        procsRunning: null,
+        procsBlocked: null,
+      },
+      kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
+      memory: {
+        availableBytes: null,
+        swapUsedBytes: null,
+        pressureSomePercent: null,
+        pressureFullPercent: null,
+        swapInBytesPerSecond: null,
+        swapOutBytesPerSecond: null,
+        majorPageFaultsPerSecond: null,
+      },
+      storage: {
+        ioPressureSomePercent: null,
+        ioPressureFullPercent: null,
+        diskReadBytesPerSecond: null,
+        diskWriteBytesPerSecond: null,
+        diskReadLatencyMs: null,
+        diskWriteLatencyMs: null,
+        maxBlockDeviceUtilPercent: null,
+        rootFilesystemAvailableBytes: null,
+        rootFilesystemFreeInodes: null,
+      },
+      network: { tcpRetransmitPercent: null, softnetDropsPerSecond: null },
+    }
+    const built = buildMetricsSampleV4({
+      metadata: {
+        version: 4,
+        sampledAt: new Date(FROM_MS + 60_000).toISOString(),
+        intervalSeconds: 60,
+        sequence: 1,
+        collectionMode: 'baseline',
+        topologyGeneration: 1,
+        bootGeneration: 1,
+      },
+      host: nullHost,
+      networks: [],
+      filesystems: [],
+      blockDevices: [],
+      gpus: [],
+      hardwareSignals: [],
+      ingressSources: [],
+      databaseProxies: [],
+      events: [],
+    })
+    await store.writeSample(authenticate(built, FROM_MS + 60_000))
+
+    const result = await store.queryHostSeries({
+      serverId: SERVER_ID,
+      metrics: HOST_CANONICAL_METRICS,
+      from: new Date(FROM_MS).toISOString(),
+      to: new Date(TO_MS).toISOString(),
+      resolutionSeconds: 3600,
+    })
+    assertEquals(result.points.length, 1)
+    for (const [key, value] of Object.entries(result.points[0]!.values)) {
+      assertEquals(value, null, `expected real NULL for ${key}`)
+      assertNoSentinel(value, key)
+    }
+  })
+})

@@ -36,9 +36,7 @@
     }
   ],
   "queues": {
-    "producers": [
-      { "binding": "TURBOPANEL_COMMAND_QUEUE", "queue": "dev-daemon-commands" }
-    ],
+    "producers": [{ "binding": "TURBOPANEL_COMMAND_QUEUE", "queue": "dev-daemon-commands" }],
     "consumers": [
       {
         "queue": "dev-daemon-commands",
@@ -110,21 +108,27 @@
   // Host metrics (Workers Analytics Engine). Dataset name is reused across
   // envs — AE datasets are account-scoped and auto-created on first write;
   // docs do not require globally unique names. Rows are keyed by index1=serverId.
-  // Each host sample is TWO TO FOUR data points (blob1="metrics",
-  // blob2="core"/"extended"/"sensors"/"traffic" — up to 19 v3 metrics per
-  // part, double20=intervalSeconds on every part). "core"/"extended" are
-  // always written; "sensors"/"traffic" only when the daemon declares them.
-  // Status transitions are one blob1="status" row. Layout: backends/cloudflare/field-map.ts.
-  // Dataset renamed from the retired two-part "turbopanel_server_telemetry"
-  // layout — AE datasets can't be deleted, so a schema change that shifts
-  // blob/double positional meaning always gets a new name.
+  // v4 is family-based: every sample writes one always-present host.system
+  // row, one always-present host.io row, plus presence-gated pages for
+  // gpu/network/filesystem/block/hardware.physical and one row per
+  // managed.ingress/managed.database_proxy entry and per event — see
+  // backends/cloudflare/field-map-v4.ts. `workers.ts` wires this binding
+  // straight into a real `CloudflareAnalyticsEngineServerMetricsStoreV4` for
+  // both writes and reads — metric samples, status transitions, and metric
+  // events all land here directly.
   // SQL API reads need secrets: TURBOPANEL_ANALYTICS_ENGINE_API_TOKEN
   // (Account Analytics Read) plus CLOUDFLARE_ACCOUNT_ID (vars below / .dev.vars).
   // Optional: TURBOPANEL_SERVER_METRICS_AE_MAX_RANGE_SECONDS (default = 90-day AE retention).
+  //
+  // Retired: SERVER_METRICS bound "turbopanel_server_host_metrics" (the v3
+  // part-based dataset — blob1="metrics", blob2="core"/"extended"/"sensors"/
+  // "traffic"). The v3 contract has been fully removed from this codebase;
+  // that dataset is never queried again. AE datasets can't be deleted, so the
+  // name itself is never reused, but the binding is gone — do not re-add it.
   "analytics_engine_datasets": [
     {
-      "binding": "SERVER_METRICS",
-      "dataset": "turbopanel_server_host_metrics"
+      "binding": "SERVER_METRICS_V4",
+      "dataset": "turbopanel_server_metrics_v4"
     }
   ],
   // Command execution logs (transcripts). Buckets are NOT auto-created — create
@@ -216,10 +220,12 @@
         }
       ],
       "triggers": { "crons": ["* * * * *"] },
+      // Retired: SERVER_METRICS bound "turbopanel_server_host_metrics" (v3,
+      // fully removed — see the default env's comment above).
       "analytics_engine_datasets": [
         {
-          "binding": "SERVER_METRICS",
-          "dataset": "turbopanel_server_host_metrics"
+          "binding": "SERVER_METRICS_V4",
+          "dataset": "turbopanel_server_metrics_v4"
         }
       ],
       "r2_buckets": [
@@ -269,9 +275,7 @@
     "live": {
       "name": "instance",
       "queues": {
-        "producers": [
-          { "binding": "TURBOPANEL_COMMAND_QUEUE", "queue": "daemon-commands" }
-        ],
+        "producers": [{ "binding": "TURBOPANEL_COMMAND_QUEUE", "queue": "daemon-commands" }],
         "consumers": [
           {
             "queue": "daemon-commands",
@@ -328,10 +332,12 @@
         }
       ],
       "triggers": { "crons": ["* * * * *"] },
+      // Retired: SERVER_METRICS bound "turbopanel_server_host_metrics" (v3,
+      // fully removed — see the default env's comment above).
       "analytics_engine_datasets": [
         {
-          "binding": "SERVER_METRICS",
-          "dataset": "turbopanel_server_host_metrics"
+          "binding": "SERVER_METRICS_V4",
+          "dataset": "turbopanel_server_metrics_v4"
         }
       ],
       "r2_buckets": [

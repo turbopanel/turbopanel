@@ -210,7 +210,26 @@ everyday code stay below (**TypeScript style**).
 
   Then call `test('...', () => { … })` (or the object form `test({ name, fn })`)
   instead of `Deno.test(...)`. When adding a new Deno test file, add this alias
-  from the start.
+  from the start **and claim the file in the test inventory** (next section).
+
+### Adding tests (inventory)
+
+This repo does **not** glob `*.test.ts`. A new suite that is not claimed by a
+runner never executes in CI and never appears in `coverage/lcov.info`, so it
+reads as tested in review while contributing **0%** to the Sonar new-code
+coverage gate. After adding, renaming, or deleting a `*.test.ts`, run
+**`pnpm check:test-inventory`** (`scripts/check-test-inventory.mjs`) — it is
+wired into `pnpm test:hook` and CI `build.yml`. Claim each file in **exactly
+one** bucket:
+
+| Suite kind | Claim it in |
+| ---------- | ----------- |
+| Deno (`@std/assert`, `const test = Deno.test.bind(Deno)`, `@std/testing/bdd`) | the `deno test` file list in `scripts/test-coverage.sh` (host-free unit tests, plus Postgres suites — CI starts Postgres; they skip locally when `TURBOPANEL_DATABASE_URL` is unset) |
+| Workers / Durable Object (`vitest`, `cloudflare:test`, `@needs-workers-globals`) | `test.include` in `vitest.config.ts` (explicit file list, not a glob) |
+| Needs a service CI does not start (Redis, …) | `SERVICE_DEPENDENT` in `scripts/check-test-inventory.mjs` **with a reason** — the only sanctioned way to leave a suite out of both runners |
+
+Do not add the same file to both lists. Coverage-attribution traps and the
+LCOV merge live in [`scripts/AGENTS.md`](./scripts/AGENTS.md).
 
 ### Workers-reachable imports
 
@@ -247,6 +266,10 @@ tree. Run suites **inside the Vagrant guest** from the host `dev` checkout
 ```bash
 vagrant ssh -c 'export PATH="/opt/turbopanel/vendor/node/current/bin:/opt/turbopanel/vendor/deno/current:$PATH"; cd ~/turbopanel && pnpm test:do'
 ```
+
+A new `*.test.ts` is not done until `pnpm check:test-inventory` passes (see
+**Adding tests** above). `pnpm test:hook` includes that guard; `pnpm test:do`
+alone does not.
 
 ## Setup
 
@@ -721,7 +744,7 @@ orientation; the detail moved to:
 | **Bindings**                      | `src/client/bindings/`                              | Managed DB principal → compose service materialization of service-scoped `variable` rows (`binding_id`); ride existing `environment.deploy` inject rail; no new command type                                                                                                                                                                                                                                                                                     |
 | **Client API routes**             | `src/client/AGENTS.md`                              | Per-endpoint permission contract for the `/api/client/v1/*` surface: access/permission endpoints + the full resource-tree CRUD table (moved from `src/lib/db/AGENTS.md`)                                                                                                                                                                                                                                                                                          |
 | **Authentication**                | `src/client/authn/AGENTS.md`                        | Argon2id, sessions, PAM install gate, secret keyring + data encryption, daemon key JWT, auth routes                                                                                                                                                                                                                                                                                                                                                              |
-| **CI analysis & coverage**        | `scripts/AGENTS.md`                                 | SonarCloud CI job, Vitest+Deno LCOV merge (`test-coverage.sh`), analysis-scope rules, coverage-attribution traps                                                                                                                                                                                                                                                                                                                                                  |
+| **CI analysis & coverage**        | `scripts/AGENTS.md`                                 | SonarCloud CI job, Vitest+Deno LCOV merge (`test-coverage.sh`), **`pnpm check:test-inventory`** (every `*.test.ts` claimed by exactly one runner), analysis-scope rules, coverage-attribution traps                                                                                                                                                                                                                                                                                                                                                  |
 | **System components**             | `src/client/system/AGENTS.md`                       | Self-host platform component inventory (`container`-tracked vs host-native), container name suffix contract |
 | **OpenAPI & Scalar**              | `src/client/openapi/AGENTS.md`                      | Hand-authored specs per surface, Scalar embeds, CPD exclusion |
 | **Client route contract**         | `src/client/routes-contract.md`                     | Per-route method/path/permission table for `/api/client/v1/*` (referenced from `src/client/AGENTS.md`) |

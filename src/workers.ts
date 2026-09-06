@@ -2,13 +2,13 @@ import { Hono } from 'hono'
 import type { DaemonJwtKeyring } from './daemon/authn/daemon-jwt-keyring.ts'
 import { deriveDaemonJwtKeyring } from './daemon/authn/daemon-jwt-keyring.ts'
 import {
+  type DerivedSecretsConfig,
   deriveEncryptionSecretsConfig,
   deriveSecretsConfig,
   parseSecretsFromEnv,
-  type DerivedSecretsConfig,
   type SecretsConfig,
 } from './client/authn/secrets.ts'
-import { createApp, type AppEnv } from './app.ts'
+import { type AppEnv, createApp } from './app.ts'
 import { createDurableObjectDaemonCellRegistry } from './daemon/cell/do-registry.ts'
 import { runOfflineSweep } from './daemon/cell/offline-sweep.ts'
 import { registerAdminRoutes } from './admin/routes.ts'
@@ -28,16 +28,16 @@ import type { CommandQueue } from './lib/commands/queue.ts'
 import { isTransientError, processCommandEnvelope } from './lib/commands/consumer.ts'
 import { parseCommandEnvelope } from './lib/commands/envelope.ts'
 import {
-  resolveCloudflareAnalyticsSqlConfig,
-  resolveServerMetricsStore,
   type AnalyticsEngineDatasetLike,
+  resolveCloudflareAnalyticsSqlConfig,
+  resolveServerMetricsStoreV4,
 } from './daemon/metrics/store-selection-workers.ts'
 import { setServerStatusEventSink } from './daemon/metrics/status-events.ts'
-import type { ServerMetricsStore } from './daemon/metrics/types.ts'
+import type { ServerMetricsStoreV4 } from './daemon/metrics/types-v4.ts'
 import {
   parseExecutionLogRetentionDays,
-  resolveExecutionLogStore,
   type R2BucketLike,
+  resolveExecutionLogStore,
 } from './lib/execution-logs/store-selection.ts'
 import { setExecutionLogSealSink } from './lib/execution-logs/seal-on-terminal.ts'
 import type { ExecutionLogStore } from './lib/execution-logs/types.ts'
@@ -56,7 +56,7 @@ import {
   warnIfGithubWebhookRateLimiterMissing,
   warnIfGitlabWebhookRateLimiterMissing,
 } from './workers-bindings.ts'
-import { endDbConnection, type createWorkersDb, type Db } from './db.ts'
+import { type createWorkersDb, type Db, endDbConnection } from './db.ts'
 import type { AuthRateLimiter } from './client/authn/auth-rate-limit.ts'
 import { OTP_VERIFIER_SECRET_PURPOSE } from './client/authn/email-otp.ts'
 
@@ -71,12 +71,14 @@ let cachedChallengeSigningSecrets: DerivedSecretsConfig | null = null
 let cachedDataEncryptionSecrets: DerivedSecretsConfig | null = null
 let cachedSecretsConfig: SecretsConfig | null = null
 let cachedCommandQueue: CommandQueue | null = null
-let cachedServerMetricsStore: ServerMetricsStore | null = null
+let cachedServerMetricsStoreV4: ServerMetricsStoreV4 | null = null
 let cachedExecutionLogStore: ExecutionLogStore | null = null
 let cachedAuthRateLimiter: AuthRateLimiter | null = null
 let cachedDaemonCellRegistryFactory:
-  | ((env: CloudflareBindings, db?: ReturnType<typeof createWorkersDb>) =>
-    ReturnType<typeof createDurableObjectDaemonCellRegistry>)
+  | ((
+      env: CloudflareBindings,
+      db?: ReturnType<typeof createWorkersDb>
+    ) => ReturnType<typeof createDurableObjectDaemonCellRegistry>)
   | null = null
 
 /** @internal Clears per-isolate Worker caches so entry tests can re-init. */
@@ -90,7 +92,7 @@ export function resetWorkerAppCachesForTests(): void {
   cachedDataEncryptionSecrets = null
   cachedSecretsConfig = null
   cachedCommandQueue = null
-  cachedServerMetricsStore = null
+  cachedServerMetricsStoreV4 = null
   cachedExecutionLogStore = null
   cachedAuthRateLimiter = null
   cachedDaemonCellRegistryFactory = null
@@ -127,7 +129,7 @@ export function getLazyEmailQueueResolveCallsForTests(): number {
 function createLazyWorkersEmailQueue(
   db: Db | undefined,
   platformEnv: Record<string, string | undefined>,
-  dataEncryptionSecrets: DerivedSecretsConfig | undefined,
+  dataEncryptionSecrets: DerivedSecretsConfig | undefined
 ): EmailQueue {
   let resolved: Promise<EmailQueue> | null = null
   const resolve = (): Promise<EmailQueue> => {
@@ -156,7 +158,7 @@ async function initWorkerApp(env: CloudflareBindings) {
       TURBOPANEL_SECRET: env.TURBOPANEL_SECRET,
       TURBOPANEL_SECRETS: env.TURBOPANEL_SECRETS,
     },
-    'workers',
+    'workers'
   )
   configureArgon2idWorkFactor({
     memoryKib: env.TURBOPANEL_ARGON2ID_MEMORY_KIB,
@@ -165,23 +167,36 @@ async function initWorkerApp(env: CloudflareBindings) {
   await assertPasswordHasherAvailable()
   cachedSecretsConfig = secretsConfig
   cachedSessionSecrets = await deriveSecretsConfig(secretsConfig, 'session-signing')
-  cachedOtpVerifierSecrets = await deriveSecretsConfig(
-    secretsConfig,
-    OTP_VERIFIER_SECRET_PURPOSE,
-  )
+  cachedOtpVerifierSecrets = await deriveSecretsConfig(secretsConfig, OTP_VERIFIER_SECRET_PURPOSE)
   cachedDaemonJwtKeyring = await deriveDaemonJwtKeyring(secretsConfig)
-  cachedChallengeSigningSecrets = await deriveSecretsConfig(secretsConfig, 'daemon-challenge-signing')
-  cachedDataEncryptionSecrets = await deriveEncryptionSecretsConfig(secretsConfig, 'data-encryption')
+  cachedChallengeSigningSecrets = await deriveSecretsConfig(
+    secretsConfig,
+    'daemon-challenge-signing'
+  )
+  cachedDataEncryptionSecrets = await deriveEncryptionSecretsConfig(
+    secretsConfig,
+    'data-encryption'
+  )
   cachedCommandQueue = env.TURBOPANEL_COMMAND_QUEUE
     ? createWorkersCommandQueue(env.TURBOPANEL_COMMAND_QUEUE)
     : createNoopCommandQueue()
-  cachedServerMetricsStore = resolveServerMetricsStore({
+  const analyticsEngineSql = resolveCloudflareAnalyticsSqlConfig(env)
+  // Real v4 backend (writes to SERVER_METRICS_V4 — the v4 envelope, per
+  // field-map-v4.ts). `CloudflareAnalyticsEngineServerMetricsStoreV4`
+  // implements the full `ServerMetricsStoreV4` surface (writes and reads
+  // alike) directly, including the paged entity families and `sample.events`
+  // — the request-resolved `slotMapping` (`buildMetricsDataPointsV4`'s
+  // parameter) is threaded straight through by the ingest route's
+  // `writeSample` call, with no v3 bridging in between. `resolveServerMetricsStoreV4`
+  // already degrades to `DisabledServerMetricsStoreV4` when the
+  // `SERVER_METRICS_V4` binding is unconfigured, so this is always the
+  // correct store to use here regardless of binding state.
+  cachedServerMetricsStoreV4 = resolveServerMetricsStoreV4({
     runtime: 'workers',
-    analyticsEngine: (env as { SERVER_METRICS?: AnalyticsEngineDatasetLike })
-      .SERVER_METRICS,
-    analyticsEngineSql: resolveCloudflareAnalyticsSqlConfig(env),
+    analyticsEngine: (env as { SERVER_METRICS_V4?: AnalyticsEngineDatasetLike }).SERVER_METRICS_V4,
+    analyticsEngineSql,
   })
-  setServerStatusEventSink(cachedServerMetricsStore)
+  setServerStatusEventSink(cachedServerMetricsStoreV4)
   cachedExecutionLogStore = resolveExecutionLogStore({
     runtime: 'workers',
     r2: (env as { EXECUTION_LOGS?: R2BucketLike }).EXECUTION_LOGS,
@@ -200,7 +215,7 @@ async function initWorkerApp(env: CloudflareBindings) {
     runtime: 'workers',
     corsOrigins: env.TURBOPANEL_UI_CORS_ORIGINS,
     signupEnvOverride: env.TURBOPANEL_IS_SIGNUP_ENABLED,
-    serverMetricsStore: cachedServerMetricsStore,
+    serverMetricsStoreV4: cachedServerMetricsStoreV4,
     executionLogStore: cachedExecutionLogStore,
     dataEncryptionSecrets: cachedDataEncryptionSecrets ?? undefined,
     secretsConfig: cachedSecretsConfig ?? undefined,
@@ -239,8 +254,7 @@ async function initWorkerApp(env: CloudflareBindings) {
     runtime: 'workers',
     devSurface: isWorkersDevSurface(env),
   })
-  cachedDaemonCellRegistryFactory = (env, db) =>
-    createDurableObjectDaemonCellRegistry(env, db)
+  cachedDaemonCellRegistryFactory = (env, db) => createDurableObjectDaemonCellRegistry(env, db)
 }
 
 function isWorkersDevSurface(env: CloudflareBindings): boolean {
@@ -267,9 +281,8 @@ export default {
     initPromise ??= initWorkerApp(env)
     await initPromise
 
-    const postgresConnectionString = env.HYPERDRIVE?.connectionString
-      ?? env.TURBOPANEL_DATABASE_URL?.trim()
-      ?? undefined
+    const postgresConnectionString =
+      env.HYPERDRIVE?.connectionString ?? env.TURBOPANEL_DATABASE_URL?.trim() ?? undefined
     warnIfCachedHyperdriveMissing(env)
     // Fresh clients for this invocation only — close in finally via waitUntil
     // so postgres.js pools cannot stack to the 128 MB isolate limit.
@@ -289,7 +302,7 @@ export default {
       const emailQueue: EmailQueue = createLazyWorkersEmailQueue(
         db,
         platformEnv,
-        cachedDataEncryptionSecrets ?? undefined,
+        cachedDataEncryptionSecrets ?? undefined
       )
       const requestApp = new Hono<AppEnv>()
       requestApp.use('*', async (c, next) => {
@@ -304,7 +317,9 @@ export default {
         }
         c.set('emailQueue', emailQueue)
         if (cachedCommandQueue) c.set('commandQueue', cachedCommandQueue)
-        if (cachedAuthRateLimiter) c.set('authRateLimiter', cachedAuthRateLimiter)
+        if (cachedAuthRateLimiter) {
+          c.set('authRateLimiter', cachedAuthRateLimiter)
+        }
         c.set('platformEnv', platformEnv)
         if (postgresConnectionString) {
           c.set('postgresConnectionString', postgresConnectionString)
@@ -313,8 +328,8 @@ export default {
           const registry = cachedDaemonCellRegistryFactory(env, db)
           c.set('daemonCellRegistry', registry)
         }
-        if (cachedServerMetricsStore) {
-          c.set('serverMetricsStore', cachedServerMetricsStore)
+        if (cachedServerMetricsStoreV4) {
+          c.set('serverMetricsStoreV4', cachedServerMetricsStoreV4)
         }
         if (cachedExecutionLogStore) {
           c.set('executionLogStore', cachedExecutionLogStore)
@@ -329,29 +344,25 @@ export default {
     }
   },
 
-  async scheduled(
-    controller: ScheduledController,
-    env: CloudflareBindings,
-    ctx: ExecutionContext,
-  ) {
+  async scheduled(controller: ScheduledController, env: CloudflareBindings, ctx: ExecutionContext) {
     initPromise ??= initWorkerApp(env)
     await initPromise
     const sweep = runOfflineSweep(
       env,
       cachedSecretsConfig && cachedDataEncryptionSecrets
         ? {
-          secretsConfig: cachedSecretsConfig,
-          dataEncryptionSecrets: cachedDataEncryptionSecrets,
-        }
+            secretsConfig: cachedSecretsConfig,
+            dataEncryptionSecrets: cachedDataEncryptionSecrets,
+          }
         : null,
       {
         // Hosted retention override, resolved at the entry point exactly like
         // deno-server.ts does for the self-hosted path.
         executionLogRetentionDays: parseExecutionLogRetentionDays(
-          env.TURBOPANEL_EXECUTION_LOG_RETENTION_DAYS,
+          env.TURBOPANEL_EXECUTION_LOG_RETENTION_DAYS
         ),
         scheduledTime: controller.scheduledTime,
-      },
+      }
     )
     ctx.waitUntil(sweep)
     await sweep
@@ -379,9 +390,9 @@ export default {
               resealDeps:
                 cachedSecretsConfig && cachedDataEncryptionSecrets
                   ? {
-                    secretsConfig: cachedSecretsConfig,
-                    dataEncryptionSecrets: cachedDataEncryptionSecrets,
-                  }
+                      secretsConfig: cachedSecretsConfig,
+                      dataEncryptionSecrets: cachedDataEncryptionSecrets,
+                    }
                   : undefined,
               secretsConfig: cachedSecretsConfig ?? undefined,
               dataEncryptionSecrets: cachedDataEncryptionSecrets ?? undefined,

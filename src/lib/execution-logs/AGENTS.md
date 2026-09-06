@@ -150,4 +150,5 @@ runs the suite **twice** — under Deno for coverage, and under workerd
 (`r2-store.workers.test.ts`, registered in `vitest.config.ts`) because `seal()`
 depends on the runtime's `CompressionStream`/`DecompressionStream`. Deno suites
 must be listed in `scripts/test-coverage.sh` or they never reach the LCOV
-report.
+report. After adding a `*.test.ts`, run `pnpm check:test-inventory` (root
+`AGENTS.md` → **Adding tests**).

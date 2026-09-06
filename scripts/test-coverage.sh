@@ -224,14 +224,17 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/servers/commands-ping-latency.test.ts \
   src/client/servers/command-dispatch.test.ts \
   src/client/servers/command-dispatch-helpers.hostfree.test.ts \
+  src/client/servers/capability-plan-records.test.ts \
   src/client/servers/colocated.test.ts \
   src/client/servers/delete-guards.test.ts \
-  src/client/servers/hardware-profile-replay-sweep.test.ts \
   src/client/servers/metrics-routes.test.ts \
   src/client/servers/metrics-routes-helpers.hostfree.test.ts \
   src/client/servers/routes.test.ts \
   src/client/servers/routes.hostfree.test.ts \
   src/client/servers/routes-helpers.hostfree.test.ts \
+  src/client/servers/server-topology-records.test.ts \
+  src/client/servers/topology-inventory.test.ts \
+  src/client/servers/topology-slot-mapping.test.ts \
   src/client/servers/update-status.test.ts \
   src/client/shared.test.ts \
   src/client/shared-authz-guards.test.ts \
@@ -305,25 +308,30 @@ deno test -A --coverage=coverage/deno-profile \
   src/daemon/cell/socket-health.test.ts \
   src/daemon/cell/server-diagnostics.test.ts \
   src/daemon/cell/stateless-challenge.test.ts \
-  src/daemon/metrics/backends/cloudflare/field-map.test.ts \
-  src/daemon/metrics/backends/cloudflare/sql-api.test.ts \
-  src/daemon/metrics/backends/cloudflare/store.test.ts \
-  src/daemon/metrics/backends/cloudflare/write-path-parity.test.ts \
+  src/daemon/metrics/backends/cloudflare/cross-backend-parity.test.ts \
+  src/daemon/metrics/backends/cloudflare/field-map-v4.test.ts \
+  src/daemon/metrics/backends/cloudflare/representative-row-counts.test.ts \
+  src/daemon/metrics/backends/cloudflare/sql-api-v4.test.ts \
+  src/daemon/metrics/backends/cloudflare/store-v4.test.ts \
   src/daemon/metrics/backends/duckdb/database.test.ts \
+  src/daemon/metrics/backends/duckdb/no-sentinel.test.ts \
   src/daemon/metrics/backends/duckdb/parquet.test.ts \
   src/daemon/metrics/backends/duckdb/schema.test.ts \
   src/daemon/metrics/backends/duckdb/store.test.ts \
-  src/daemon/metrics/contract.test.ts \
-  src/daemon/metrics/disabled-store.test.ts \
-  src/daemon/metrics/metric-descriptors.test.ts \
+  src/daemon/metrics/capability-plan.test.ts \
+  src/daemon/metrics/contract-v4.test.ts \
+  src/daemon/metrics/counter-reset-end-to-end.test.ts \
+  src/daemon/metrics/disabled-store-v4.test.ts \
+  src/daemon/metrics/entity-metric-id.test.ts \
+  src/daemon/metrics/metric-descriptors-v4.test.ts \
+  src/daemon/metrics/orphan-row-semantics.test.ts \
   src/daemon/metrics/status-events.test.ts \
+  src/daemon/metrics/topology-generation-guard.test.ts \
   src/daemon/metrics/query/cache.test.ts \
-  src/daemon/metrics/query/derived-metrics.test.ts \
   src/daemon/metrics/query/resolution.test.ts \
-  src/daemon/metrics/query/series-response.test.ts \
   src/daemon/metrics/query/uptime.test.ts \
   src/daemon/metrics/store-selection.test.ts \
-  src/daemon/metrics/validation.deno.test.ts \
+  src/daemon/metrics/validation-v4.deno.test.ts \
   src/daemon/openapi/ca.test.ts \
   src/daemon/openapi/index.test.ts \
   src/daemon/openapi/metrics.test.ts \

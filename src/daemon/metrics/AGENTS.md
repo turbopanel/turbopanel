@@ -1,120 +1,404 @@
 # Server metrics — AGENTS.md
 
-Host-metrics ingestion (`POST /api/daemon/v1/metrics`, never wakes the DO), backend storage, and the query/caching API. `HOST_METRIC_KEYS` in `contract.ts` is a **named logical allowlist** (schema v3, 68 metrics, partitioned into four `MetricPart`s — `core` / `extended` / `sensors` / `traffic`) for the API/query surface only — it carries no storage ordering; physical positions are backend-private.
+Host-metrics ingestion (`POST /api/daemon/v1/metrics`, never wakes the DO),
+backend storage, and the query/caching API — **v4 contract** (`contract-v4.ts`,
+schema version 4). v4 drops v3's flat `HOST_METRIC_KEYS` allowlist and its
+`MetricPart` (`core`/`extended`/`sensors`/`traffic`) partitioning entirely:
+metrics are grouped by **entity** (host, network device, filesystem, block
+device, GPU, hardware signal, ingress source, database proxy) with a stable
+logical id per entity, every leaf value is `number | null` (missing is always
+`null`, never coerced to `0`), and no value's presence is inferred from
+bitmask/part membership.
 
-Root context: `../../../AGENTS.md`. Daemon cell: `../cell/AGENTS.md`. Human docs + AE cost model: `../../../../website/docs/architecture/server-metrics.mdx`.
+Root context: `../../../AGENTS.md`. Daemon cell: `../cell/AGENTS.md`. Human
+docs + AE cost model:
+`../../../../website/docs/architecture/server-metrics.mdx`.
+
+**v3 is fully retired.** The v3 contract (`contract.ts`, `validation.ts`,
+`metric-descriptors.ts`, `disabled-store.ts`, `types.ts`,
+`backends/cloudflare/{store,field-map,sql-api}.ts`,
+`query/{series-response,
+derived-metrics}.ts`) has been deleted, along with
+their tests. `DuckDbParquetServerMetricsStore` implements only
+`ServerMetricsStoreV4` now — its
+`queryHostSeries`/`queryHostSummary`/`queryFleetHostSnapshot` accept only v4
+canonical metric names, and the old `writeHostSample` compat method is gone.
+`app.ts`/`db.ts`/`workers.ts` carry only the `serverMetricsStoreV4` binding —
+there is no parallel v3 field. `do.ts`/`offline-sweep.ts`'s status sink and
+offline-sweep's AE-direct liveness read both resolve through the v4
+store/binding (`resolveServerMetricsStoreV4` / `SERVER_METRICS_V4`) — nothing
+writes or reads through `SERVER_METRICS` (v3) anymore. `wrangler.jsonc` keeps
+the old dataset name only as a retired comment next to the `SERVER_METRICS_V4`
+binding — the AE dataset itself can't be deleted, but the binding is gone and
+must never be re-added. Genuinely shared, version-neutral pieces that used to
+live in the v3 files (the HTTP/SQL transport primitives, the generic
+`{timestamp, connected, reason}` status-row parser, the validation rate-limit
+helpers, `MetricsBackendKind`/`ServerStatusEvent`/`StatusHistoryQuery`/
+`StatusHistoryResult`) were relocated into their `-v4.ts` siblings
+(`sql-api-v4.ts`, `validation-v4.ts`, `types-v4.ts`) rather than duplicated.
+
+#### The v4 family catalog
+
+Every family is a row-kind (`"metrics"`) with a `hostedFamily`
+(`metric-descriptors-v4.ts`'s `HostedFamilyV4`) discriminator. Two are the
+**universal baseline** — present on every sample regardless of hardware — the
+rest are **presence-gated** (the entity/subsystem must actually exist on the
+machine) or **capability-gated** (the org/server's `MetricsCapabilityPlan` must
+allow it, see below), or both.
+
+| Family                   | Shape                                                                                                               | Gating                                                                                                                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `host.system`            | single row: `cpu` + `kernel` + `memory` fields                                                                      | universal baseline — always emitted                                                                                                                                                                                      |
+| `host.io`                | single row: `storage` + `network` fields, plus embedded primary NIC(s) when `SlotMapping` resolves them (see below) | universal baseline — always emitted                                                                                                                                                                                      |
+| `network`                | one row per unaccounted-for network device                                                                          | presence-gated (only devices not embedded in `host.io` and not a fabric device page)                                                                                                                                     |
+| `filesystem`             | one row per filesystem beyond the root filesystem                                                                   | presence-gated + capability-gated (`extraFilesystemSlots`)                                                                                                                                                               |
+| `block`                  | one row per block device (per-disk detail)                                                                          | presence-gated + capability-gated (`detailedBlockDeviceSlots`)                                                                                                                                                           |
+| `gpu`                    | one row per GPU (2 GPUs/row, `gpuRows = ceil(gpus/2)`)                                                              | presence-gated + capability-gated (`gpuSlots`, default 1 — "the base entitlement includes one GPU slot; the GPU family is presence-gated": a plan can _entitle_ GPU reporting without a machine _emitting_ any GPU rows) |
+| `hardware.physical`      | one row per physical sensor signal (temp/power, never fan RPM/GPU)                                                  | presence-gated + capability-gated (`physicalHardwareSignalSlots`; virtual machines default to 0)                                                                                                                         |
+| `managed.ingress`        | one row per ingress source (Caddy/Traefik)                                                                          | presence-gated + capability-gated (`managedIngressEnabled`)                                                                                                                                                              |
+| `managed.database_proxy` | one row per database-proxy source (ProxySQL)                                                                        | presence-gated + capability-gated (`databaseProxyMetricsEnabled`)                                                                                                                                                        |
+| `cpu.detail`             | single row: busiest-core hotspots + freq/sched counters                                                             | capability-gated (`cpuDetailEnabled`)                                                                                                                                                                                    |
+| `memory.detail`          | single row: slab/dirty/writeback/reclaim breakdown                                                                  | capability-gated (`memoryDetailEnabled`)                                                                                                                                                                                 |
+| `cpu.core.live`          | one row per online logical core                                                                                     | capability-gated (`cpuLiveCoreSlots`), live sessions only                                                                                                                                                                |
+
+`numaNodes` (`NumaNodeSampleV4`) is a fully-shaped reserved family — wired into
+`MetricsSampleV4.numaNodes?` and `numaNodeSlots` in the capability plan, not yet
+populated by any collector.
+
+**Entitlement vs. emission**, restated: a capability-plan slot count (e.g.
+`gpuSlots: 1`) is what a server is _allowed_ to report; whether it actually
+emits that family's rows depends entirely on whether the daemon detected the
+hardware. `truncateSampleToCapabilityPlanV4` (`capability-plan.ts`) enforces the
+ceiling at ingest time (truncates the sample to at most `N` entries per
+capability-gated array); it can only shrink what the daemon already reports,
+never fabricate rows for absent hardware.
+
+**Representative row-count matrix** (`testing/representative-machines.ts` — 16
+fixed machine shapes, pinned by
+`backends/cloudflare/representative-row-counts.test.ts`): `1-nic-vm` = 2,
+`2-nic-vm` = 2, `2-nic-fabric-vm` = 2, `1-gpu-vm` = 3, `web-vm` = 3,
+`web-gpu-vm` = 4, `db-only-vm` = 2, `db-proxysql-vm` = 3,
+`bare-metal-low-signals` = 3, `bare-metal-gpu` = 4, `4-nic` = 3, `8-nic` = 4,
+`16-gpu` = 10, `24-block-devices` = 14, `12-extra-filesystems` = 4,
+`large-cpu-ram` = 4. Every machine writes at least the 2-row baseline
+(`host.system` + `host.io`); additional rows are `ceil(count / entitiesPerPage)`
+per presence-gated family actually populated on that shape (e.g. `16-gpu`: 2
+baseline + `ceil(16/2)` = 8 GPU rows = 10 total).
+
+#### Ingest write path
+
+The **only** write path is the authenticated `POST /api/daemon/v1/metrics` HTTP
+route (`api-routes.ts`), handled on the normal Worker isolate (Analytics Engine)
+/ Deno process (DuckDB) — **never** waking the Durable Object. Pipeline:
+`validateMetricsSampleV4` (`validation-v4.ts`) →
+`resolveEffectiveMetricsCapabilityPlan` (`server-metadata.ts`) →
+`truncateSampleToCapabilityPlanV4` (`capability-plan.ts`) → fire-and-forget
+`ServerMetricsStoreV4.writeSample(sample, slotMapping)` via
+`getServerMetricsStoreV4(c)`, where `slotMapping` is the caller-resolved
+`(topology generation) -> SlotMapping`
+(`client/servers/topology-slot-mapping.ts`), computed once by the ingest route
+(it already does that work for capability planning) and threaded straight into
+the store — never re-derived by the store itself. WebSocket
+`{ type: "metrics" }` frames are **not** accepted — ingestion is HTTP-only.
+
+Store selection: `resolveServerMetricsStoreV4` (`store-selection.ts` /
+`store-selection-workers.ts`) — always on, no enable/disable gate; a backend
+that cannot be constructed falls back to `UnavailableServerMetricsStoreV4`
+(reads reject with `metrics_backend_unavailable`, writes stay silent no-ops),
+and a genuinely unconfigured Workers binding falls back to
+`DisabledServerMetricsStoreV4` (`available: false`, never a 503).
 
 #### Server metrics (Workers Analytics Engine)
 
-The **primary** write path is the authenticated `POST /api/daemon/v1/metrics` HTTP route handled on the normal Worker isolate (Analytics Engine) / Deno process (DuckDB) — `validateHostMetricsSample` → fire-and-forget `ServerMetricsStore.writeHostSample` via `getServerMetricsStore(c)`, **never** waking the Durable Object. Metrics is **disposable / statistical / may be sampled** — queries must account for `double20 * _sample_interval` (AE) / `interval_seconds` (DuckDB). Wiring: `SERVER_METRICS` binding → `CloudflareAnalyticsEngineServerMetricsStore` (`src/daemon/metrics/backends/cloudflare/`). Deno uses DuckDB + Parquet (`DuckDbParquetServerMetricsStore`, `src/daemon/metrics/backends/duckdb/`). Store selection: `resolveServerMetricsStore` (always on — no enable/disable gate; a backend that cannot be constructed falls back to a temporary no-op store). WebSocket `{ type: "metrics" }` frames are **no longer accepted** — ingestion is HTTP-only via `POST /api/daemon/v1/metrics`.
+Wiring: `SERVER_METRICS_V4` binding →
+`CloudflareAnalyticsEngineServerMetricsStoreV4`
+(`src/daemon/metrics/backends/cloudflare/store-v4.ts`, `field-map-v4.ts`,
+`sql-api-v4.ts`). Deno uses DuckDB + Parquet (`DuckDbParquetServerMetricsStore`,
+below).
 
-**Four-part conditional layout:** one AE data point only holds 20 doubles, so each v3 host sample (68 metrics) is written as **2 to 4** data points — always `blob2 = "core"` and `blob2 = "extended"`, plus `blob2 = "sensors"` and/or `blob2 = "traffic"` only when the daemon declared them in `sample.parts` (hardware sensors detected / traffic sidecars running). Each part holds at most 19 metric values (`CORE_METRIC_KEYS` / `EXTENDED_METRIC_KEYS` / `SENSOR_METRIC_KEYS` / `TRAFFIC_METRIC_KEYS` in `field-map.ts`, derived from `HOST_METRICS_METRIC_DESCRIPTORS[key].part` in `metric-descriptors.ts` — never hand-maintained), with `double20 = intervalSeconds` reserved on every part. Cost: 2-4 writes/sample ≈ 2,880-5,760 writes/day/server at the 60 s baseline — well under Cloudflare's 250-datapoints-per-invocation limit.
+| Binding / config | Value                                                                                                                                                                                                                                                                                                       |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Wrangler binding | `SERVER_METRICS_V4` (`analytics_engine_datasets`)                                                                                                                                                                                                                                                           |
+| Dataset name     | `turbopanel_server_metrics_v4` (`AE_V4_DATASET_NAME`, `field-map-v4.ts`) — distinct from the retired v3 `turbopanel_server_host_metrics` dataset, which is never queried again (AE datasets can't be deleted, so the name is retired rather than reused, and its binding was removed from `wrangler.jsonc`) |
+| Write API        | `writeDataPoint({ indexes, doubles, blobs })` — sync, non-blocking; one call per family row actually emitted (2 baseline + 0..N presence-gated), full 20/20 doubles/blobs shape on every row                                                                                                                |
+| SQL API          | `POST .../analytics_engine/sql` with `Authorization: Bearer <token>`; response envelope rows under `result.data`                                                                                                                                                                                            |
+| Max range        | Default `AE_DEFAULT_MAX_RANGE_SECONDS` = 90 days; override via `TURBOPANEL_SERVER_METRICS_AE_MAX_RANGE_SECONDS`                                                                                                                                                                                             |
 
-| Binding / config | Value |
-|---|---|
-| Wrangler binding | `SERVER_METRICS` (`analytics_engine_datasets`) |
-| Dataset name | `turbopanel_server_host_metrics` (reused across top-level / `testing` / `live` — AE datasets are account-scoped and auto-created; docs do not require unique names per env). Brand-new name for the four-part layout — the retired single-datapoint dataset `turbopanel_server_metrics` and the retired two-part dataset `turbopanel_server_telemetry` are never queried (AE datasets can't be deleted, so a positional-layout change always gets a new name) |
-| Write API | `writeDataPoint({ indexes, doubles, blobs })` — sync, non-blocking (do not `await`); host samples call it once per declared part with at least one resolved metric (2-4 calls, canonical `core`/`extended`/`sensors`/`traffic` order) — `core`/`extended` always write even if entirely null, but a declared `sensors`/`traffic` part whose every metric sanitized to `null` is skipped rather than writing an empty row (`buildPartDataPoints` in `field-map.ts`) |
-| SQL API | `POST https://api.cloudflare.com/client/v4/accounts/{account_id}/analytics_engine/sql` with `Authorization: Bearer <token>` and raw SQL body; response is the standard Cloudflare v4 envelope — rows under `result.data` (never top-level `data`) |
-| Query filters | Host reads always filter `blob1 = "metrics"`, `blob3` to supported schema version(s) from the field map / wire contract. Series/fleet-snapshot reads first recombine the 2-4 physical part rows into one **logical sample per `(index1, timestamp)`** in a subquery (part-scoped `blob2` aggregates; logical rows without a core part are dropped) before bucket/server aggregation, so `sample_count` / `latest_at` / metric aggregates all describe the same logical rows. The summary read (`buildHostSummarySql`) skips that subquery but keeps the same invariant directly: `sample_count` sums only the `core` part's `_sample_interval`, and `latest_at` is a `max(if(blob2 = "core", …))` scoped to the same rows — never a raw `max(timestamp)` over every part — so a landed `sensors`/`traffic` orphan write can never advance `latest_at` past a `core` row `sample_count` doesn't count. All ranges are canonical half-open `[from, to)` (exclusive right edge, same as DuckDB) |
-| Max range | Default `AE_DEFAULT_MAX_RANGE_SECONDS` = 90 days (documented AE retention); override via `CloudflareAnalyticsSqlConfig.maxRangeSeconds` / `TURBOPANEL_SERVER_METRICS_AE_MAX_RANGE_SECONDS` |
-| Env (vars) | `CLOUDFLARE_ACCOUNT_ID`; optional `TURBOPANEL_SERVER_METRICS_AE_MAX_RANGE_SECONDS` |
-| Env (secret) | `TURBOPANEL_ANALYTICS_ENGINE_API_TOKEN` (Account Analytics Read) |
+**Envelope (every row kind: `"metrics"` / `"event"` / `"status"`)** —
+`AE_V4_BLOB_*_INDEX` constants in `field-map-v4.ts`:
 
-**Metrics contract** (`HOST_METRIC_KEYS` in `src/daemon/metrics/contract.ts` — schema v3, 68 metrics; human docs: **`../website/docs/architecture/server-metrics.mdx`**): a **named logical allowlist** for the wire/API/query surface. Positional storage (Cloudflare doubles/blobs, DuckDB columns) is defined per-backend in backend-owned field-map/schema files — never derived from this list's order.
+| Slot           | Content                                                                                                                                                                                                                            |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `index1`       | authenticated `serverId` UUID only                                                                                                                                                                                                 |
+| `blob1`        | row-kind discriminator: `"metrics"` / `"event"` / `"status"`                                                                                                                                                                       |
+| `blob2`        | `"metrics"` rows: the `HostedFamilyV4`; `"event"` rows: `MetricEventKindV4`; empty on `"status"` rows                                                                                                                              |
+| `blob3`        | schema version (stringified `4`)                                                                                                                                                                                                   |
+| `blob4`        | collection mode (`"baseline"` / `"live"`); empty on `"status"` rows                                                                                                                                                                |
+| `blob5`        | sample/event timestamp; empty on `"status"` rows (AE stamps its own ingestion timestamp there)                                                                                                                                     |
+| `blob6`        | sample sequence (stringified integer); empty on `"status"` rows                                                                                                                                                                    |
+| `blob7`        | `metadata.topologyGeneration` (stringified integer); empty on `"status"` rows — v4's replacement for v3's `hardwareProfileGeneration`                                                                                              |
+| `blob8`        | reserved for a future capability-plan-generation hash (always `""` today)                                                                                                                                                          |
+| `blob9`        | page index within a paged per-entity family (`"0"` for unpaged rows) — **backend-private**, never referenced outside `backends/cloudflare/`                                                                                        |
+| `blob10`       | family-conditional: `sourceId` (`managed.*`), comma-joined per-page entity ids (`gpu`/`network`/`filesystem`/`block`/`hardware.physical`), `event.source` (`"event"` rows), empty on `host.system`/`host.io` — **backend-private** |
+| `blob11`–`13`  | `"event"` rows only: `entityId`, JSON `payload`, `eventId`                                                                                                                                                                         |
+| `blob14`–`16`  | reserved empty                                                                                                                                                                                                                     |
+| `blob17`       | `"status"` rows: transition reason; `"event"` rows: severity; empty on `"metrics"` rows                                                                                                                                            |
+| `blob18`–`20`  | reserved empty                                                                                                                                                                                                                     |
+| `double1`–`19` | `"metrics"` rows: the family's field values in field-map-declared order (test-pinned against `metric-descriptors-v4.ts`); `"status"` rows: `double1` = connected (1/0)                                                             |
+| `double20`     | `"metrics"`/`"event"` rows: `intervalSeconds` (the weighting term for aggregation)                                                                                                                                                 |
 
-**Backend-private physical layout** (stable non-metric slot invariants below; **metric-value slot assignment is backend-private** — which `doubleN` holds which v3 metric is defined solely by `src/daemon/metrics/backends/cloudflare/field-map.ts` for AE. Never derive physical positions from `HOST_METRIC_KEYS` order or from this document — the v3 allowlist is logical-only and carries no ordering contract):
+The paged-entity "page identity" symbols (`AE_V4_BLOB_PAGE_INDEX`,
+`AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX`, `entityIdInPageIdentityPredicateV4`,
+`splitPageIdentityV4`) are backend-private per `field-map-v4.ts` and
+`sql-api-v4.ts`'s own doc comments — never inline positional literals or
+reference these symbols outside `backends/cloudflare/`;
+`scripts/check-v4-boundaries.mjs` enforces this at CI (see below).
 
-| Slot | Content |
-|---|---|
-| `indexes[0]` / `index1` | Authenticated `serverId` UUID only — never org/account/hostname/composite/metric/timestamp |
-| `double1`..`double19` | metrics rows: the part's metric values (≤ 19) in that part's key-array order (backend-private); unused trailing slots before `double20` are sentinel-filled, never left as array holes |
-| `double20` | metrics rows (every part): the sample's `intervalSeconds` (`AE_DOUBLE_INTERVAL_INDEX`) — the weighting term for `weighted-average` / `last` / `max` aggregates |
-| `blob1` | event type discriminator — `"metrics"` (host sample part) or `"status"` (connection-status transition; see below) |
-| `blob2` | metrics rows: part discriminator `"core"` / `"extended"` / `"sensors"` / `"traffic"` (empty on status rows) |
-| `blob3` | schema version (string, both event types) |
-| `blob4` | collectionMode (`"baseline"` / `"live"`) |
-| `blob5` | daemon sample timestamp (wire `at`, ISO string) |
-| `blob6` | daemon sample sequence (stringified integer) |
-| `blob7` | hardware profile generation (stringified integer; sensor/NIC layout epoch) |
-| `blob8` | `traffic`-part rows only: comma-joined contributing traffic sources (e.g. `"caddy,proxysql"`); empty on every other part |
-| `blob9`..`blob16` | reserved empty strings on every event type — identities (daemon version, OS/arch/kernel, sensor/interface selections) now live in Postgres and project onto the `server` row instead |
-| `blob17` | status rows only: transition reason (empty on metrics rows) |
-| `blob18`..`blob20` | reserved empty strings on every event type |
+**Identity-addressed slotting:** when a `SlotMapping` is available (resolved
+from the sample's `metadata.topologyGeneration` via `topology-slot-mapping.ts`'s
+`computeSlotMapping`), `host.io`'s otherwise- unused `double12`..`double17`
+embed the primary 1-2 NICs (`slotMapping.normalNicSlot1`/`normalNicSlot2`)
+directly — so the common 1-NIC/2-NIC host never writes a `network` page at all —
+and TurboFabric mesh devices (`slotMapping.fabricDeviceIds`) never page as
+`network` rows either. `gpu`/`network`/`filesystem`/`block` pages order entities
+by the matching `*PageOrder` list (new-since-recorded-generation entities append
+in sample order). No recorded generation yet (first sample, resync pending)
+degrades gracefully to pre-topology positional packing — never a dropped sample.
 
-**Missing metrics:** AE doubles have no null. Missing values are stored as `AE_MISSING_METRIC_SENTINEL` (`-1e308`) — never coerced to `0`. All host metrics are ≥ 0, so the sentinel cannot collide. Query aggregates exclude it via `if(doubleN = sentinel, 0.0, …)` around the interval-and-sampling-weighted average, scoped to the part that owns the metric: `SUM(value * double20 * _sample_interval) / SUM(double20 * _sample_interval)` with rows of other parts (and sentinel rows) contributing `0.0` to both sides (`weightedAvgExpressionForMetric` in `sql-api.ts`). `sum`-aggregated metrics (monotonic traffic counters — `caddyRequestsTotal`, etc.) use a different weighting: they're daemon-computed per-interval deltas, already a total for their own collection interval, so `sumExpressionForMetric` weights only by AE's own `_sample_interval` row-sampling correction and **never** by `intervalSeconds` (double20) — doing so would double-count the interval a delta already spans. A bucket where every logical sample lacks the metric's part still reports missing, never a fabricated `0`: the sum expression is scaled by `MAX(present) / MAX(present)`, which collapses to `0.0 / 0.0` (IEEE `NaN`, parsed as `null` by `Number.isFinite`) exactly when no row ever carried that part — the same 0-numerator/0-denominator idiom `weightedAvgExpressionForMetric` already relies on. On the **AE SQL** path, compare against `-pow(10, 308)` (`aeMissingMetricSentinelSql()`) — AE docs do not list scientific-notation literals or `NULLIF`, and embedding `-1e308` / `NULLIF` fails chart queries with 503. Local vitest does not bind AE (unsupported in the local runner); unit tests use fakes only.
+**Missing metrics:** same `-1e308` sentinel idiom as v3
+(`AE_V4_MISSING_METRIC_SENTINEL`), never coerced to `0`; all host metrics are ≥
+0 so no collision. Query aggregates exclude it the same way v3's did
+(`weightedAvgExpressionForMetric`/`sumExpressionForMetric` analogues in
+`sql-api-v4.ts`).
+
+#### Metrics events (`blob1 = "event"`)
+
+A closed catalog of discrete state-change/fault signals distinct from the
+continuous numeric families — `METRIC_EVENT_KINDS_V4` in `contract-v4.ts` (OOM
+kills, hung tasks, conntrack exhaustion, filesystem state changes,
+SMART/NVMe/RAID faults, NIC link state, TurboFabric mesh state, fan/thermal/
+PSU/voltage/ECC faults, GPU faults, clock-sync state, topology/boot generation
+bumps). `isHardwareHealthEventKindV4` classifies each kind as a
+physical-hardware-health signal or not (`HARDWARE_HEALTH_EVENT_KIND_V4`, a
+`Record` so an unclassified new kind fails to compile rather than silently
+defaulting); `hardwareHealthEventsEnabled` on the capability plan gates only the
+hardware-health half — OS/kernel/filesystem/fabric/clock/generation events are
+always allowed regardless of plan. No v3 equivalent — v3 has no discrete event
+stream. Exposed via `GET /api/client/v1/servers/:id/metrics/events`
+(`ServerMetricsStoreV4.queryMetricEvents`, optional-on-interface —
+`available: false`, never a 503, when the resolved store doesn't implement it).
 
 #### Status event stream (`blob1 = "status"`)
 
-Every genuine `connected` flip on the `server` row (never a heartbeat/identity/daemonBuild-only touch) also fires a fire-and-forget **status event** — on AE into the same shared dataset as host samples (one row per transition, discriminated from host rows by `blob1`); on Deno/DuckDB into its own typed `server_status_events` table (never shared with host samples). Source: `emitServerStatusEvent` (`src/daemon/metrics/status-events.ts`), called from `projectServerDaemon` (`src/daemon/cell/postgres-projection.ts`) on every `existingStatus.connected !== nextStatus.connected` write, and registered per-runtime (request isolate, DO isolate, cron-only offline-sweep isolate, Deno process) via `setServerStatusEventSink` / `getServerStatusEventSink` — there is no shared request context across those four runtimes.
+Every genuine `connected` flip on the `server` row also fires a fire-and-forget
+status event — on AE into the v4 dataset (discriminated by `blob1`); on
+Deno/DuckDB into its own typed `server_status_events` table. Source:
+`emitServerStatusEvent` (`status-events.ts`), called from `projectServerDaemon`
+(`src/daemon/cell/postgres-projection.ts`), registered per-runtime via
+`setServerStatusEventSink`/`getServerStatusEventSink` (no shared request context
+across the request isolate, DO isolate, cron-only offline-sweep isolate, and
+Deno process).
 
-**Slot layout for `blob1 = "status"` rows** (`backends/cloudflare/field-map.ts`):
+`queryStatusHistory` is **optional-on-interface** on `ServerMetricsStoreV4` —
+`CloudflareAnalyticsEngineServerMetricsStoreV4` is the one store that implements
+it (via `queryStatusHistoryViaSqlApiV4`); `DisabledServerMetricsStoreV4` does
+not. `client/servers/metrics-routes.ts`'s `/connection` route checks
+`storeV4?.queryStatusHistory` and falls back to an inline `available: false`
+result — **not** to the v3 store — when absent. Resolves `{ from, to }` into
+prior-state + in-range-transitions reads, fed through the shared backend-neutral
+`computeStatusUptime` (`query/uptime.ts`) for
+`uptimeSeconds`/`downtimeSeconds`/`unknownSeconds`/`uptimePercent` parity across
+backends. Exposed via `GET /api/client/v1/servers/:id/metrics/connection`.
 
-| Slot | Content |
-|---|---|
-| `blob1` | `AE_STATUS_EVENT_TYPE` = `"status"` |
-| `blob3` | schema version (string) — same slot as metrics rows |
-| `blob17` | `AE_BLOB_STATUS_REASON_INDEX` — `ServerStatusTransitionReason`: `"connect"` \| `"disconnect"` \| `"sweep_stale"` \| `"self_heal"` (closed enum, `src/daemon/metrics/types.ts`) |
-| `double1` | `AE_DOUBLE_STATUS_CONNECTED_INDEX` — `1` (connected) or `0` (disconnected) |
-| all other `double`/`blob` slots | `AE_MISSING_METRIC_SENTINEL` / empty string — a status row carries no host metrics and no part discriminator (`blob2` stays empty) |
-
-AE stamps its own ingestion `timestamp` for status rows (`event.at` is not sent); DuckDB stores `event.at` directly as `at`, batched onto the same pending buffer/flush timer as host samples but inserted into `server_status_events` (durability window is ≤ the batch max-age unless a query force-flushes; status history is disposable like host metrics).
-
-**Query path (AE + DuckDB parity):** `queryStatusHistory` (`ServerMetricsStore`) resolves `{ from, to }` into two reads — prior state (last known `connected` strictly before `from` — `buildStatusPriorStateSql` on AE, an `ORDER BY at DESC LIMIT 1` over `server_status_events` on DuckDB) and in-range transitions (`buildStatusEventsSql` on AE; capped at `MAX_STATUS_EVENTS` on both, `resolveTruncatedStatusEvents` marks `truncated: true` + a `knownUntilMs` when the cap is hit). Both backends hand their rows to the shared, backend-neutral `computeStatusUptime` (`src/daemon/metrics/query/uptime.ts`) so AE and DuckDB produce identical `uptimeSeconds` / `downtimeSeconds` / `unknownSeconds` / `uptimePercent` for the same range — the same parity-seam pattern as `finalizeHostSeriesResult` / `computeSeriesGapCount` for host series. A `null` prior state (nothing before `from`) or the truncated suffix after `knownUntilMs` accrues to `unknownSeconds`, never uptime/downtime. Exposed via `GET /api/client/v1/servers/:id/metrics/connection` (`src/client/servers/metrics-routes.ts`), cached the same way as `/metrics/series` (see below).
-
-**History-only — never authoritative for liveness.** This event stream (and everything derived from it: uptime/downtime charts, the `/metrics/connection` endpoint) exists purely for historical reporting. It is asynchronous, best-effort, sampled/disposable like all server metrics, and **must never be read to determine whether a server is currently online**. The Postgres `server.is_connected` / `server.status_changed_at` columns (via `src/daemon/cell/server-status.ts`) are the sole source of truth for current liveness — see `src/lib/db/AGENTS.md` (`server` table) and `src/daemon/cell/AGENTS.md` (Postgres status read model). Do not add a code path that gates any online/offline decision on AE/DuckDB status history.
+**History-only — never authoritative for liveness.** This stream (and everything
+derived from it) is asynchronous, best-effort, sampled/disposable metrics
+history and **must never** be read to determine whether a server is currently
+online. Postgres `server.is_connected`/`server.status_changed_at`
+(`src/daemon/cell/server-status.ts`) is the sole source of truth for current
+liveness — see `src/lib/db/AGENTS.md` and `src/daemon/cell/AGENTS.md`. Do not
+add a code path that gates any online/offline decision on AE/DuckDB status
+history.
 
 #### Server metrics (DuckDB + Parquet — self-hosted Deno)
 
-Deno path: `DuckDbParquetServerMetricsStore` (`src/daemon/metrics/backends/duckdb/`) over the embedded `@duckdb/node-api` engine — no external service, no credentials. Everything lives under the metrics state root (`resolveMetricsDir()` — `TURBOPANEL_METRICS_DIR`, default `<stateDir>/metrics`): `metrics.duckdb` (hot database), `parquet/` (sealed daily partitions), `tmp/` (DuckDB spill + in-flight exports), `schema-version` (sidecar marker, see below). Writes are **batched in-process** (default max **10** rows / **5 s** age — loaded instances flush on row count, sparse traffic flushes promptly on age) into one transaction; queries force-flush pending batches, and `deno-server.ts` closes the store on SIGINT/SIGTERM so pending accepted rows persist across a graceful shutdown. Schema DDL is idempotent (`CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`, applied once per open in `database.ts`).
+`DuckDbParquetServerMetricsStore` (`backends/duckdb/`) over the embedded
+`@duckdb/node-api` engine — no external service, no credentials. State root:
+`resolveMetricsDir()` (`TURBOPANEL_METRICS_DIR`, default `<stateDir>/metrics`)
+holding `metrics.duckdb`, `parquet/`, `tmp/`, `schema-version`. Writes are
+batched in-process (default 10 rows / 5 s age) into one transaction; queries
+force-flush pending batches.
 
-**Schema-version marker + wipe-on-stale** (`database.ts`, `DUCKDB_SCHEMA_MARKER_VERSION` in `schema.ts`): DuckDB has no in-place migration path for a breaking layout change (e.g. a new `NOT NULL` column), so `openDuckDb` compares the marker version against a sidecar `<metricsDir>/schema-version` file on every open. A missing database is always a fresh install (never wiped); an existing database with a missing or mismatched marker is wiped entirely — `metrics.duckdb` (+ `.wal`) and the whole `parquet/` tree together, since a surviving old partition would union back in with the new columns NULL-filled — then rebuilt from scratch. The marker is written only after a fully successful open, so a crash mid-open retries the wipe on the next boot instead of trusting a half-built store.
+**One real typed table per entity family — no positional layout, no sentinel,
+arbitrary cardinality** (`schema.ts`, `DUCKDB_SCHEMA_MARKER_VERSION` currently
+`6`):
 
-**One real typed table — no positional layout, no sentinel** (`schema.ts` is the DuckDB backend's own private field map, independent of `backends/cloudflare/field-map.ts`; deliberately one wide table per `MetricPart` rather than a table-per-part split — every metric column is already independently nullable, so `parts` records which parts were declared without needing a join):
+| Table                            | Family                                      |
+| -------------------------------- | ------------------------------------------- |
+| `server_host_samples`            | `host.system` + `host.io` (single wide row) |
+| `server_network_samples`         | `network`                                   |
+| `server_filesystem_samples`      | `filesystem`                                |
+| `server_block_samples`           | `block`                                     |
+| `server_gpu_samples`             | `gpu`                                       |
+| `server_hardware_signal_samples` | `hardware.physical`                         |
+| `server_ingress_samples`         | `managed.ingress`                           |
+| `server_database_proxy_samples`  | `managed.database_proxy`                    |
+| `server_cpu_hotspot_samples`     | `cpu.detail` (hotspot rows)                 |
+| `server_cpu_core_samples`        | `cpu.core.live`                             |
+| `server_memory_detail_samples`   | `memory.detail`                             |
+| `server_metric_events`           | metrics events (`MetricEventV4`)            |
+| `server_status_events`           | connection-status transitions               |
 
-| Table | Columns |
-|---|---|
-| `server_metric_samples` | `server_id UUID`, `sampled_at TIMESTAMP`, `received_at TIMESTAMP`, `interval_seconds SMALLINT`, `collection_mode VARCHAR`, `hardware_profile_generation SMALLINT` (nullable), `parts VARCHAR NOT NULL` (comma-joined declared `MetricPart`s, e.g. `"core,extended,sensors"` — lets a query tell "part never declared" apart from "part declared, every value null"), plus one nullable `DOUBLE` per `HOST_METRIC_KEY` named via `metricColumnName(key)` (snake_case, e.g. `cpu_user_percent`) |
-| `server_status_events` | `server_id UUID`, `at TIMESTAMP`, `connected BOOLEAN`, `reason VARCHAR` |
+Every metric column is real, independently-nullable `DOUBLE` (or typed identity
+column) — missing is a real SQL `NULL`, never a sentinel or a part-membership
+flag. Entity tables carry arbitrary cardinality per sample (one row per reported
+entity), unlike v3's fixed-width part tables.
 
-Missing metrics are **real SQL `NULL`s** — never `AE_MISSING_METRIC_SENTINEL`, never coerced `0`. Bucket aggregation is **per-metric**, driven by the active `HOST_METRICS_METRIC_DESCRIPTORS[key].aggregation` policy (`src/daemon/metrics/metric-descriptors.ts`; same policy map on both backends): `weighted-average` metrics use an `interval_seconds`-weighted average over the present rows (`SUM(value * interval_seconds) / SUM(interval_seconds) FILTER (WHERE value IS NOT NULL)`), `last` metrics (slow-moving storage capacities) keep the latest observed value in the bucket, `max` metrics (`uptimeSeconds`) take the bucket maximum, and `sum` metrics (monotonic traffic counters — `caddyRequestsTotal`, etc.) plain-total the present rows (`SUM(value)`, never weighted by `interval_seconds` — each stored value is already a per-interval delta) via `sumValueSql` in `store.ts`. `expectedSampleCount` is **interval-aware** (`defaultExpectedSamplesPerBucket(resolutionSeconds, avgIntervalSeconds)` in `query/series-response.ts`): buckets with data divide the bucket width by the bucket's observed average collection interval (so fast-cadence live sessions do not read as over-full), and empty buckets fall back to the 60 s baseline interval. Query parameters are bound as DuckDB prepared parameters (UUIDs included) — never string-quoted interpolation.
+**Schema-version marker + wipe-on-stale** (`database.ts`): DuckDB has no
+in-place migration path for a breaking layout change, so `openDuckDb` compares
+`DUCKDB_SCHEMA_MARKER_VERSION` against a sidecar `schema-version` file on every
+open. A missing database is a fresh install (never wiped); an existing database
+with a missing/mismatched marker wipes `metrics.duckdb` (+ `.wal`) and the whole
+`parquet/` tree together, then rebuilds from scratch. The marker is written only
+after a fully successful open.
 
-**Daily Parquet archive** (`parquet.ts`; timer armed once at boot by `deno-server.ts` via `startDailyArchiveTimer()`, drivable in tests via `runDailyArchiveOnce()`): each completed UTC day is sealed out of the hot table into `parquet/server-metrics/year=YYYY/month=MM/day=DD/metrics.parquet` — export to `tmp/`, validate the produced file's row count by re-reading it, atomic rename into the partition tree, and only then delete the hot rows. Interrupted exports (`tmp/*.parquet`) are swept on the next tick and never mistaken for sealed partitions. Reads union the hot table with the partitions overlapping the range (`read_parquet([...], union_by_name := true)`). Retention (`TURBOPANEL_SERVER_METRICS_RETENTION_DAYS`, default **90**) prunes expired partitions plus any hot/status rows past the cutoff (defense-in-depth for missed archive days).
+**Daily Parquet archive**, partitioned per family
+(`parquet/<family-table>/year=YYYY/month=MM/day=DD/*.parquet`; timer armed by
+`deno-server.ts`'s `startDailyArchiveTimer()`): each completed UTC day is sealed
+out of the hot tables — export to `tmp/`, validate row count by re-reading,
+atomic rename, then delete hot rows. Interrupted exports (`tmp/*.parquet`) are
+swept on the next tick. Reads union the hot tables with overlapping partitions.
+Retention (`TURBOPANEL_SERVER_METRICS_RETENTION_DAYS`, default 90) prunes
+expired partitions plus any hot rows past the cutoff.
 
-| Env | Purpose |
-|---|---|
-| `TURBOPANEL_METRICS_DIR` | Metrics state root override (see `resolveMetricsDir`) |
-| `TURBOPANEL_SERVER_METRICS_RETENTION_DAYS` | Retention days (default **90**) |
-| `TURBOPANEL_SERVER_METRICS_DUCKDB_THREADS` | DuckDB `SET threads` cap (default **2**) |
-| `TURBOPANEL_SERVER_METRICS_DUCKDB_MEMORY_LIMIT` | DuckDB `SET memory_limit` in MiB (default **128**) |
-
-**Query-time bucketing:** there are no rollup tables — resolution is chosen at query time (mirrors the AE SQL API). All DuckDB reads honor the canonical half-open `[from, to)` range — upper bounds are exclusive (`sampled_at < to`, `"at" < to`, and partition scans use `dayStartMs < toMs`) so adjacent ranges never double-count the right edge (matches `computeSeriesGapCount` / cache-range canonicalization).
-
-**Late arrivals / duplicates:** accept all inserts. A late sample for an already sealed day is merged on the next archive tick — `sealDayToParquet` rebuilds the partition from the union of the existing sealed file and the day's hot rows (idempotent, one file per day, never drops archived rows). Metrics is **disposable / statistical / may be sampled** — queries must account for `_sample_interval` (AE) or `interval_seconds` weights (DuckDB); intentional simplification.
-
-**Fail clearly vs unconfigured:** DuckDB/filesystem failures on reads throw (chart routes return **503** `metrics_backend_unavailable`). A store that cannot even be constructed (metrics directory not creatable) falls back to a temporary no-op store with a warn-once. This differs from the AE store's `available: false` soft path when SQL credentials are missing. Writes stay fire-and-forget at the ingest boundary.
-
-**Cross-backend parity:** `src/daemon/metrics/backends/cloudflare/write-path-parity.test.ts` pins the four-part write invariants — `CORE_METRIC_KEYS ∪ EXTENDED_METRIC_KEYS ∪ SENSOR_METRIC_KEYS ∪ TRAFFIC_METRIC_KEYS === HOST_METRIC_KEYS` (no overlap/gaps, each part ≤ 19 keys), `double20` reserved for `intervalSeconds` on every part, and 2-4 `writeDataPoint` calls per host sample — one per declared part with at least one resolved metric, always `core` + `extended` even when entirely null, in canonical part order, full 20/20 shapes (see "Missing metrics" above for the `sum`-aggregation `_sample_interval`-only weighting policy this pins alongside the write shape). The same file also pins that a declared but entirely-null `sensors`/`traffic` part writes no row at all — the row-budget invariant `buildPartDataPoints` enforces. Shape parity across backends is held by the shared backend-neutral seams (`computeStatusUptime`, `finalizeHostSeriesResult` / `computeSeriesGapCount`) both stores flow through.
+**Cross-backend regression net:** `representative-machines.ts` (16 machine
+shapes) feeds `representative-row-counts.test.ts` (exact AE row count + family
+order per shape), `cross-backend-parity.test.ts` (AE vs. DuckDB agree on the
+same logical sample), `topology-generation-guard.test.ts` (re-interpreting a
+sample under a stale topology generation never corrupts identity-addressed
+slots), `orphan-row-semantics.test.ts`, and `counter-reset-end-to-end.test.ts`
+(storage/query never fabricates a value in place of a daemon-emitted `null`
+after a monotonic counter reset — daemon half of the battery lives in
+`turbopaneld/src/metrics/collector/baseline-reset-battery.test.ts`). **New
+metrics `*.test.ts` files must be claimed** in `scripts/test-coverage.sh` (Deno
+`@std/assert` suites) or `vitest.config.ts` `test.include` (`validation-v4.test.ts`
+is the Workers-pool exception) — then `pnpm check:test-inventory`. Unclaimed
+suites fail `test:hook` / CI and never reach Sonar LCOV. Root `AGENTS.md` →
+**Adding tests (inventory)**. The
+AE/v4-boundary guard (`scripts/check-v4-boundaries.mjs` here, mirrored into
+`turbopaneld/scripts/check-metrics-legacy.ts`) enforces: (1) AE positional
+tokens (`doubleN`/`blobN` literals, the `-1e308` sentinel) stay confined to
+`backends/cloudflare/`; (2) v3-only symbols (`MetricPart`, `HOST_METRIC_KEYS`,
+the v3 `parts` field) never appear as real code anywhere in the metrics tree or
+in the metrics-contract-facing surfaces outside it (`src/daemon/openapi/`,
+`src/client/servers/metrics-routes*.ts`, `server-topology-records.ts`,
+`topology-*.ts`) — those surfaces must stay backend-agnostic; (3)
+backend-private page-identifier symbols never leak outside
+`backends/cloudflare/`.
 
 #### Server metrics — query API & caching
 
-Endpoints (`src/client/servers/metrics-routes.ts`):
+Endpoints (`src/client/servers/metrics-routes.ts`), all v4-only:
 
-| Method | Path | Auth |
-|---|---|---|
-| `GET` | `/api/client/v1/servers/:id/metrics/series` | session + `assertCanReadOr403('server', id)` |
-| `GET` | `/api/client/v1/servers/:id/metrics/summary` | session + `assertCanReadOr403('server', id)` |
-| `GET` | `/api/client/v1/servers/:id/metrics/connection` | session + `assertCanReadOr403('server', id)`; status-event history (uptime/downtime) — see "Status event stream" above |
-| `GET` | `/api/client/v1/servers/metrics/latest` | session + `listVisible('server')`; one fleet snapshot (CPU / memory / swap % over a fixed ~10 min lookback) for the org servers overview — **never** N per-server chart calls |
+| Method | Path                                            | Notes                                                                                       |
+| ------ | ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `GET`  | `/api/client/v1/servers/:id/metrics/series`     | per-entity selectors (`parseSeriesMetricSelectorsV4`) grouped by family                     |
+| `GET`  | `/api/client/v1/servers/:id/metrics/summary`    | host summary + `cpuLimits`/`temperatureUnit` envelope                                       |
+| `GET`  | `/api/client/v1/servers/:id/metrics/connection` | status-event history (uptime/downtime)                                                      |
+| `GET`  | `/api/client/v1/servers/:id/metrics/events`     | v4-only metrics-event history; `available: false` (never 503) when unsupported by the store |
+| `GET`  | `/api/client/v1/servers/metrics/latest`         | one fleet snapshot per org server — never N per-server chart calls                          |
 
-Never authorize by bare UUID possession — session middleware + resource read grant required. Fleet latest never accepts client-supplied serverIds (always filters to `listVisible`).
+Never authorize by bare UUID possession — session middleware + resource read
+grant required. Fleet latest never accepts client-supplied serverIds.
 
-**Resolution ladder** (`src/daemon/metrics/query/resolution.ts`): range ≤10 min → 10 s; ≤1 h → 60 s; ≤6 h → 300 s; ≤24 h → 900 s; ≤7 d → 3600 s; ≤30 d → 21600 s; else 43200 s (allowed steps: `10 / 60 / 300 / 900 / 3600 / 21600 / 43200` — `METRICS_RESOLUTION_SECONDS`; a client-requested resolution must be one of these, and the chosen step is clamped upward until the range fits `maxPoints`). **`MAX_METRICS_POINTS` = 1500**; range ≤**90 days**. One combined backend query per `(server, range)` — no per-metric or per-chart queries. Backend-neutral payload includes `gapCount`, `sampleCount`, and `expectedSampleCount` so the UI distinguishes zero values from missing samples. **Coverage grid is half-open `[from, to)` on bucket starts** (`computeSeriesGapCount` / UI `normalizeMetricsGrid`) — inclusive end would always expect the in-progress `to` bucket on live charts (e.g. 1 h @ 60 s → 61 slots) so coverage could almost never hit 100%.
+**Backend-neutral entity-scoped query/cache layer:** `resolveStoreBackendKindV4`
+(`metrics-routes-helpers.ts`) classifies the resolved `ServerMetricsStoreV4`
+instance (`disabled` / `analytics-engine` / `duckdb`) purely by instance type
 
-**Fleet latest snapshot** (`queryFleetHostSnapshot` / `GET …/servers/metrics/latest`): one AE/DuckDB `GROUP BY server_id` over authorized ids with `_sample_interval`-weighted (AE) / `interval_seconds`-weighted (DuckDB) averages for the fleet usage metric set (`cpuUsagePercent` + CPU breakdown + load averages + memory/swap). Used by the UI servers overview totals + usage bars. Cap `MAX_FLEET_SNAPSHOT_SERVERS` = 500.
+- runtime, never by config presence — every route builds its cache key from
+  `backend` so an AE-shaped and a DuckDB-shaped cache entry for the same
+  server/range can never collide. **Chart cache** (`query/cache.ts`): key =
+  `tp:metrics:chart:` + kind + authorized `serverId` + bucket-rounded range +
+  sorted metrics + resolution + backend + `v{schemaVersion}` (callers pass
+  `schemaVersion: 4` explicitly, required) + `tg{topologyGeneration}` when a
+  caller scopes to one topology generation. TTL: live 45 s / historical 300 s.
+  Workers: Cloudflare Cache API; Deno: bounded in-process `Map` (256 entries).
 
-**Chart cache** (`src/daemon/metrics/query/cache.ts`): key = `tp:metrics:chart:` + kind + authorized `serverId` + bucket-rounded range + sorted metrics + resolution + backend + `v{schemaVersion}` (+ `g{hardwareProfileGeneration}` when a caller scopes a request to one generation — omitted otherwise, so it never collides with a full-range entry). TTL: **live 45 s** / **historical 300 s**. Workers: Cloudflare Cache API; Deno: bounded in-process `Map` (256 entries). Authorization is never globally cached — cache keys always include the authorized server id. Separate from the approved-read-models query cache — see `src/query-cache/AGENTS.md`.
+**Resolution ladder** (`query/resolution.ts`): range ≤10 min → 10 s; ≤1 h → 60
+s; ≤6 h → 300 s; ≤24 h → 900 s; ≤7 d → 3600 s; ≤30 d → 21600 s; else 43200 s.
+`MAX_METRICS_POINTS` = 1500; range ≤90 days.
 
-**CPU thermal/power headroom + hardware-profile generation breaks** (`/series` and `/summary` only — never `/servers/metrics/latest`, to preserve its O(1) fleet-read invariant): both single-server routes attach a `cpuLimits: { tdpWatts, tjMaxCelsius, source }` envelope, resolved by `resolveEffectiveCpuThermalLimits` (`src/lib/db/server-metadata.ts`) — a per-server `cpuTdpWattsOverride` / `cpuTjMaxCelsiusOverride` on the hardware profile wins outright per field (`source: "override"`); otherwise both fall back together to `resolveCpuCatalogEntry` (`src/lib/hardware/cpu-catalog.ts`, a hand-curated exact-model + family-regex lookup keyed on the daemon-reported `hardwareProfile.cpuModel` fact — never operator-editable) giving `"catalog-exact"` / `"catalog-family"`; otherwise `"none"`. Both also attach `temperatureUnit` (`resolveTemperatureUnit`, `src/lib/organization-options.ts`). `/series` additionally attaches `sensorsAvailable` (`computeSensorsAvailable`, true when any point in range declared the `"sensors"` part), `generationBreaks` (`computeGenerationBreaks` — point indices where `hardwareProfileGeneration` differs from the previous *known* generation; a `null`/unknown entry is never itself a break), and `hardwareProfileGenerations` (distinct generations observed in range, from `HostSeriesResult`). Route composition lives in `buildCpuLimitsEnvelope` / `buildHostSummaryPayload` (`src/client/servers/metrics-routes-helpers.ts`) — pure functions over already-resolved profile/org-options, no Hono `Context`. Route-derived-only presentation math (CPU busy, memory/swap/storage used, HTTP error rate, HTTP average latency, thermal/power headroom) lives in `src/daemon/metrics/query/derived-metrics.ts` — pure, `null`-propagating, never fed back into `HostSeriesResult`/`FleetHostSnapshotResult` so the backends stay unaware of catalog/override/unit-conversion concerns. This whole layer stops at resolved numbers in the API response — no alarm engine, no threshold-record schema, no notification wiring.
+**MetricsCapabilityPlan enforcement point:** the capability plan is resolved and
+enforced **once**, at ingest (`resolveEffectiveMetricsCapabilityPlan` →
+`truncateSampleToCapabilityPlanV4`, both before the sample ever reaches a store)
+— query routes never re-check capability, they only ever see already-truncated
+data. `MetricsCapabilityPlanV4` fields: baseline/live interval seconds,
+`normalNicSlots`, `turboFabricEnabled`, `extraFilesystemSlots`,
+`detailedBlockDeviceSlots`, `gpuSlots`, `gpuInterconnectEnabled`,
+`physicalHardwareSignalSlots`, `cpuDetailEnabled`, `cpuLiveCoreSlots`,
+`memoryDetailEnabled`, `numaNodeSlots`, `managedIngressEnabled`,
+`databaseProxyMetricsEnabled`, `hardwareHealthEventsEnabled` — deliberately no
+pricing-tier names/literals, only slot counts and toggles. Resolution order:
+platform default → org (`organization.options.metricsCapabilityPlan`) → server
+(`server.options.metricsCapabilityPlan`), mirroring
+`resolveEffectiveCpuThermalLimits`.
 
-UI charts: **`../ui/AGENTS.md`** (Server metrics). Human docs + AE cost model: **`../website/docs/architecture/server-metrics.mdx`**.
+UI charts: **`../ui/AGENTS.md`** (Server metrics). Human docs + AE cost model:
+**`../website/docs/architecture/server-metrics.mdx`**.
+
+## Durable invariants
+
+1. Every sample writes at least the 2-row universal baseline (`host.system` +
+   `host.io`) — never fewer, regardless of capability plan or hardware.
+2. A capability-plan slot count is an _entitlement_; a presence-gated family's
+   row count reflects _emission_ (actual detected hardware), truncated down to
+   (never up to) the entitlement.
+3. Missing metric values are `null` (contract) / SQL `NULL` (DuckDB) / `-1e308`
+   sentinel (AE) — never coerced to `0`, on any backend.
+4. AE positional tokens (`doubleN`/`blobN` literals, `-1e308`) never appear
+   outside `backends/cloudflare/` — always go through `field-map-v4.ts`.
+5. The v4 page-identifier symbols (`AE_V4_BLOB_PAGE_INDEX`,
+   `AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX`, `entityIdInPageIdentityPredicateV4`)
+   never appear outside `backends/cloudflare/`.
+6. v3-only symbols (`MetricPart`, `HOST_METRIC_KEYS`, the v3 `parts` field)
+   never appear as real code anywhere in the metrics tree or in a
+   metrics-contract surface outside it — enforced by `check-v4-boundaries.mjs`.
+   The v3 contract is fully deleted; this guard exists to keep it from creeping
+   back in.
+7. `DuckDbParquetServerMetricsStore` is the single Deno store instance — never
+   two independently constructed instances opening two DuckDB handles on one
+   database file.
+8. `queryStatusHistory` is optional-on-interface on `ServerMetricsStoreV4`; an
+   absent implementation degrades to an inline `available: false` result, never
+   to a v3 store read.
+9. AE/DuckDB status history is never authoritative for current liveness — only
+   Postgres `server.is_connected` is.
+10. `slotMapping` is resolved once by the ingest route and threaded through to
+    the store — stores never re-derive it themselves.
+11. An unresolved topology generation (no recorded `SlotMapping` yet) degrades
+    gracefully to positional packing — never a dropped sample.
+12. `HARDWARE_HEALTH_EVENT_KIND_V4` is a `Record` over every `MetricEventKindV4`
+    — a new event kind that isn't classified fails to compile, never silently
+    defaults either way.
+13. `hardwareHealthEventsEnabled` gates only hardware-health events;
+    OS/kernel/filesystem/fabric/clock/generation events are always allowed.
+14. A backend that fails to construct returns `UnavailableServerMetricsStoreV4`
+    (reads reject, 503) — never silently degrades to the disabled store's
+    `available: false`, which is reserved for a genuinely unconfigured binding.
+15. Cache keys always include the authorized `serverId`, the resolved `backend`,
+    and `schemaVersion` — a v3-shaped and v4-shaped entry for the same
+    server/range can never collide.
+16. `truncateSampleToCapabilityPlanV4` runs once, at ingest, before the sample
+    reaches any store — query routes never re-check capability.
+17. DuckDB missing-column reads are real SQL `NULL`s; bucket aggregation honors
+    each metric's declared aggregation policy (`weighted-average` / `last` /
+    `max` / `sum`) identically on AE and DuckDB.
+18. Both AE and DuckDB honor the canonical half-open `[from, to)` range — upper
+    bounds are exclusive so adjacent ranges never double-count.
+19. A late-arriving sample for an already-sealed Parquet day is merged on the
+    next archive tick, never dropped — `sealDayToParquet` rebuilds from the
+    union of the sealed file and the day's hot rows.
+20. The v3 contract is gone. `app.ts`/`db.ts`/`workers.ts`/`do.ts`/
+    `offline-sweep.ts`/`store-selection*.ts` carry only the v4 store/binding —
+    never reintroduce a `serverMetricsStore` (non-V4) field, a
+    `resolveServerMetricsStore` (non-V4) function, or a `SERVER_METRICS`
+    (non-V4) binding as a shortcut for a "v3-shaped" caller.

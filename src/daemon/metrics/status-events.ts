@@ -11,27 +11,25 @@
  * existing `cachedServerMetricsStore` precedent in `workers.ts`.
  */
 
-import { stripLogInjection } from "../../log-compat.ts";
-import type { ServerMetricsStore, ServerStatusEvent } from "./types.ts";
-import { rateLimitedMetricsLog } from "./validation.ts";
+import { stripLogInjection } from '../../log-compat.ts'
+import type { ServerMetricsStoreV4, ServerStatusEvent } from './types-v4.ts'
+import { rateLimitedMetricsLog } from './validation-v4.ts'
 
-export type ServerStatusEventSink = Pick<ServerMetricsStore, "writeStatusEvent">;
+export type ServerStatusEventSink = Pick<ServerMetricsStoreV4, 'writeStatusEvent'>
 
-let registeredSink: ServerStatusEventSink | null = null;
+let registeredSink: ServerStatusEventSink | null = null
 
-export function setServerStatusEventSink(
-  sink: ServerStatusEventSink | null,
-): void {
-  registeredSink = sink;
+export function setServerStatusEventSink(sink: ServerStatusEventSink | null): void {
+  registeredSink = sink
 }
 
 export function getServerStatusEventSink(): ServerStatusEventSink | null {
-  return registeredSink;
+  return registeredSink
 }
 
 /** Test seam: clear the registered sink between suites. */
 export function resetServerStatusEventSinkForTests(): void {
-  registeredSink = null;
+  registeredSink = null
 }
 
 /**
@@ -41,30 +39,29 @@ export function resetServerStatusEventSinkForTests(): void {
  */
 export function emitServerStatusEvent(
   event: ServerStatusEvent,
-  sink?: ServerStatusEventSink | null,
+  sink?: ServerStatusEventSink | null
 ): void {
-  const resolved = sink ?? registeredSink;
-  if (!resolved) return;
+  const resolved = sink ?? registeredSink
+  if (!resolved) return
   try {
-    const result = resolved.writeStatusEvent(event);
-    if (
-      result != null &&
-      typeof (result as PromiseLike<void>).then === "function"
-    ) {
+    const result = resolved.writeStatusEvent(event)
+    if (result != null && typeof (result as PromiseLike<void>).then === 'function') {
       void Promise.resolve(result).catch((error: unknown) => {
-        logStatusWriteFailed(event.serverId, error);
-      });
+        logStatusWriteFailed(event.serverId, error)
+      })
     }
   } catch (error) {
-    logStatusWriteFailed(event.serverId, error);
+    logStatusWriteFailed(event.serverId, error)
   }
 }
 
 function logStatusWriteFailed(serverId: string, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
-  rateLimitedMetricsLog(serverId, "status_write_failed", (reason) => {
+  const message = error instanceof Error ? error.message : String(error)
+  rateLimitedMetricsLog(serverId, 'status_write_failed', (reason) => {
     console.error(
-      `server status metrics write failed serverId=${stripLogInjection(serverId)} reason=${stripLogInjection(reason)}: ${stripLogInjection(message)}`,
-    );
-  });
+      `server status metrics write failed serverId=${stripLogInjection(
+        serverId
+      )} reason=${stripLogInjection(reason)}: ${stripLogInjection(message)}`
+    )
+  })
 }

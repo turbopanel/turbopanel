@@ -20,26 +20,28 @@ next `NNNN_*.sql` plus its `migrations/meta/NNNN_snapshot.json` and appends the
 journal entry; commit all three and leave `0000_init.sql` untouched.
 
 The baseline has been regenerated while pre-MVP (no installed instances, no
-production data) — first for the `gitapp` table and `installation.app_id`,
-then the schema-cutover squash, then to fold the `monitor` table into
-`0000_init.sql` (replacing `0001_add_monitor_credential_table`), then again
-to fold org-level repository uniqueness into `0000_init.sql` (replacing
+production data) — first for the `gitapp` table and `installation.app_id`, then
+the schema-cutover squash, then to fold the `monitor` table into `0000_init.sql`
+(replacing `0001_add_monitor_credential_table`), then again to fold org-level
+repository uniqueness into `0000_init.sql` (replacing
 `0001_repository_org_level_dedupe`, which also dropped the leftover
-`repository.service_id` / `environment_id` parent columns), then again to
-fold repository inspection columns into `0000_init.sql` (replacing
-`0001_add_repository_inspection_columns`). Each of those is a deliberate
-pre-MVP exception, **not** a precedent: the policy above is what holds going
-forward. Additive forward migrations, `0000_init.sql` is the squashed
-baseline and nothing else, and applying a regenerated baseline requires
-wiping the database because `public.migration` replay follows the
-migration journal timestamps/order (`migrations/meta/_journal.json`). Once a
-real instance exists, regenerating stops being an option at all.
+`repository.service_id` / `environment_id` parent columns), then again to fold
+repository inspection columns into `0000_init.sql` (replacing
+`0001_add_repository_inspection_columns`), then again to fold the `generation`
+(server topology) and `capability` (metrics capability-plan) tables into
+`0000_init.sql` (replacing `0001_add_server_topology_generation` and
+`0002_add_capability_plan_generation`). Each of those is a deliberate pre-MVP
+exception, **not** a precedent: the policy above is what holds going forward.
+Additive forward migrations, `0000_init.sql` is the squashed baseline and
+nothing else, and applying a regenerated baseline requires wiping the database
+because `public.migration` replay follows the migration journal timestamps/order
+(`migrations/meta/_journal.json`). Once a real instance exists, regenerating
+stops being an option at all.
 
 Physical boolean columns use an `is_` prefix (`is_connected`,
-`is_read_eligible`, `is_for_build`, `is_for_runtime`,
-`is_emit_engine_defaults`, `is_read_only`). Public API JSON still uses
-`connected`, `readEligible`, `forBuild`, `forRuntime`, `emitEngineDefaults`,
-and `readOnly`.
+`is_read_eligible`, `is_for_build`, `is_for_runtime`, `is_emit_engine_defaults`,
+`is_read_only`). Public API JSON still uses `connected`, `readEligible`,
+`forBuild`, `forRuntime`, `emitEngineDefaults`, and `readOnly`.
 
 The co-located dev server has live data — treat every database change as
 production-adjacent.
@@ -53,27 +55,26 @@ Postgres projection writes for metrics.
 
 "Multi-node PostgreSQL" for the instance database means **primary/standby
 replication with exactly one writable primary** — physical (streaming)
-replication for HA/failover, logical replication for read replicas or DR.
-Every writer (Workers, the Deno instance, `pnpm migrate`) connects to the
-single current primary; migrations require PostgreSQL 18+ (built-in
-`uuidv7()`), preflighted by `scripts/check-postgres-compat.mjs` before
-`drizzle-kit migrate` runs.
+replication for HA/failover, logical replication for read replicas or DR. Every
+writer (Workers, the Deno instance, `pnpm migrate`) connects to the single
+current primary; migrations require PostgreSQL 18+ (built-in `uuidv7()`),
+preflighted by `scripts/check-postgres-compat.mjs` before `drizzle-kit migrate`
+runs.
 
-**Sharded / distributed SQL is explicitly out of scope for this schema.**
-UUIDv7 primary keys (`uuid … DEFAULT uuidv7()`) buy exactly three things:
-collision-free ids across writers and restores without sequence coordination,
-no serial/identity hotspot to renumber on failover, and time-ordered index
-locality. They do **not** make the schema distributed-SQL ready: no
-distribution key has been chosen, no reference/global table classification
-exists, and every foreign key and unique constraint assumes one coherent
-node. Targeting a sharded or distributed engine (Citus, CockroachDB,
-YugabyteDB, …) would require a dedicated design pass over `schema.ts` —
-choose a distribution key, classify reference tables, and rework primary
-keys, foreign keys, and unique constraints together — never piecemeal
-per-table edits.
+**Sharded / distributed SQL is explicitly out of scope for this schema.** UUIDv7
+primary keys (`uuid … DEFAULT uuidv7()`) buy exactly three things:
+collision-free ids across writers and restores without sequence coordination, no
+serial/identity hotspot to renumber on failover, and time-ordered index
+locality. They do **not** make the schema distributed-SQL ready: no distribution
+key has been chosen, no reference/global table classification exists, and every
+foreign key and unique constraint assumes one coherent node. Targeting a sharded
+or distributed engine (Citus, CockroachDB, YugabyteDB, …) would require a
+dedicated design pass over `schema.ts` — choose a distribution key, classify
+reference tables, and rework primary keys, foreign keys, and unique constraints
+together — never piecemeal per-table edits.
 
-Guard: `primary-key.test.ts` — every `CREATE TABLE` in committed migration
-SQL under `migrations/` has a `PRIMARY KEY`; application primary keys are
+Guard: `primary-key.test.ts` — every `CREATE TABLE` in committed migration SQL
+under `migrations/` has a `PRIMARY KEY`; application primary keys are
 `uuid … DEFAULT uuidv7()` or the single allowlisted natural key
 `dispatch.command_id`; `serial` / identity columns / `nextval()` defaults are
 rejected in application tables.
@@ -92,15 +93,15 @@ CREATE TABLE IF NOT EXISTS "public"."migration" (
 )
 ```
 
-Audit: it **has** a primary key, but the key is sequence-backed (`SERIAL`).
-That cannot meet the application-table invariant, and it doesn't need to:
-the table is written only while migrations apply — an operator-controlled,
+Audit: it **has** a primary key, but the key is sequence-backed (`SERIAL`). That
+cannot meet the application-table invariant, and it doesn't need to: the table
+is written only while migrations apply — an operator-controlled,
 **single-writer, coordinator-local** operation against the primary
-(`pnpm migrate`, Workers deploy, `bootstrap-dev-db.sh`) — never at request
-time and never from concurrent writers. It is exempt from the UUID
-primary-key guard (it is created by the migrator, not by SQL under
-`migrations/`); do not model application tables on it. A drizzle-orm upgrade
-that changes this DDL fails `primary-key.test.ts` and re-opens this audit.
+(`pnpm migrate`, Workers deploy, `bootstrap-dev-db.sh`) — never at request time
+and never from concurrent writers. It is exempt from the UUID primary-key guard
+(it is created by the migrator, not by SQL under `migrations/`); do not model
+application tables on it. A drizzle-orm upgrade that changes this DDL fails
+`primary-key.test.ts` and re-opens this audit.
 
 ## Schema sync directions
 
@@ -235,39 +236,38 @@ Destructive changes (drop column/table, type narrowing) can lose dev rows.
 ## Schema (ported from old trunk `apps/api`)
 
 `schema.ts` mirrors the old monorepo database layout (Better Auth–compatible
-tables, no auth runtime yet). Grouped by concern — see **Table groupings**
-below (post-cutover names).
+tables, no auth runtime yet). Grouped by concern — see **Table groupings** below
+(post-cutover names).
 
 **Column order:** tables that carry `metadata` / `options` declare them
 immediately after timestamps — `id` → `created_at` → `updated_at` → `metadata` →
 `options` → remaining columns. If a table has one of those JSONB columns, it
 must have both, and both are always nullable.
 
-
 ## Schema cutover (executed — see ledger archive)
 
-The phase-1 cutover ledger — the full table/column/constraint inventory,
-locked renames, and per-item keep/rename/drop adjudications with reasons —
-is archived in [`schema-cutover-ledger.md`](./schema-cutover-ledger.md).
-Phase 2 executed it: `schema.ts` and the squashed `migrations/0000_init.sql`
-use the post-cutover names below, and the retired names are rejected by
-`table-naming.test.ts`. Consult the ledger only for the historical **why**
-behind a kept or dropped item.
+The phase-1 cutover ledger — the full table/column/constraint inventory, locked
+renames, and per-item keep/rename/drop adjudications with reasons — is archived
+in [`schema-cutover-ledger.md`](./schema-cutover-ledger.md). Phase 2 executed
+it: `schema.ts` and the squashed `migrations/0000_init.sql` use the post-cutover
+names below, and the retired names are rejected by `table-naming.test.ts`.
+Consult the ledger only for the historical **why** behind a kept or dropped
+item.
 
 ## Table groupings
 
-| Group             | Tables                                                                                                                                                                              |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Identity**      | `user`, `account`, `session`, `verification`, `passkey`, `2fa`                                                                                                                      |
-| **Organizations** | `organization`, `team`, `teammate` (org membership SoT), `invitation` (no `organization_id`; `team_id NOT NULL`), `license`, `tls`, `changeover`, `leaf` |
+| Group             | Tables                                                                                                                                                                                         |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Identity**      | `user`, `account`, `session`, `verification`, `passkey`, `2fa`                                                                                                                                 |
+| **Organizations** | `organization`, `team`, `teammate` (org membership SoT), `invitation` (no `organization_id`; `team_id NOT NULL`), `license`, `tls`, `changeover`, `leaf`                                       |
 | **Networking**    | `datacenter`, `network` (kinds `datacenter` / `docker` / `compose` / `managed`), `ip` (scopes `public` / `datacenter`), `fabric` (0–1 per org; TurboFabric on when present), `relay`, `subnet` |
-| **Resource tree** | `workspace`, `project`, `environment`, `service`, `hosting`, `container`, `managed`, `replica`, `recovery`, `variable`, `principal`, `tenancy`, `binding`                                          |
-| **Storage**       | `storage`, `copy` (export `storageCopy`), `mount`, `secret`                                                                                                                          |
-| **Git**           | `forge`, `connection`, `repository`, `delivery`                                                                                                                                     |
-| **Authorization** | `grant`                                                                                                                                                                             |
-| **Config**        | `setting` (`value` is `jsonb`)                                                                                                                                                      |
-| **Runtime**       | `server`, `monitor` (per-server sealed ProxySQL monitor credential), `command`, `dispatch`, `deployment`, `slot`, `task`, `label`                                                                                                                |
-| **Tagging**       | `tag`, `marker`                                                                                                                                                                     |
+| **Resource tree** | `workspace`, `project`, `environment`, `service`, `hosting`, `container`, `managed`, `replica`, `recovery`, `variable`, `principal`, `tenancy`, `binding`                                      |
+| **Storage**       | `storage`, `copy` (export `storageCopy`), `mount`, `secret`                                                                                                                                    |
+| **Git**           | `forge`, `connection`, `repository`, `delivery`                                                                                                                                                |
+| **Authorization** | `grant`                                                                                                                                                                                        |
+| **Config**        | `setting` (`value` is `jsonb`)                                                                                                                                                                 |
+| **Runtime**       | `server`, `monitor` (per-server sealed ProxySQL monitor credential), `command`, `dispatch`, `deployment`, `slot`, `task`, `label`                                                              |
+| **Tagging**       | `tag`, `marker`                                                                                                                                                                                |
 
 ### Secrets never live on `server.options`
 
@@ -276,10 +276,10 @@ behind a kept or dropped item.
 approved cached read models copy it into Redis. Anything written there is
 therefore published to every reader of the server and cached outside Postgres.
 
-The per-server ProxySQL monitor password (`tp_monitor_<serverId prefix>`) used to
-live at `server.options.managedMonitor`; it now has its own **`monitor`** table
-(one row per server, `secret_envelope` sealed with the data-encryption key,
-`ON DELETE CASCADE` from `server`) — see
+The per-server ProxySQL monitor password (`tp_monitor_<serverId prefix>`) used
+to live at `server.options.managedMonitor`; it now has its own **`monitor`**
+table (one row per server, `secret_envelope` sealed with the data-encryption
+key, `ON DELETE CASCADE` from `server`) — see
 `src/client/managed/monitor-credential.ts`. Two guards keep it that way:
 `REDACTED_SERVER_OPTION_KEYS` / `redactServerOptions` in `server-metadata.ts`
 strip the legacy key at every read-model and response boundary, and
@@ -293,63 +293,63 @@ letter-first alphanumeric token, **no underscores**. Guarded by
 `src/lib/db/table-naming.test.ts`, which scans every migration SQL file under
 `migrations/`.
 
-| Physical name | Drizzle export | Role |
-| ------------- | -------------- | ---- |
-| `invitation` | `invitation` | Pending org/team invite (`grants` jsonb materialized on accept). Unchanged. |
-| `organization` | `organization` | Tenant org. Unchanged. **`slug`** stays NULL/reserved. |
-| `tls` | `tls` | Org TLS library + Organization CA row. Unchanged. |
-| `changeover` | `changeover` | Organization CA rotation journal (fan-out progress; partial unique in-flight per org). Was `rotation`. |
-| `passkey` | `passkey` | Better Auth–compat WebAuthn table. Unchanged; unused by first-party code. |
-| `datacenter` | `datacenter` | Routing domain of mutually routable site subnets. Unchanged. **`datacenter_name_format_check` dropped.** |
-| `server` | `server` | Enrolled host. Unchanged. |
-| `monitor` | `monitor` | Per-server sealed ProxySQL backend monitor credential (`uniq_monitor_server`; `ON DELETE CASCADE` from `server`). |
-| `license` | `license` | One-shot registration key. Unchanged. |
-| `command` | `command` | Typed command row (lifecycle columns, no payload). Unchanged. |
-| `dispatch` | `dispatch` | One-shot daemon execution payload for a `command` (deleted on success, ~24h retention on failure). Unchanged. |
-| `network` | `network` | Org network registry (`datacenter` / `docker` / `compose` / `managed`). Unchanged. |
-| `fabric` | `fabric` | Org TurboFabric mesh (0–1 per org; on when present). Unchanged. |
-| `ip` | `ip` | Canonical managed addresses (`public` / `datacenter`). Unchanged. |
-| `relay` | `relay` | One server in the org TurboFabric mesh — `tp0` address, role, container prefix, advertised CIDRs, PSK. Unchanged. |
-| `subnet` | `subnet` | Server-local Docker bridge for a `kind='compose'` spanning network. Was `segment`. SQL-adjacent — double-quote in raw `sql` tagged templates. |
-| `workspace` | `workspace` | Resource-tree root (`project.workspace_id` → `workspace.id`). Unchanged. |
-| `project` | `project` | Docker Compose / catalog / managed project. Unchanged. |
-| `environment` | `environment` | Staging/production/etc. within a project; optional `server_id` pin. Unchanged. |
-| `managed` | `managed` | Environment-scoped managed engine cluster. Unchanged. |
-| `replica` | `replica` | One server’s participation in a managed cluster (primary / replica). Was `node`. |
-| `leaf` | `leaf` | Organization-CA-signed managed leaf tracking (`ingress` / `engine`; upsert on re-issue). Engine unique is `uniq_leaf_engine_replica` on `replica_id`. Unchanged physical name. |
-| `recovery` | `recovery` | Managed HA journal (automatic failover / switchover / disaster recovery). Unchanged. |
-| `variable` | `variable` | Scoped config/secret. Unchanged. |
-| `service` | `service` | Deployable unit within an environment. Unchanged. |
-| `deployment` | `deployment` | Current apply state per `(environment, server)`. Unchanged. |
-| `slot` | `slot` | Scheduled replica instance of a logical service (0-based `slot` column). Was `task` (replica-slot meaning). |
-| `label` | `label` | Server Docker-engine labels. Unchanged. |
-| `hosting` | `hosting` | Public routing for a service. Unchanged. **`hosting_name_format_check` dropped.** |
-| `container` | `container` | Deployed Docker container pin. Unchanged. |
-| `principal` | `principal` | Linux/system or managed-engine user. Unchanged. |
-| `entitlement` | `entitlement` | Runtime series a principal may execute (one row = one unix group). Unchanged. |
-| `ssh` | `sshKey` | Public key that may authenticate as a principal. Unchanged. |
-| `tenancy` | `tenancy` | Linux/system principal that runs as / owns a service. Was `steward`. |
-| `binding` | `binding` | Managed-DB principal → compose service inject. Unchanged. |
-| `secret` | `secret` | Sealed provider secrets (NFS/S3/rclone + Git deploy keys). Was `credential`. **`expires_at` dropped.** |
-| `storage` | `storage` | Logical dataset identity (volume / directory / file / object). Unchanged. |
-| `copy` | `storageCopy` | One physical copy of a storage identity. Was `location`. SQL-adjacent — double-quote in raw `sql` tagged templates. |
-| `mount` | `mount` | Service attachment of a storage identity. Unchanged. |
-| `forge` | `forge` | Registered GitHub App / GitLab OAuth application (`organization_id` NULL = instance-wide). Was `gitapp`. **`envelopes`** was `credentials`. |
-| `connection` | `gitConnection` | Git provider App installation granted to one org. Was `installation` (export `gitConnection`). **`forge_id`** FK → `forge`. **`provider`** kept as a denormalized filter column. **`external_installation_id`** is the provider-side id. No token columns — installation access tokens are minted on demand in `src/lib/git/github-app-token.ts`. |
-| `repository` | `repository` | Git repository connected to an organization — **one row per repo per org**, deduped by `UNIQUE (organization_id, repository_url)` over the canonicalized clone URL (`canonicalizeRepositoryUrl`: lower-cased host, `.git` suffix). Was `source`. No `service_id` / `environment_id` parent columns — attachment is `project.repository_id` plus compose `services.<name>.x-turbopanel.source.sourceId` references. **`connection_id`** SET NULL; optional `secret_id` SET NULL. Provider-observed facts (`detected_default_branch`, `default_branch_checked_at`, `last_inspected_at`, `last_inspected_commit_sha`) are real columns, refreshed by `POST /repositories/:id/refresh`. CRUD: `src/client/repositories/routes.ts`. |
-| `delivery` | `webhookDelivery` | Inbound provider-webhook delivery ledger — replay protection only. Org-agnostic on purpose: the delivery id arrives before the payload is matched to a connection. `provider` CHECK `github`; unique `(provider, external_delivery_id)`; `created_at` is the received time and the sweep cursor. Holds no payload and no secret. Claimed by `claimWebhookDelivery`, pruned after `WEBHOOK_DELIVERY_RETENTION_MS` (`src/lib/db/webhook-delivery-records.ts`). |
-| `grant` | `grant` | Authz grant row. Unchanged. |
-| `session` | `session` | Opaque DB-backed user session. Unchanged. |
-| `setting` | `setting` | Instance settings (`value` is `jsonb`). Unchanged. |
-| `account` | `account` | Credential / (reserved) OAuth account. Unchanged. |
-| `teammate` | `teammate` | User ↔ team; org membership is derived through `team.organization_id`. Unchanged. |
-| `team` | `team` | Org team. Unchanged. |
-| `user` | `user` | Instance user (email identity). Unchanged. |
-| `2fa` | `twoFactor` | Better Auth–compat two-factor table; digit-leading name exception. Unchanged; unused by first-party code. |
-| `verification` | `verification` | Email / OTP verification tokens. Unchanged. |
-| `tag` | `tag` | Org-owned tag definition. App-enforced trim + case-insensitive uniqueness backed by `uniq_tag_organization_name`. SQL-adjacent — double-quote in raw `sql` tagged templates. |
-| `marker` | `marker` | Join edge: one tag on exactly one parent (`marker_exactly_one_parent_check`); seven partial uniques (`uniq_marker_server` … `uniq_marker_storage`). Org derived through `tag.organization_id`. No `metadata`/`options` pair (follows `tenancy` / `label`). |
-| `task` | `task` | Cron-style scheduled command on a service. `uniq_task_service_name`; `task_concurrency_policy_check` (`allow` \| `forbid` \| `replace`). No execution columns (`last_run_at` / result) and no run-history table. |
+| Physical name  | Drizzle export    | Role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| -------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `invitation`   | `invitation`      | Pending org/team invite (`grants` jsonb materialized on accept). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `organization` | `organization`    | Tenant org. Unchanged. **`slug`** stays NULL/reserved.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `tls`          | `tls`             | Org TLS library + Organization CA row. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `changeover`   | `changeover`      | Organization CA rotation journal (fan-out progress; partial unique in-flight per org). Was `rotation`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `passkey`      | `passkey`         | Better Auth–compat WebAuthn table. Unchanged; unused by first-party code.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `datacenter`   | `datacenter`      | Routing domain of mutually routable site subnets. Unchanged. **`datacenter_name_format_check` dropped.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `server`       | `server`          | Enrolled host. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `monitor`      | `monitor`         | Per-server sealed ProxySQL backend monitor credential (`uniq_monitor_server`; `ON DELETE CASCADE` from `server`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `license`      | `license`         | One-shot registration key. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `command`      | `command`         | Typed command row (lifecycle columns, no payload). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `dispatch`     | `dispatch`        | One-shot daemon execution payload for a `command` (deleted on success, ~24h retention on failure). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `network`      | `network`         | Org network registry (`datacenter` / `docker` / `compose` / `managed`). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `fabric`       | `fabric`          | Org TurboFabric mesh (0–1 per org; on when present). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `ip`           | `ip`              | Canonical managed addresses (`public` / `datacenter`). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `relay`        | `relay`           | One server in the org TurboFabric mesh — `tp0` address, role, container prefix, advertised CIDRs, PSK. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `subnet`       | `subnet`          | Server-local Docker bridge for a `kind='compose'` spanning network. Was `segment`. SQL-adjacent — double-quote in raw `sql` tagged templates.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `workspace`    | `workspace`       | Resource-tree root (`project.workspace_id` → `workspace.id`). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `project`      | `project`         | Docker Compose / catalog / managed project. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `environment`  | `environment`     | Staging/production/etc. within a project; optional `server_id` pin. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `managed`      | `managed`         | Environment-scoped managed engine cluster. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `replica`      | `replica`         | One server’s participation in a managed cluster (primary / replica). Was `node`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `leaf`         | `leaf`            | Organization-CA-signed managed leaf tracking (`ingress` / `engine`; upsert on re-issue). Engine unique is `uniq_leaf_engine_replica` on `replica_id`. Unchanged physical name.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `recovery`     | `recovery`        | Managed HA journal (automatic failover / switchover / disaster recovery). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `variable`     | `variable`        | Scoped config/secret. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `service`      | `service`         | Deployable unit within an environment. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `deployment`   | `deployment`      | Current apply state per `(environment, server)`. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `slot`         | `slot`            | Scheduled replica instance of a logical service (0-based `slot` column). Was `task` (replica-slot meaning).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `label`        | `label`           | Server Docker-engine labels. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `hosting`      | `hosting`         | Public routing for a service. Unchanged. **`hosting_name_format_check` dropped.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `container`    | `container`       | Deployed Docker container pin. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `principal`    | `principal`       | Linux/system or managed-engine user. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `entitlement`  | `entitlement`     | Runtime series a principal may execute (one row = one unix group). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `ssh`          | `sshKey`          | Public key that may authenticate as a principal. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `tenancy`      | `tenancy`         | Linux/system principal that runs as / owns a service. Was `steward`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `binding`      | `binding`         | Managed-DB principal → compose service inject. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `secret`       | `secret`          | Sealed provider secrets (NFS/S3/rclone + Git deploy keys). Was `credential`. **`expires_at` dropped.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `storage`      | `storage`         | Logical dataset identity (volume / directory / file / object). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `copy`         | `storageCopy`     | One physical copy of a storage identity. Was `location`. SQL-adjacent — double-quote in raw `sql` tagged templates.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `mount`        | `mount`           | Service attachment of a storage identity. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `forge`        | `forge`           | Registered GitHub App / GitLab OAuth application (`organization_id` NULL = instance-wide). Was `gitapp`. **`envelopes`** was `credentials`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `connection`   | `gitConnection`   | Git provider App installation granted to one org. Was `installation` (export `gitConnection`). **`forge_id`** FK → `forge`. **`provider`** kept as a denormalized filter column. **`external_installation_id`** is the provider-side id. No token columns — installation access tokens are minted on demand in `src/lib/git/github-app-token.ts`.                                                                                                                                                                                                                                                                                                                                                                              |
+| `repository`   | `repository`      | Git repository connected to an organization — **one row per repo per org**, deduped by `UNIQUE (organization_id, repository_url)` over the canonicalized clone URL (`canonicalizeRepositoryUrl`: lower-cased host, `.git` suffix). Was `source`. No `service_id` / `environment_id` parent columns — attachment is `project.repository_id` plus compose `services.<name>.x-turbopanel.source.sourceId` references. **`connection_id`** SET NULL; optional `secret_id` SET NULL. Provider-observed facts (`detected_default_branch`, `default_branch_checked_at`, `last_inspected_at`, `last_inspected_commit_sha`) are real columns, refreshed by `POST /repositories/:id/refresh`. CRUD: `src/client/repositories/routes.ts`. |
+| `delivery`     | `webhookDelivery` | Inbound provider-webhook delivery ledger — replay protection only. Org-agnostic on purpose: the delivery id arrives before the payload is matched to a connection. `provider` CHECK `github`; unique `(provider, external_delivery_id)`; `created_at` is the received time and the sweep cursor. Holds no payload and no secret. Claimed by `claimWebhookDelivery`, pruned after `WEBHOOK_DELIVERY_RETENTION_MS` (`src/lib/db/webhook-delivery-records.ts`).                                                                                                                                                                                                                                                                   |
+| `grant`        | `grant`           | Authz grant row. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `session`      | `session`         | Opaque DB-backed user session. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `setting`      | `setting`         | Instance settings (`value` is `jsonb`). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `account`      | `account`         | Credential / (reserved) OAuth account. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `teammate`     | `teammate`        | User ↔ team; org membership is derived through `team.organization_id`. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `team`         | `team`            | Org team. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `user`         | `user`            | Instance user (email identity). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `2fa`          | `twoFactor`       | Better Auth–compat two-factor table; digit-leading name exception. Unchanged; unused by first-party code.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `verification` | `verification`    | Email / OTP verification tokens. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `tag`          | `tag`             | Org-owned tag definition. App-enforced trim + case-insensitive uniqueness backed by `uniq_tag_organization_name`. SQL-adjacent — double-quote in raw `sql` tagged templates.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `marker`       | `marker`          | Join edge: one tag on exactly one parent (`marker_exactly_one_parent_check`); seven partial uniques (`uniq_marker_server` … `uniq_marker_storage`). Org derived through `tag.organization_id`. No `metadata`/`options` pair (follows `tenancy` / `label`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `task`         | `task`            | Cron-style scheduled command on a service. `uniq_task_service_name`; `task_concurrency_policy_check` (`allow` \| `forbid` \| `replace`). No execution columns (`last_run_at` / result) and no run-history table.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 **Better Auth:** do not reintroduce a physical `member` or `membership` table.
 Org membership is `teammate` → `team.organization_id`. Platform authority stays
@@ -359,9 +359,9 @@ on `user.role` (`superadmin` / `admin` / `user`), separate from org grants.
 `principal_entitlement` / `principal_ssh_key` / `gitapp` / `installation` /
 `source` / `steward` / `location` / `credential` / `node` / `segment` /
 `rotation` are retired physical table names, guarded by `table-naming.test.ts`
-(same reject list as `member` / `bridge` / `managed_member`). Do not
-reintroduce them. Do **not** retire `task`: the replica-slot table is
-`slot`; `task` is the cron scheduled-command table.
+(same reject list as `member` / `bridge` / `managed_member`). Do not reintroduce
+them. Do **not** retire `task`: the replica-slot table is `slot`; `task` is the
+cron scheduled-command table.
 
 **Naming exceptions** (external compatibility only — listed in the guard test
 and here):
@@ -407,8 +407,8 @@ Generated names and principal paths live in **`src/lib/naming.ts`** — the sing
 source of truth for container names (`containerNameFromService` /
 `managedContainerName` / `ingressContainerNameFromService` → `<service.id>-in`
 for per-service Traefik **and** shared ProxySQL `managed-ingress` — suffix
-contract in the repo-root `AGENTS.md` → **Container name suffix contract**;
-all keyed off the **service** UUID, not the container row), Docker volume names
+contract in the repo-root `AGENTS.md` → **Container name suffix contract**; all
+keyed off the **service** UUID, not the container row), Docker volume names
 (`dockerVolumeNameFromStorageId` / `resolveDockerVolumeName` / legacy-only
 `legacyNamespacedDockerVolumeName`), principal home/SSH/volume paths under
 `/srv/users/<username>` (keyed on the operator-chosen username, not the
@@ -417,46 +417,45 @@ reserved `TURBOPANEL_*` deploy variable keys (`RESERVED_DEPLOY_VARIABLE_KEYS`).
 Option parsers (`project-options.ts` `containerNaming`, `service-options.ts`
 `instances`, `principal-options.ts` `shell` + optional `uid`/`gid` override)
 feed those helpers; deploy-prepare owns allocation (`uuid` mode ignores authored
-compose `container_name`; `custom` still reads them), multi-instance expansion, compose-volume
-registration, and compose emission via `apply-service-options.ts` (sole writer
-of allocated `container_name` values).
+compose `container_name`; `custom` still reads them), multi-instance expansion,
+compose-volume registration, and compose emission via `apply-service-options.ts`
+(sole writer of allocated `container_name` values).
 
 Native Postgres **`inet`** and **`cidr`** columns are defined in `net-types.ts`
 via Drizzle `customType` — no regex CHECK constraints belong on those types.
 
-**Names** (`name` column, API `name`) on organization, workspace,
-project, environment, service, hosting, datacenter, network, fabric, tls, team,
-managed, server, license, storage, and secret are labels, not identifiers.
-The cutover dropped **only** `hosting_name_format_check` and
-`datacenter_name_format_check` — those two CHECKs contradicted app-side
-`display-name-format.ts`. Every other name-format CHECK remains:
-`tls_name_format_check`, `workspace_name_format_check`,
-`project_name_format_check`, `environment_name_format_check`,
-`service_name_format_check`, `network_name_format_check`,
-`fabric_name_format_check`, `team_name_format_check`,
-`managed_name_format_check`, `user_name_format_check`, and
-`binding_database_name_format_check`. The preferred app-side rule for labels
+**Names** (`name` column, API `name`) on organization, workspace, project,
+environment, service, hosting, datacenter, network, fabric, tls, team, managed,
+server, license, storage, and secret are labels, not identifiers. The cutover
+dropped **only** `hosting_name_format_check` and `datacenter_name_format_check`
+— those two CHECKs contradicted app-side `display-name-format.ts`. Every other
+name-format CHECK remains: `tls_name_format_check`,
+`workspace_name_format_check`, `project_name_format_check`,
+`environment_name_format_check`, `service_name_format_check`,
+`network_name_format_check`, `fabric_name_format_check`,
+`team_name_format_check`, `managed_name_format_check`, `user_name_format_check`,
+and `binding_database_name_format_check`. The preferred app-side rule for labels
 (and the rule that replaces the two dropped CHECKs) is
 `src/lib/display-name-format.ts` (`normalizeDisplayName` + `isValidDisplayName`)
 — trim, Unicode NFC, apostrophe-fold, no control characters, and a code-point
 length cap (`DISPLAY_NAME_MAX_LENGTH` / `DESCRIPTION_MAX_LENGTH`, currently
 255). Changing the cap is a code change, not a migration. The same length-only
-rule applies to `description` columns and Docker **label values** (`label.value`;
-the **key** CHECK stays). Typographic apostrophes still fold to ASCII `'` so
-iOS/macOS input matches uniqueness compares.
+rule applies to `description` columns and Docker **label values**
+(`label.value`; the **key** CHECK stays). Typographic apostrophes still fold to
+ASCII `'` so iOS/macOS input matches uniqueness compares.
 
 **Identifiers vs labels.** Identifier charsets stay strict (interpolated into
 SQL / Docker / Traefik / shell). Do not relax these:
 
-| Guard | Where | Why it stays |
-| --- | --- | --- |
-| `service.compose_service_name` | `isValidComposeServiceName` in `src/lib/commands/schemas.ts` | Compose YAML key + `-p` project scoping |
-| `principal_username_format_check` | schema + `src/client/principals/store.ts` | `useradd` / SQL `CREATE ROLE` |
-| `variable_key_format_check` | schema | Shell env-var name |
-| `binding_key_prefix_format_check`, `binding_database_name_format_check` | schema | SQL identifier / env prefix |
-| `label_key_format_check` | schema, `ui/src/lib/server-labels.ts` | Docker engine label key → `node.labels.*` constraints |
-| Hostnames | `turbopaneld` `src/instance/commands/hostname.ts`, `src/deploy/compose-labels.ts`, `src/deploy/ingress.ts` | Traefik router rules, DNS |
-| `DEPLOY_INGRESS_COMPOSE_NAME_RE` / `CONTAINER_NAME_RE` | `turbopaneld` `src/instance/commands/contracts.ts`, `src/deploy/ingress-identity.ts` | Docker CLI args, on-disk file ids |
+| Guard                                                                   | Where                                                                                                      | Why it stays                                          |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `service.compose_service_name`                                          | `isValidComposeServiceName` in `src/lib/commands/schemas.ts`                                               | Compose YAML key + `-p` project scoping               |
+| `principal_username_format_check`                                       | schema + `src/client/principals/store.ts`                                                                  | `useradd` / SQL `CREATE ROLE`                         |
+| `variable_key_format_check`                                             | schema                                                                                                     | Shell env-var name                                    |
+| `binding_key_prefix_format_check`, `binding_database_name_format_check` | schema                                                                                                     | SQL identifier / env prefix                           |
+| `label_key_format_check`                                                | schema, `ui/src/lib/server-labels.ts`                                                                      | Docker engine label key → `node.labels.*` constraints |
+| Hostnames                                                               | `turbopaneld` `src/instance/commands/hostname.ts`, `src/deploy/compose-labels.ts`, `src/deploy/ingress.ts` | Traefik router rules, DNS                             |
+| `DEPLOY_INGRESS_COMPOSE_NAME_RE` / `CONTAINER_NAME_RE`                  | `turbopaneld` `src/instance/commands/contracts.ts`, `src/deploy/ingress-identity.ts`                       | Docker CLI args, on-disk file ids                     |
 
 The daemon never receives display labels on a path that interpolates them.
 
@@ -469,19 +468,18 @@ via SET NULL), then deletes in order `container` → `hosting` → `tenancy` →
 `binding` → `service` → `environment` → `project` (variables/`managed` /
 `principal` cascade via FK). `tenancy.service_id` and `binding.service_id` are
 RESTRICT (a direct service delete must not leave a dangling run-as or inject
-edge), so the project cascade drops those rows first. Active
-**service** containers return **409** `project_has_running_services` — stop
-stacks first via `environment.stop`. Running `ingress` / `turbopanel` rows
-(ProxySQL, per-service Traefik, Orchestrator) do not gate delete; their
-lifecycle is server-scoped (destroy fan-out + orphan sweep). The cascade itself
-is Postgres-only; the route wraps it with
-`planEnvironmentsTeardown` / `reclaimDeletedEnvironmentHosts`
+edge), so the project cascade drops those rows first. Active **service**
+containers return **409** `project_has_running_services` — stop stacks first via
+`environment.stop`. Running `ingress` / `turbopanel` rows (ProxySQL, per-service
+Traefik, Orchestrator) do not gate delete; their lifecycle is server-scoped
+(destroy fan-out + orphan sweep). The cascade itself is Postgres-only; the route
+wraps it with `planEnvironmentsTeardown` / `reclaimDeletedEnvironmentHosts`
 (`client/environments/teardown.ts`) so the host's deployment dir, hosting Caddy
 site, per-service tcp/udp Traefik and `tpn_*` bridges are reclaimed even when
 the environment was stopped with `environment.lifecycle` (which leaves them in
 place) rather than `environment.stop`. Restrictive FKs stay in place as a safety
-net. Workspace /
-environment / service delete paths use the same retention helper.
+net. Workspace / environment / service delete paths use the same retention
+helper.
 
 Authorization ancestry and `listVisible()` resolve organization through this
 chain in SQL (`evaluator.ts`, `create-access-grant.ts`). **`variable`** and
@@ -496,23 +494,21 @@ unassigned); `tenancy` itself is not a grantable authz entity.
 **Where `principal` / `tenancy` rows come from at deploy time.** A compose
 document names an account by **alias** — a document-local key under the root
 `x-turbopanel.principals` — never by Linux username, because everything that
-decides what the account *is* on a host (uid, gid, home, shell, keys, password)
+decides what the account _is_ on a host (uid, gid, home, shell, keys, password)
 is a privilege decision gated by `organization:manage` on the `principal` row.
-`reconcilePrincipalsFromCompose`
-(`../../client/principals/tenancies.ts`) runs inside deploy-prepare and turns
-each declared alias into a `principal` row plus the `tenancy` edge that says
-which `service` runs as it. The alias → `principal.id` map it returns is
-carried through the compiler as
+`reconcilePrincipalsFromCompose` (`../../client/principals/tenancies.ts`) runs
+inside deploy-prepare and turns each declared alias into a `principal` row plus
+the `tenancy` edge that says which `service` runs as it. The alias →
+`principal.id` map it returns is carried through the compiler as
 **`ResolvedApplication.principals[]`** (`{ logicalAlias, principalId }`) — see
 the four-model IR in `../compose/AGENTS.md` and `../compose/ir.ts`. That mapping
-is the *only* bridge between the document's aliases and these rows: nothing
+is the _only_ bridge between the document's aliases and these rows: nothing
 downstream re-derives an account from a compose key, and a service whose alias
 never became a row is refused (`principal_alias_unknown`) rather than run as
-nobody.
-**`GET /access/check`** accepts any resolvable entity UUID (including `variable`
-and `managed`). **`GET /access/resource-id`** accepts only `organization` and
-`team` kinds (grant-management UI). Access grants still target org/team entities
-only.
+nobody. **`GET /access/check`** accepts any resolvable entity UUID (including
+`variable` and `managed`). **`GET /access/resource-id`** accepts only
+`organization` and `team` kinds (grant-management UI). Access grants still
+target org/team entities only.
 
 > Permissions are **static code constants** defined in
 > `../../client/authz/catalog.ts` (`PERMISSIONS`, `ENTITY_TYPES`,
@@ -541,14 +537,14 @@ unlimited). Self-hosted operators set it via
 will write the same field later.
 
 **Host defaults cascade** (no schema migration — stored in existing `options`
-jsonb): organization → datacenter → server, most specific wins. SSH
-(`sshPort`, 1–65535) falls back to **22**. Desired NTP (`ntp`: `enabled` /
-`servers` / `fallbackServers`) is separate from daemon-reported `timeSync`
-columns. `defaultFabricEnabled` is organization-only and never enables the
-mesh by itself (`PUT …/fabric` remains the enable path). Timezone keeps its
-enforce/override resolver — do not treat org/DC timezone as a soft default.
-`null` on PUT/PATCH clears that layer so the parent inherits. Canonical
-parsers/resolvers: `src/lib/host-defaults.ts`.
+jsonb): organization → datacenter → server, most specific wins. SSH (`sshPort`,
+1–65535) falls back to **22**. Desired NTP (`ntp`: `enabled` / `servers` /
+`fallbackServers`) is separate from daemon-reported `timeSync` columns.
+`defaultFabricEnabled` is organization-only and never enables the mesh by itself
+(`PUT …/fabric` remains the enable path). Timezone keeps its enforce/override
+resolver — do not treat org/DC timezone as a soft default. `null` on PUT/PATCH
+clears that layer so the parent inherits. Canonical parsers/resolvers:
+`src/lib/host-defaults.ts`.
 
 **Uniqueness:** `teammate(team_id, user_id)` prevents duplicate team membership
 rows on concurrent invite acceptance/retries.
@@ -557,14 +553,13 @@ rows on concurrent invite acceptance/retries.
 `src/client/authn/install-state.ts` `isInstanceInstalled()` is false until
 `completeInstanceInstall` creates org → **TurboPanel workspace
 (`kind='turbopanel'`)** → team → superadmin → grants → **Default Workspace**
-(`kind='user'`) → colocated license. **"TurboPanel"** is therefore a
-reserved workspace name from first boot (**409**
-`workspace_name_in_use`). **`organization.slug`** stays **NULL** (reserved for a
-future feature). Org extras (e.g. logo URL) belong in
-**`organization.metadata`** — there is no `logo` column. Install sets
-**`email`** and **`role`** (on `user`) only — optional user `name` stays
-**NULL** until the user chooses it. The Postgres column is `name` while the
-client JSON field is `name`.
+(`kind='user'`) → colocated license. **"TurboPanel"** is therefore a reserved
+workspace name from first boot (**409** `workspace_name_in_use`).
+**`organization.slug`** stays **NULL** (reserved for a future feature). Org
+extras (e.g. logo URL) belong in **`organization.metadata`** — there is no
+`logo` column. Install sets **`email`** and **`role`** (on `user`) only —
+optional user `name` stays **NULL** until the user chooses it. The Postgres
+column is `name` while the client JSON field is `name`.
 
 **Install sentinel invariant:** `completeInstanceInstall` is race-safe. The very
 first write inside its transaction is a **unique install sentinel** — a
@@ -588,9 +583,9 @@ The client REST endpoint inventory — access/permission endpoints and the full
 resource-tree CRUD table with per-route permission contracts — moved to
 `../../client/AGENTS.md`. The rules in short: list/get enforce visibility via
 `listVisible` / org-level grant checks **in SQL** (never client-side);
-create/update/delete require `organization:own` or `organization:manage` on
-the entity's org via `can()`; create/delete run entity insert/delete in a
-single transaction.
+create/update/delete require `organization:own` or `organization:manage` on the
+entity's org via `can()`; create/delete run entity insert/delete in a single
+transaction.
 
 ## Catalog
 
@@ -598,12 +593,11 @@ Permissions are **static code constants** in `../../client/authz/catalog.ts` —
 there is nothing to seed. Seven permissions exist: `organization:own`,
 `organization:manage`, `team:own`, `team:manage`, `system:read`,
 `system:operate`, and `system:manage`. `system:manage` is **not grantable**
-(superadmin-only). Never edit permissions in Studio — they
-do not exist as DB rows. **`ENTITY_TYPES`** and **`SUBJECT_TYPES`** (`user`,
-`team`, `organization`) are also
-exported from `catalog.ts` for route/body validation (`isEntityType`,
-`isSubjectType`). Organization-wide subject grants apply to every teammate of
-a team in that organization.
+(superadmin-only). Never edit permissions in Studio — they do not exist as DB
+rows. **`ENTITY_TYPES`** and **`SUBJECT_TYPES`** (`user`, `team`,
+`organization`) are also exported from `catalog.ts` for route/body validation
+(`isEntityType`, `isSubjectType`). Organization-wide subject grants apply to
+every teammate of a team in that organization.
 
 ## `license` table
 
@@ -684,31 +678,30 @@ license after delete.
 **Cell metadata fields** (stored in `server.metadata` and/or `server.options`
 JSONB):
 
-| Field              | Column                              | Purpose                                                             |
-| ------------------ | ----------------------------------- | ------------------------------------------------------------------- |
+| Field              | Column                                                | Purpose                                                             |
+| ------------------ | ----------------------------------------------------- | ------------------------------------------------------------------- |
 | `cellLocationHint` | `options` (preferred) or `metadata.cell.locationHint` | Cloudflare Durable Object `locationHint` chosen at enrollment time. |
 
 `options` takes precedence over `metadata` when both define a value (see
 `src/daemon/cell/location.ts`). Residual `metadata` holds nested `resources`
-(cpu / memory / swap **and** `ips`), `geo`, `docker`, and `cell` — not
-hostname / machineKey / OS / observed timezone / NTP (those are dedicated
-columns). Leftover `os` / `timeSync` / top-level `ips` keys may still exist
-in old jsonb and are read as fallbacks only.
+(cpu / memory / swap **and** `ips`), `geo`, `docker`, and `cell` — not hostname
+/ machineKey / OS / observed timezone / NTP (those are dedicated columns).
+Leftover `os` / `timeSync` / top-level `ips` keys may still exist in old jsonb
+and are read as fallbacks only.
 
 **Host OS columns:** `os_id`, `os_family`, `os_version`, `os_codename`,
 `os_pretty_name`, `os_architecture`. Raspberry Pi OS 64-bit (`ID=debian` +
-`/etc/rpi-issue`) is stored as `os_id = raspberry-pi-os`. The API still
-composes a nested `os` object (with `variant: raspberry-pi-os` when that id
-is set).
+`/etc/rpi-issue`) is stored as `os_id = raspberry-pi-os`. The API still composes
+a nested `os` object (with `variant: raspberry-pi-os` when that id is set).
 
 **Host time-sync columns:** `timezone` is the **daemon-reported** IANA zone
 (operator override stays on `server.options.timezone`). `is_time_sync_enabled`
 is the NTP client enabled flag. `ntp_servers` is a jsonb array of
 `{ host, fallback? }` (Debian often has empty `NTP=` and real servers on
 `FallbackNTP=`). `ntp_last_synced_at` is the last successful sync; it is
-**never** rewritten to `now()` on every heartbeat — only when the daemon
-reports a stamp, the host becomes unsynced (`null`), or the first synced
-observation arrives while the column is still null.
+**never** rewritten to `now()` on every heartbeat — only when the daemon reports
+a stamp, the host becomes unsynced (`null`), or the first synced observation
+arrives while the column is still null.
 
 **Daemon identity (`server.daemon` jsonb):** sparse `{ key, projection? }` only.
 Fleet liveness lives on dedicated columns (below). No separate `serverkey` table
@@ -754,20 +747,20 @@ optional `daemonBuild` (`commit`/`buildId`/`builtAt`/`channel`), optional
 health counts or resource graph are stored. Projection is not path-queried for
 reconnect dedup — use `hostname` / `machine_key` columns.
 
-**Fleet status columns (liveness projection):** just two columns — `is_connected`
-(`boolean NOT NULL DEFAULT false`) and `status_changed_at` (last `is_connected`
-flip, set on every online **and** offline transition). There is no
-`daemon_status`, `last_seen_at`, `connected_at`, or `disconnected_at` column;
+**Fleet status columns (liveness projection):** just two columns —
+`is_connected` (`boolean NOT NULL DEFAULT false`) and `status_changed_at` (last
+`is_connected` flip, set on every online **and** offline transition). There is
+no `daemon_status`, `last_seen_at`, `connected_at`, or `disconnected_at` column;
 the old tri-state `online|offline|unknown` and the separate timestamp columns
 were collapsed into this pair. `connectedAt` is **derived**, not stored:
 `src/daemon/cell/server-status.ts` returns `statusChangedAt` as `connectedAt`
-only while `is_connected` is true (otherwise `null`), and treats `!is_connected` as
-offline-since-`statusChangedAt`. Written by `postgres-projection.ts` only on
+only while `is_connected` is true (otherwise `null`), and treats `!is_connected`
+as offline-since-`statusChangedAt`. Written by `postgres-projection.ts` only on
 connect/disconnect transitions and on meaningful heartbeats (daemon
-build-identity change, or new `timeSync` / `resources.ips` / `docker` facts) — never on a bare
-elapsed-time debounce (there is no periodic "touch `last_seen_at` every N
-seconds" write path anymore). Identity columns `hostname` / `machine_key` are
-written on enroll/hello/identity projection.
+build-identity change, or new `timeSync` / `resources.ips` / `docker` facts) —
+never on a bare elapsed-time debounce (there is no periodic "touch
+`last_seen_at` every N seconds" write path anymore). Identity columns `hostname`
+/ `machine_key` are written on enroll/hello/identity projection.
 
 **Status read model:** the two status columns above are the Postgres-projected
 liveness read model. UI and API status reads go through
@@ -779,9 +772,9 @@ plus `src/client/servers/update-status.ts` (`loadServerStatusRecords` /
 directly from routes. The tri-state `daemonStatus` (`online` \| `offline` \|
 `unknown`) still exists as an **API-layer derived value** —
 `src/daemon/authn/daemon-state.ts` (`mapServerDaemonStatusFromColumns`) computes
-it from the `is_connected` + `status_changed_at` columns at read time (`unknown` only when
-`statusChangedAt` is null, i.e. the server has never transitioned) — it is never
-stored as a column or CHECK constraint. The `/servers/status` and
+it from the `is_connected` + `status_changed_at` columns at read time (`unknown`
+only when `statusChangedAt` is null, i.e. the server has never transitioned) —
+it is never stored as a column or CHECK constraint. The `/servers/status` and
 `/servers/:id/status` endpoints serve this read model; reads are Postgres-only
 and do not call the DO/Redis cell by default; both runtimes share the same
 response shape. A separate, independent **status event history** in Analytics
@@ -808,30 +801,30 @@ Canonical command/job history — source of truth for UI status and history. Do
 not read command history from the Daemon Cell — the cell holds only hot
 pending-request correlation state. The `command` table is the canonical record.
 
-| Column       | Type                            | Notes                                                           |
-| ------------ | ------------------------------- | --------------------------------------------------------------- |
-| `id`         | uuid (uuidv7)                   | Primary key                                                     |
-| `created_at` | timestamptz(3) NOT NULL `now()` | Real column; index/order source                                 |
-| `updated_at` | timestamptz(3) NOT NULL `now()` | Bumped by `transitionCommand`                                   |
-| `metadata`   | jsonb nullable                  | Follow-up-chain blob only (`getCommandMetadata`)                |
-| `options`    | jsonb nullable                  | Reserved (pair with `metadata`; unused today)                   |
-| `server_id`  | uuid NOT NULL                   | FK → `server.id`, `ON DELETE CASCADE` (org derived from server) |
-| `actor_type` | text NOT NULL                   | Open set — e.g. `'user'`; no FK                                 |
-| `actor_id`   | uuid NOT NULL                   | ID of the acting entity; no FK                                  |
-| `name`       | text NOT NULL                   | Command type (e.g. `daemon.ping`)                               |
-| `status`     | text NOT NULL `'queued'`        | See status values                                               |
-| `attempts`   | integer NOT NULL `0`            | Dispatch retry count                                            |
-| `context`    | jsonb nullable                  | Small non-secret identifier bag (`managedId`, `environmentId`, `generation`, …) |
-| `result_summary` | jsonb nullable              | Typed command output (small, bounded)                           |
-| `error_code` | text nullable                   | Machine-readable terminal error code                            |
-| `error_message` | text nullable                | Terminal error message                                          |
-| `queued_at`  | timestamptz(3) nullable         | Set when status → `queued`                                      |
-| `dispatch_started_at` | timestamptz(3) nullable| Set when status → `dispatching`                                 |
-| `sent_at`    | timestamptz(3) nullable         | Set when status → `sent`                                        |
-| `acked_at`   | timestamptz(3) nullable         | Set when status → `acked`                                       |
-| `started_at` | timestamptz(3) nullable         | Set when status → `running`                                     |
-| `finished_at`| timestamptz(3) nullable         | Set when status → terminal                                      |
-| `expires_at` | timestamptz(3) nullable         | Optional command TTL                                            |
+| Column                | Type                            | Notes                                                                           |
+| --------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
+| `id`                  | uuid (uuidv7)                   | Primary key                                                                     |
+| `created_at`          | timestamptz(3) NOT NULL `now()` | Real column; index/order source                                                 |
+| `updated_at`          | timestamptz(3) NOT NULL `now()` | Bumped by `transitionCommand`                                                   |
+| `metadata`            | jsonb nullable                  | Follow-up-chain blob only (`getCommandMetadata`)                                |
+| `options`             | jsonb nullable                  | Reserved (pair with `metadata`; unused today)                                   |
+| `server_id`           | uuid NOT NULL                   | FK → `server.id`, `ON DELETE CASCADE` (org derived from server)                 |
+| `actor_type`          | text NOT NULL                   | Open set — e.g. `'user'`; no FK                                                 |
+| `actor_id`            | uuid NOT NULL                   | ID of the acting entity; no FK                                                  |
+| `name`                | text NOT NULL                   | Command type (e.g. `daemon.ping`)                                               |
+| `status`              | text NOT NULL `'queued'`        | See status values                                                               |
+| `attempts`            | integer NOT NULL `0`            | Dispatch retry count                                                            |
+| `context`             | jsonb nullable                  | Small non-secret identifier bag (`managedId`, `environmentId`, `generation`, …) |
+| `result_summary`      | jsonb nullable                  | Typed command output (small, bounded)                                           |
+| `error_code`          | text nullable                   | Machine-readable terminal error code                                            |
+| `error_message`       | text nullable                   | Terminal error message                                                          |
+| `queued_at`           | timestamptz(3) nullable         | Set when status → `queued`                                                      |
+| `dispatch_started_at` | timestamptz(3) nullable         | Set when status → `dispatching`                                                 |
+| `sent_at`             | timestamptz(3) nullable         | Set when status → `sent`                                                        |
+| `acked_at`            | timestamptz(3) nullable         | Set when status → `acked`                                                       |
+| `started_at`          | timestamptz(3) nullable         | Set when status → `running`                                                     |
+| `finished_at`         | timestamptz(3) nullable         | Set when status → terminal                                                      |
+| `expires_at`          | timestamptz(3) nullable         | Optional command TTL                                                            |
 
 There is **no `payload` column on `command`** — the daemon execution payload
 lives in the `dispatch` side table (below) and is deleted shortly after the
@@ -844,11 +837,10 @@ envelopes, or TLS material); `result_summary` stores typed command output.
 `managedDestroyGate`, `followUpPromote`, `pendingTlsLeaf`, `desiredHash`, …)
 read through `getCommandMetadata`. It is also where a fan-out takes a one-shot
 claim: `claimCommandMetadataFlag` merges a key with a conditional UPDATE, so
-sibling commands finishing at once elect exactly one follow-up enqueuer. **`options` is unused today** and is kept solely for the
-schema `metadata`/`options` pairing rule (see `schema-cutover-ledger.md`
-Step 3).
-**Never store logs, streaming output, or large blobs in
-these columns.**
+sibling commands finishing at once elect exactly one follow-up enqueuer.
+**`options` is unused today** and is kept solely for the schema
+`metadata`/`options` pairing rule (see `schema-cutover-ledger.md` Step 3).
+**Never store logs, streaming output, or large blobs in these columns.**
 
 **Status values:**
 
@@ -873,15 +865,16 @@ these columns.**
 Only FK is `server_id → server.id` (`ON DELETE CASCADE`). Organization is
 derived from the server — no `organization_id` column on `command`.
 
-**Lifecycle timestamps are real columns.** `status`, `created_at`,
-`updated_at`, `attempts`, `name`, `result_summary`, every granular timestamp
-(`queued_at`…`finished_at`, `expires_at`) and both error fields
-(`error_code` / `error_message`) are physical columns —
-`transitionCommand` `.set()`s them directly; nothing merges into `metadata`
-any more. `serializeCommandRecord` in `command-records.ts` maps those columns
-onto the stable `CommandRecord` type (`result` ← `result_summary`, `error` ←
-`error_message`) and normalizes postgres.js timestamptz strings (`YYYY-MM-DD
-HH:mm:ss+00`) to ISO-8601; it never exposes a dispatch payload.
+**Lifecycle timestamps are real columns.** `status`, `created_at`, `updated_at`,
+`attempts`, `name`, `result_summary`, every granular timestamp
+(`queued_at`…`finished_at`, `expires_at`) and both error fields (`error_code` /
+`error_message`) are physical columns — `transitionCommand` `.set()`s them
+directly; nothing merges into `metadata` any more. `serializeCommandRecord` in
+`command-records.ts` maps those columns onto the stable `CommandRecord` type
+(`result` ← `result_summary`, `error` ← `error_message`) and normalizes
+postgres.js timestamptz strings (`YYYY-MM-DD
+HH:mm:ss+00`) to ISO-8601; it never
+exposes a dispatch payload.
 
 Server delete cascades to command rows (`ON DELETE CASCADE` on `server_id`).
 
@@ -890,11 +883,11 @@ Server delete cascades to command rows (`ON DELETE CASCADE` on `server_id`).
 One-shot daemon execution payload for a `command` — the only place
 secret-bearing command input is stored.
 
-| Column       | Type                            | Notes                                                  |
-| ------------ | ------------------------------- | ------------------------------------------------------ |
-| `command_id` | uuid PK                         | FK → `command.id`, `ON DELETE CASCADE`                  |
-| `created_at` | timestamptz(3) NOT NULL `now()` | Written with the command row                            |
-| `payload`    | jsonb NOT NULL                  | Typed daemon command input (small, bounded)             |
+| Column       | Type                            | Notes                                                       |
+| ------------ | ------------------------------- | ----------------------------------------------------------- |
+| `command_id` | uuid PK                         | FK → `command.id`, `ON DELETE CASCADE`                      |
+| `created_at` | timestamptz(3) NOT NULL `now()` | Written with the command row                                |
+| `payload`    | jsonb NOT NULL                  | Typed daemon command input (small, bounded)                 |
 | `expires_at` | timestamptz(3) nullable         | Failure-retention deadline; `NULL` until a terminal failure |
 
 **Lifecycle / cleanup ownership:**
@@ -907,9 +900,10 @@ secret-bearing command input is stored.
    (`dispatch_payload_missing`) instead of dispatching an empty envelope.
 3. `transitionCommand` finalizes it on **any** terminal transition (consumer
    outcome, enqueue failure, expiry): `succeeded` deletes the row immediately;
-   `failed` / `timed_out` / `cancelled` stamp `expires_at =
-   now + COMMAND_DISPATCH_FAILURE_RETENTION_MS` (24h) for debugging. Cleanup is
-   best effort and never fails the transition.
+   `failed` / `timed_out` / `cancelled` stamp
+   `expires_at =
+   now + COMMAND_DISPATCH_FAILURE_RETENTION_MS` (24h) for
+   debugging. Cleanup is best effort and never fails the transition.
 4. Expired rows are removed by `sweepExpiredCommandDispatch` on the **shared
    maintenance tick** — the Workers offline-sweep cron (reusing that cron's
    already-open Hyperdrive db) and the Deno `DAEMON_CELL_MAINTAIN_MS` timer.
@@ -929,27 +923,27 @@ column to cache it. See `src/lib/execution-logs/AGENTS.md`.
 
 ## Layout
 
-| File                                | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schema.ts`                         | Drizzle table definitions — sync with dev DB via `dev/scripts/introspect.sh` or `dev/scripts/sync.sh`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `deployment-records.ts`             | Deployment target helpers (`upsertDeploymentTargets`, apply/fail transitions, prune draining)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `deployment-history.ts`             | Environment deploy **history** reads from `command` (`listEnvironmentDeploymentHistory`, `getEnvironmentDeploymentDetail`) — `deployment` holds current state only. The list is keyset-paginated; the detail's same-generation fan-out is deliberately **unpaginated** so every participating host is enumerable. Replica counts (`replicaCounts` / `totalReplicas`) are historical, read from each attempt's `command.context`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `slot-records.ts`                   | Scheduled-instance helpers for the **`slot`** table (file name unchanged until phase 2; `replaceEnvironmentSlots` sticky re-plan, list by environment/server); persists nullable `slot.address` so spanning `ipv4_address` / `extra_hosts` stay stable across re-plans                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `task-records.ts`                   | Cron-style scheduled-command helpers (`listTasksForService` / `listTasksForServices`, `createTask` / `updateTask` / `deleteTask`, `parseTaskNameInput`, `isTaskUniqueViolation`). Configuration only — nothing is enqueued.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `repository-records.ts`                 | Git **`repository`** helpers (file name unchanged until a later phase; table was `source`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `label-records.ts`                  | Server label helpers (`parseServerLabelInput`, `setServerLabels` replace-all, fleet `listServerLabelsForServers`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `fabric-records.ts`                 | TurboFabric helpers (`enableOrganizationFabric` / `disableOrganizationFabric`, `ensureFabricRelays`, `loadFabricReconcileSnapshot` + `buildFabricReconcilePayloadFromSnapshot` / `buildFabricReconcilePayload`, `stampRelayPublicKey`, `materializeSpanningNetworks`, compose-network reclaim: `listEnvironmentComposeNetworks` / `purgeEnvironmentComposeNetworks` / `purgeEnvironmentsComposeNetworks` / `purgeComposeNetworksCreatedAfter` / `releaseSubnetsForServer` — `network.environment_id` has no FK). One snapshot per fabric apply loads relays, endpoint caches, PSK envelopes, subnets, datacenter memberships, and address-family preferences once. Pair PSKs are canonical: both peer stanzas use the envelope owned by the lexicographically smaller relay id (`selectPairPresharedEnvelope`). Derived gateway advertised CIDRs are owned among **public-keyed** relays only (the same set `buildReconcilePeerLists` emits as peers); GET fabric still shows planned defaults for keyless gateways. Relay `address` allocates the lowest-free host in `fabric.cidr`; `endpoint_address` is an operator override over pair-aware `planRelayPath` (`direct_lan` via shared datacenter family intersection, else `direct_public`). An unplannable pair is omitted from that server's peer list and recorded on `unreachablePeers` (the rest of the mesh still builds). GET fabric `resolvedEndpoint` stays destination-only (no viewer/`self`). |
-| `table-naming.test.ts`              | Guard: every `CREATE TABLE` across migration SQL files under `migrations/` is one lower-case word (no underscores); exception list for external-compat names; retired-name reject list (phase 2 adds `gitapp` / `installation` / `source` / `steward` / `location` / `credential` / `node` / `segment` / `rotation`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `primary-key.test.ts`               | Guard: every `CREATE TABLE` across migration SQL files under `migrations/` has a `PRIMARY KEY`; application PKs are `uuid … DEFAULT uuidv7()` or the allowlisted natural key `dispatch.command_id`; rejects `serial` / identity / `nextval()`; pins the drizzle-orm `public.migration` bookkeeping DDL (see Multi-node PostgreSQL model)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `../../db.ts`                       | Connection factories (`createDenoDb`, `createToolingDb`, `createWorkersDb`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `../../drizzle.config.mjs`          | drizzle-kit config (`TURBOPANEL_DATABASE_URL`; introspect, push, generate, migrate, studio)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `../../scripts/bootstrap-dev-db.sh` | Dev DB bootstrap: `pnpm migrate` (includes the PostgreSQL 18 / `uuidv7()` preflight)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `../../scripts/check-postgres-compat.mjs` | Pre-migration gate run by `pnpm migrate`: verifies the target server has `uuidv7()` (PostgreSQL 18 minimum) before `drizzle-kit migrate` touches it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `~/dev/scripts/introspect.sh`       | Pull DB → `schema.ts` (lives in dev repo)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `~/dev/scripts/sync.sh`             | Push `schema.ts` → DB (Deno dev only; no migration files)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `../../scripts/db-connect.sh`       | Resolves `TURBOPANEL_DATABASE_URL` from env or `turbopanel-instance` for drizzle-kit scripts                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `../../migrations/`                 | Versioned SQL migration files (committed); applied by `pnpm migrate`; tracked in `public.migration`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `../../drizzle/`                    | Ephemeral introspect scratch dir — `dev/scripts/introspect.sh` deletes after adopt; never committed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| File                                      | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema.ts`                               | Drizzle table definitions — sync with dev DB via `dev/scripts/introspect.sh` or `dev/scripts/sync.sh`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `deployment-records.ts`                   | Deployment target helpers (`upsertDeploymentTargets`, apply/fail transitions, prune draining)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `deployment-history.ts`                   | Environment deploy **history** reads from `command` (`listEnvironmentDeploymentHistory`, `getEnvironmentDeploymentDetail`) — `deployment` holds current state only. The list is keyset-paginated; the detail's same-generation fan-out is deliberately **unpaginated** so every participating host is enumerable. Replica counts (`replicaCounts` / `totalReplicas`) are historical, read from each attempt's `command.context`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `slot-records.ts`                         | Scheduled-instance helpers for the **`slot`** table (file name unchanged until phase 2; `replaceEnvironmentSlots` sticky re-plan, list by environment/server); persists nullable `slot.address` so spanning `ipv4_address` / `extra_hosts` stay stable across re-plans                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `task-records.ts`                         | Cron-style scheduled-command helpers (`listTasksForService` / `listTasksForServices`, `createTask` / `updateTask` / `deleteTask`, `parseTaskNameInput`, `isTaskUniqueViolation`). Configuration only — nothing is enqueued.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `repository-records.ts`                   | Git **`repository`** helpers (file name unchanged until a later phase; table was `source`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `label-records.ts`                        | Server label helpers (`parseServerLabelInput`, `setServerLabels` replace-all, fleet `listServerLabelsForServers`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `fabric-records.ts`                       | TurboFabric helpers (`enableOrganizationFabric` / `disableOrganizationFabric`, `ensureFabricRelays`, `loadFabricReconcileSnapshot` + `buildFabricReconcilePayloadFromSnapshot` / `buildFabricReconcilePayload`, `stampRelayPublicKey`, `materializeSpanningNetworks`, compose-network reclaim: `listEnvironmentComposeNetworks` / `purgeEnvironmentComposeNetworks` / `purgeEnvironmentsComposeNetworks` / `purgeComposeNetworksCreatedAfter` / `releaseSubnetsForServer` — `network.environment_id` has no FK). One snapshot per fabric apply loads relays, endpoint caches, PSK envelopes, subnets, datacenter memberships, and address-family preferences once. Pair PSKs are canonical: both peer stanzas use the envelope owned by the lexicographically smaller relay id (`selectPairPresharedEnvelope`). Derived gateway advertised CIDRs are owned among **public-keyed** relays only (the same set `buildReconcilePeerLists` emits as peers); GET fabric still shows planned defaults for keyless gateways. Relay `address` allocates the lowest-free host in `fabric.cidr`; `endpoint_address` is an operator override over pair-aware `planRelayPath` (`direct_lan` via shared datacenter family intersection, else `direct_public`). An unplannable pair is omitted from that server's peer list and recorded on `unreachablePeers` (the rest of the mesh still builds). GET fabric `resolvedEndpoint` stays destination-only (no viewer/`self`). |
+| `table-naming.test.ts`                    | Guard: every `CREATE TABLE` across migration SQL files under `migrations/` is one lower-case word (no underscores); exception list for external-compat names; retired-name reject list (phase 2 adds `gitapp` / `installation` / `source` / `steward` / `location` / `credential` / `node` / `segment` / `rotation`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `primary-key.test.ts`                     | Guard: every `CREATE TABLE` across migration SQL files under `migrations/` has a `PRIMARY KEY`; application PKs are `uuid … DEFAULT uuidv7()` or the allowlisted natural key `dispatch.command_id`; rejects `serial` / identity / `nextval()`; pins the drizzle-orm `public.migration` bookkeeping DDL (see Multi-node PostgreSQL model)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `../../db.ts`                             | Connection factories (`createDenoDb`, `createToolingDb`, `createWorkersDb`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `../../drizzle.config.mjs`                | drizzle-kit config (`TURBOPANEL_DATABASE_URL`; introspect, push, generate, migrate, studio)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `../../scripts/bootstrap-dev-db.sh`       | Dev DB bootstrap: `pnpm migrate` (includes the PostgreSQL 18 / `uuidv7()` preflight)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `../../scripts/check-postgres-compat.mjs` | Pre-migration gate run by `pnpm migrate`: verifies the target server has `uuidv7()` (PostgreSQL 18 minimum) before `drizzle-kit migrate` touches it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `~/dev/scripts/introspect.sh`             | Pull DB → `schema.ts` (lives in dev repo)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `~/dev/scripts/sync.sh`                   | Push `schema.ts` → DB (Deno dev only; no migration files)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `../../scripts/db-connect.sh`             | Resolves `TURBOPANEL_DATABASE_URL` from env or `turbopanel-instance` for drizzle-kit scripts                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `../../migrations/`                       | Versioned SQL migration files (committed); applied by `pnpm migrate`; tracked in `public.migration`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `../../drizzle/`                          | Ephemeral introspect scratch dir — `dev/scripts/introspect.sh` deletes after adopt; never committed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 ### Authz engine
 
@@ -958,12 +952,12 @@ both Deno and Workers — no Deno-only imports). Permissions are static code
 constants in `catalog.ts`. The modules below evaluate access at request time
 against `grant`.
 
-| File                              | Purpose                                                                                                                                                                                                                                           |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| File                              | Purpose                                                                                                                                                                                                                                                             |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `../../client/authz/catalog.ts`   | Static `PERMISSIONS`, `GRANTABLE_PERMISSIONS` (excludes `system:manage`), `ENTITY_TYPES`, `SUBJECT_TYPES` (`user` / `team` / `organization`), `isPermissionKey`, `isGrantablePermissionKey`, `isEntityType`, `isSubjectType`, `getPermissionCatalog` — no DB access |
-| `../../client/authz/service.ts`   | `isPlatformAdmin`, `isSuperAdmin`, `canManageOrganization`, `canOwnOrganization`, `canManageTeam`, `canOwnTeam`, `canInviteToOrganization`, `canInviteToTeam`, `assertNotLastOrgOwner` — higher-level org/team management checks built on `can()` |
-| `../../client/authz/evaluator.ts` | `getSubjects`, `can`, `assertCan`, `listVisible`, `ForbiddenError` — org-level grant checks via domain-FK ancestry; superadmin and admin bypass in SQL                                                                                            |
-| `../../client/authz/http.ts`      | `assertCanOr403` / `assertOrgOwnerOr403` Hono helpers; `assertNotSystemOwnedOr403` secondary guard (`403` `system_resource_immutable`) via `resolveWorkspaceKindForEntity`                                                                        |
+| `../../client/authz/service.ts`   | `isPlatformAdmin`, `isSuperAdmin`, `canManageOrganization`, `canOwnOrganization`, `canManageTeam`, `canOwnTeam`, `canInviteToOrganization`, `canInviteToTeam`, `assertNotLastOrgOwner` — higher-level org/team management checks built on `can()`                   |
+| `../../client/authz/evaluator.ts` | `getSubjects`, `can`, `assertCan`, `listVisible`, `ForbiddenError` — org-level grant checks via domain-FK ancestry; superadmin and admin bypass in SQL                                                                                                              |
+| `../../client/authz/http.ts`      | `assertCanOr403` / `assertOrgOwnerOr403` Hono helpers; `assertNotSystemOwnedOr403` secondary guard (`403` `system_resource_immutable`) via `resolveWorkspaceKindForEntity`                                                                                          |
 
 `can()` resolves org-level access in a **single CTE query** (`subjectset` →
 `ancestry` → org grant `hits`) — one round-trip. **Organization permission
@@ -987,14 +981,14 @@ check `organization:manage`. Never use `organization:own` as a broad org-access
 check — it is exact owner-only.
 
 **Install (Deno):** `completeInstanceInstall` inserts the **TurboPanel**
-workspace (`kind='turbopanel'`) first, then exactly one
-`organization:own` grant on the org, one `team:own` grant on the default team,
-and a **Default Workspace** (`kind='user'`) for the superadmin user. Workers
-sign-up (`createOrganizationForUser`) still creates only the Default Workspace
-when provisioning an org — the TurboPanel workspace is ensured lazily
-on first server enroll for those orgs. Self-hosted install names the org **Root
-Organization**; Workers / user-created first orgs default to **My
-Organization**, and `POST /organizations` defaults to **New Organization**.
+workspace (`kind='turbopanel'`) first, then exactly one `organization:own` grant
+on the org, one `team:own` grant on the default team, and a **Default
+Workspace** (`kind='user'`) for the superadmin user. Workers sign-up
+(`createOrganizationForUser`) still creates only the Default Workspace when
+provisioning an org — the TurboPanel workspace is ensured lazily on first server
+enroll for those orgs. Self-hosted install names the org **Root Organization**;
+Workers / user-created first orgs default to **My Organization**, and
+`POST /organizations` defaults to **New Organization**.
 
 **Completed:** Resource ancestry is computed directly from real domain tables
 (`organization → workspace → project → environment → service/hosting`,
