@@ -108,9 +108,9 @@
   // Host metrics (Workers Analytics Engine). Dataset name is reused across
   // envs — AE datasets are account-scoped and auto-created on first write;
   // docs do not require globally unique names. Rows are keyed by index1=serverId.
-  // v4 is family-based: every sample writes one always-present host.system
-  // row, one always-present host.io row, plus presence-gated pages for
-  // gpu/network/filesystem/block/hardware.physical and one row per
+  // The current contract is family-based: every sample writes one always-present
+  // host.system row, one always-present host.io row, plus presence-gated pages
+  // for gpu/network/filesystem/block/hardware.physical and one row per
   // managed.ingress/managed.database_proxy entry and per event — see
   // backends/cloudflare/field-map-v4.ts. `workers.ts` wires this binding
   // straight into a real `CloudflareAnalyticsEngineServerMetricsStoreV4` for
@@ -119,12 +119,6 @@
   // SQL API reads need secrets: TURBOPANEL_ANALYTICS_ENGINE_API_TOKEN
   // (Account Analytics Read) plus CLOUDFLARE_ACCOUNT_ID (vars below / .dev.vars).
   // Optional: TURBOPANEL_SERVER_METRICS_AE_MAX_RANGE_SECONDS (default = 90-day AE retention).
-  //
-  // Retired: SERVER_METRICS bound "turbopanel_server_host_metrics" (the v3
-  // part-based dataset — blob1="metrics", blob2="core"/"extended"/"sensors"/
-  // "traffic"). The v3 contract has been fully removed from this codebase;
-  // that dataset is never queried again. AE datasets can't be deleted, so the
-  // name itself is never reused, but the binding is gone — do not re-add it.
   "analytics_engine_datasets": [
     {
       "binding": "SERVER_METRICS_V4",
@@ -220,8 +214,6 @@
         }
       ],
       "triggers": { "crons": ["* * * * *"] },
-      // Retired: SERVER_METRICS bound "turbopanel_server_host_metrics" (v3,
-      // fully removed — see the default env's comment above).
       "analytics_engine_datasets": [
         {
           "binding": "SERVER_METRICS_V4",
@@ -332,8 +324,6 @@
         }
       ],
       "triggers": { "crons": ["* * * * *"] },
-      // Retired: SERVER_METRICS bound "turbopanel_server_host_metrics" (v3,
-      // fully removed — see the default env's comment above).
       "analytics_engine_datasets": [
         {
           "binding": "SERVER_METRICS_V4",

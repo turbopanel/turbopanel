@@ -40,32 +40,33 @@ import type {
   IngressSourceSampleV4,
   MemoryDetailSampleV4,
   NetworkDeviceSampleV4,
-} from '../../contract-v4.ts'
+} from "../../contract-v4.ts";
 
 /** Hot raw-sample tables (recent, un-archived rows). */
-export const HOST_SAMPLES_TABLE = 'server_host_samples'
-export const NETWORK_SAMPLES_TABLE = 'server_network_samples'
-export const FILESYSTEM_SAMPLES_TABLE = 'server_filesystem_samples'
-export const BLOCK_SAMPLES_TABLE = 'server_block_samples'
-export const GPU_SAMPLES_TABLE = 'server_gpu_samples'
-export const HARDWARE_SIGNAL_SAMPLES_TABLE = 'server_hardware_signal_samples'
-export const INGRESS_SAMPLES_TABLE = 'server_ingress_samples'
-export const DATABASE_PROXY_SAMPLES_TABLE = 'server_database_proxy_samples'
-export const CPU_HOTSPOT_SAMPLES_TABLE = 'server_cpu_hotspot_samples'
-export const CPU_CORE_SAMPLES_TABLE = 'server_cpu_core_samples'
-export const MEMORY_DETAIL_SAMPLES_TABLE = 'server_memory_detail_samples'
-export const METRIC_EVENTS_TABLE = 'server_metric_events'
+export const HOST_SAMPLES_TABLE = "server_host_samples";
+export const NETWORK_SAMPLES_TABLE = "server_network_samples";
+export const FILESYSTEM_SAMPLES_TABLE = "server_filesystem_samples";
+export const BLOCK_SAMPLES_TABLE = "server_block_samples";
+export const GPU_SAMPLES_TABLE = "server_gpu_samples";
+export const HARDWARE_SIGNAL_SAMPLES_TABLE = "server_hardware_signal_samples";
+export const INGRESS_SAMPLES_TABLE = "server_ingress_samples";
+export const DATABASE_PROXY_SAMPLES_TABLE = "server_database_proxy_samples";
+export const CPU_HOTSPOT_SAMPLES_TABLE = "server_cpu_hotspot_samples";
+export const CPU_CORE_SAMPLES_TABLE = "server_cpu_core_samples";
+export const MEMORY_DETAIL_SAMPLES_TABLE = "server_memory_detail_samples";
+export const METRIC_EVENTS_TABLE = "server_metric_events";
 
 /** Connection-status transition table — untouched by the v4 cutover. */
-export const STATUS_EVENTS_TABLE = 'server_status_events'
+export const STATUS_EVENTS_TABLE = "server_status_events";
 
 /**
- * Sidecar version written after a successful open. Pre-MVP: `openDuckDb`
- * only runs `CREATE TABLE IF NOT EXISTS` for the current layout — it does
- * not migrate or wipe older files. Bump when the layout changes so support
- * can tell a stale local store from a current one.
+ * Sidecar version written after a successful open. The current DuckDB store
+ * is **6** — the only supported on-disk layout. `openDuckDb` discards
+ * `metrics.duckdb`, `parquet/`, `tmp/`, and `schema-version` when the marker
+ * is missing, corrupt, or not this value, then creates the current store.
+ * There is no in-place migration and no supported path for older files.
  */
-export const DUCKDB_SCHEMA_MARKER_VERSION = 6
+export const DUCKDB_SCHEMA_MARKER_VERSION = 6;
 
 // ---------------------------------------------------------------------------
 // Field ordering — hand-declared `Record<keyof T, true>` literals so a
@@ -74,7 +75,7 @@ export const DUCKDB_SCHEMA_MARKER_VERSION = 6
 // gives a stable, deterministic field order (object literal insertion order).
 // ---------------------------------------------------------------------------
 
-export type HostMetricGroupV4 = keyof HostMetricsV4
+export type HostMetricGroupV4 = keyof HostMetricsV4;
 
 /** Exhaustive over `HostMetricsV4`'s keys — a group added/removed there fails this literal to compile. */
 const HOST_GROUP_MARKERS: Record<HostMetricGroupV4, true> = {
@@ -83,13 +84,13 @@ const HOST_GROUP_MARKERS: Record<HostMetricGroupV4, true> = {
   memory: true,
   storage: true,
   network: true,
-}
+};
 
 export const HOST_METRIC_GROUPS: readonly HostMetricGroupV4[] = Object.keys(
-  HOST_GROUP_MARKERS
-) as HostMetricGroupV4[]
+  HOST_GROUP_MARKERS,
+) as HostMetricGroupV4[];
 
-export type HostFieldRefV4 = { group: HostMetricGroupV4; field: string }
+export type HostFieldRefV4 = { group: HostMetricGroupV4; field: string };
 
 const HOST_CPU_FIELDS: Record<keyof HostCpuMetricsV4, true> = {
   busyPercent: true,
@@ -103,12 +104,12 @@ const HOST_CPU_FIELDS: Record<keyof HostCpuMetricsV4, true> = {
   procsRunning: true,
   procsBlocked: true,
   processCount: true,
-}
+};
 
 const HOST_KERNEL_FIELDS: Record<keyof HostKernelMetricsV4, true> = {
   fileHandlesUsedPercent: true,
   conntrackUsedPercent: true,
-}
+};
 
 const HOST_MEMORY_FIELDS: Record<keyof HostMemoryMetricsV4, true> = {
   availableBytes: true,
@@ -118,7 +119,7 @@ const HOST_MEMORY_FIELDS: Record<keyof HostMemoryMetricsV4, true> = {
   swapInBytesPerSecond: true,
   swapOutBytesPerSecond: true,
   majorPageFaultsPerSecond: true,
-}
+};
 
 const HOST_STORAGE_FIELDS: Record<keyof HostStorageMetricsV4, true> = {
   ioPressureSomePercent: true,
@@ -130,20 +131,23 @@ const HOST_STORAGE_FIELDS: Record<keyof HostStorageMetricsV4, true> = {
   maxBlockDeviceUtilPercent: true,
   rootFilesystemAvailableBytes: true,
   rootFilesystemFreeInodes: true,
-}
+};
 
 const HOST_NETWORK_FIELDS: Record<keyof HostNetworkMetricsV4, true> = {
   tcpRetransmitPercent: true,
   softnetDropsPerSecond: true,
-}
+};
 
-const HOST_GROUP_FIELD_RECORDS: Record<HostMetricGroupV4, Record<string, true>> = {
+const HOST_GROUP_FIELD_RECORDS: Record<
+  HostMetricGroupV4,
+  Record<string, true>
+> = {
   cpu: HOST_CPU_FIELDS,
   kernel: HOST_KERNEL_FIELDS,
   memory: HOST_MEMORY_FIELDS,
   storage: HOST_STORAGE_FIELDS,
   network: HOST_NETWORK_FIELDS,
-}
+};
 
 /**
  * Every `HostMetricsV4` leaf field, in declared group order — 31 entries
@@ -154,23 +158,29 @@ const HOST_GROUP_FIELD_RECORDS: Record<HostMetricGroupV4, Record<string, true>> 
  * field or group added to `contract-v4.ts` without a matching entry fails
  * the TypeScript build rather than silently missing a column.
  */
-export const HOST_METRIC_FIELD_REFS: readonly HostFieldRefV4[] = HOST_METRIC_GROUPS.flatMap(
-  (group) =>
-    Object.keys(HOST_GROUP_FIELD_RECORDS[group]).map((field) => ({
-      group,
-      field,
-    }))
-)
+export const HOST_METRIC_FIELD_REFS: readonly HostFieldRefV4[] =
+  HOST_METRIC_GROUPS.flatMap(
+    (group) =>
+      Object.keys(HOST_GROUP_FIELD_RECORDS[group]).map((field) => ({
+        group,
+        field,
+      })),
+  );
 
-const NETWORK_FIELDS: Record<keyof Omit<NetworkDeviceSampleV4, 'deviceId'>, true> = {
+const NETWORK_FIELDS: Record<
+  keyof Omit<NetworkDeviceSampleV4, "deviceId">,
+  true
+> = {
   receiveBytesPerSecond: true,
   transmitBytesPerSecond: true,
   receiveErrorsPerSecond: true,
   transmitErrorsPerSecond: true,
   receiveDropsPerSecond: true,
   transmitDropsPerSecond: true,
-}
-export const NETWORK_METRIC_FIELDS: readonly string[] = Object.keys(NETWORK_FIELDS)
+};
+export const NETWORK_METRIC_FIELDS: readonly string[] = Object.keys(
+  NETWORK_FIELDS,
+);
 
 /**
  * The root filesystem never gets a row here: its capacity is carried
@@ -184,26 +194,32 @@ export const NETWORK_METRIC_FIELDS: readonly string[] = Object.keys(NETWORK_FIEL
  * joined against the topology snapshot's `FilesystemTopology.roles` (hosting/
  * docker/application/custom) for labeling — never a synthetic root row here.
  */
-const FILESYSTEM_FIELDS: Record<keyof Omit<FilesystemSampleV4, 'filesystemId'>, true> = {
+const FILESYSTEM_FIELDS: Record<
+  keyof Omit<FilesystemSampleV4, "filesystemId">,
+  true
+> = {
   availableBytes: true,
   freeInodes: true,
-}
-export const FILESYSTEM_METRIC_FIELDS: readonly string[] = Object.keys(FILESYSTEM_FIELDS)
+};
+export const FILESYSTEM_METRIC_FIELDS: readonly string[] = Object.keys(
+  FILESYSTEM_FIELDS,
+);
 
-const BLOCK_FIELDS: Record<keyof Omit<BlockDeviceSampleV4, 'deviceId'>, true> = {
-  readBytesPerSecond: true,
-  writeBytesPerSecond: true,
-  readOpsPerSecond: true,
-  writeOpsPerSecond: true,
-  readLatencyMs: true,
-  writeLatencyMs: true,
-  utilizationPercent: true,
-  temperatureCelsius: true,
-  queueDepth: true,
-}
-export const BLOCK_METRIC_FIELDS: readonly string[] = Object.keys(BLOCK_FIELDS)
+const BLOCK_FIELDS: Record<keyof Omit<BlockDeviceSampleV4, "deviceId">, true> =
+  {
+    readBytesPerSecond: true,
+    writeBytesPerSecond: true,
+    readOpsPerSecond: true,
+    writeOpsPerSecond: true,
+    readLatencyMs: true,
+    writeLatencyMs: true,
+    utilizationPercent: true,
+    temperatureCelsius: true,
+    queueDepth: true,
+  };
+export const BLOCK_METRIC_FIELDS: readonly string[] = Object.keys(BLOCK_FIELDS);
 
-const GPU_FIELDS: Record<keyof Omit<GpuSampleV4, 'gpuId'>, true> = {
+const GPU_FIELDS: Record<keyof Omit<GpuSampleV4, "gpuId">, true> = {
   utilizationPercent: true,
   memoryUsedBytes: true,
   memoryActivityPercent: true,
@@ -213,10 +229,13 @@ const GPU_FIELDS: Record<keyof Omit<GpuSampleV4, 'gpuId'>, true> = {
   pcieReceiveBytesPerSecond: true,
   pcieTransmitBytesPerSecond: true,
   throttlePercent: true,
-}
-export const GPU_METRIC_FIELDS: readonly string[] = Object.keys(GPU_FIELDS)
+};
+export const GPU_METRIC_FIELDS: readonly string[] = Object.keys(GPU_FIELDS);
 
-const INGRESS_FIELDS: Record<keyof Omit<IngressSourceSampleV4, 'sourceId' | 'sourceKind'>, true> = {
+const INGRESS_FIELDS: Record<
+  keyof Omit<IngressSourceSampleV4, "sourceId" | "sourceKind">,
+  true
+> = {
   requests: true,
   responses2xx: true,
   responses3xx: true,
@@ -234,11 +253,13 @@ const INGRESS_FIELDS: Record<keyof Omit<IngressSourceSampleV4, 'sourceId' | 'sou
   upstreamsHealthy: true,
   upstreamsTotal: true,
   retries: true,
-}
-export const INGRESS_METRIC_FIELDS: readonly string[] = Object.keys(INGRESS_FIELDS)
+};
+export const INGRESS_METRIC_FIELDS: readonly string[] = Object.keys(
+  INGRESS_FIELDS,
+);
 
 const DATABASE_PROXY_FIELDS: Record<
-  keyof Omit<DatabaseProxySampleV4, 'sourceId' | 'sourceKind'>,
+  keyof Omit<DatabaseProxySampleV4, "sourceId" | "sourceKind">,
   true
 > = {
   queries: true,
@@ -247,8 +268,10 @@ const DATABASE_PROXY_FIELDS: Record<
   clientConnections: true,
   backendConnections: true,
   backendsUp: true,
-}
-export const DATABASE_PROXY_METRIC_FIELDS: readonly string[] = Object.keys(DATABASE_PROXY_FIELDS)
+};
+export const DATABASE_PROXY_METRIC_FIELDS: readonly string[] = Object.keys(
+  DATABASE_PROXY_FIELDS,
+);
 
 /**
  * `cpuDetail`'s 7 scalar fields (everything but `hotspots`, which fans out
@@ -257,7 +280,10 @@ export const DATABASE_PROXY_METRIC_FIELDS: readonly string[] = Object.keys(DATAB
  * pattern above, since `cpuDetail` lives outside `HostMetricsV4`'s `host`
  * object but is still host-global (one value per sample, not per entity).
  */
-const HOST_GLOBAL_CPU_DETAIL_FIELDS: Record<keyof Omit<CpuDetailSampleV4, 'hotspots'>, true> = {
+const HOST_GLOBAL_CPU_DETAIL_FIELDS: Record<
+  keyof Omit<CpuDetailSampleV4, "hotspots">,
+  true
+> = {
   averageFrequencyMHz: true,
   minimumFrequencyMHz: true,
   maximumFrequencyMHz: true,
@@ -265,24 +291,35 @@ const HOST_GLOBAL_CPU_DETAIL_FIELDS: Record<keyof Omit<CpuDetailSampleV4, 'hotsp
   interruptsPerSecond: true,
   forksPerSecond: true,
   cpuIrqPercent: true,
-}
-export const HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST: readonly string[] = Object.keys(
-  HOST_GLOBAL_CPU_DETAIL_FIELDS
-)
+};
+export const HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST: readonly string[] = Object
+  .keys(
+    HOST_GLOBAL_CPU_DETAIL_FIELDS,
+  );
 
-const CPU_HOTSPOT_FIELDS: Record<keyof Omit<CpuHotspotSampleV4, 'coreId'>, true> = {
+const CPU_HOTSPOT_FIELDS: Record<
+  keyof Omit<CpuHotspotSampleV4, "coreId">,
+  true
+> = {
   busyPercent: true,
   iowaitPercent: true,
   stealPercent: true,
-}
-export const CPU_HOTSPOT_METRIC_FIELDS: readonly string[] = Object.keys(CPU_HOTSPOT_FIELDS)
+};
+export const CPU_HOTSPOT_METRIC_FIELDS: readonly string[] = Object.keys(
+  CPU_HOTSPOT_FIELDS,
+);
 
-const CPU_CORE_LIVE_FIELDS: Record<keyof Omit<CpuCoreLiveSampleV4, 'coreId'>, true> = {
+const CPU_CORE_LIVE_FIELDS: Record<
+  keyof Omit<CpuCoreLiveSampleV4, "coreId">,
+  true
+> = {
   busyPercent: true,
   iowaitPercent: true,
   stealPercent: true,
-}
-export const CPU_CORE_LIVE_METRIC_FIELDS: readonly string[] = Object.keys(CPU_CORE_LIVE_FIELDS)
+};
+export const CPU_CORE_LIVE_METRIC_FIELDS: readonly string[] = Object.keys(
+  CPU_CORE_LIVE_FIELDS,
+);
 
 const MEMORY_DETAIL_FIELDS: Record<keyof MemoryDetailSampleV4, true> = {
   memoryFreeBytes: true,
@@ -304,11 +341,13 @@ const MEMORY_DETAIL_FIELDS: Record<keyof MemoryDetailSampleV4, true> = {
   pageScanDirectPerSecond: true,
   pageScanKswapdPerSecond: true,
   compactionStallsPerSecond: true,
-}
-export const MEMORY_DETAIL_METRIC_FIELDS: readonly string[] = Object.keys(MEMORY_DETAIL_FIELDS)
+};
+export const MEMORY_DETAIL_METRIC_FIELDS: readonly string[] = Object.keys(
+  MEMORY_DETAIL_FIELDS,
+);
 
 function snakeCase(field: string): string {
-  return field.replaceAll(/([A-Z])/g, '_$1').toLowerCase()
+  return field.replaceAll(/([A-Z])/g, "_$1").toLowerCase();
 }
 
 /**
@@ -318,24 +357,27 @@ function snakeCase(field: string): string {
  * (`cpu_pressure_some_percent` / `memory_pressure_some_percent`) is what
  * keeps every host column name unique within the single wide table.
  */
-export function hostMetricColumnName(group: HostMetricGroupV4, field: string): string {
+export function hostMetricColumnName(
+  group: HostMetricGroupV4,
+  field: string,
+): string {
   if (!(field in HOST_GROUP_FIELD_RECORDS[group])) {
-    throw new TypeError(`unknown host metrics field: ${group}.${field}`)
+    throw new TypeError(`unknown host metrics field: ${group}.${field}`);
   }
-  return `${group}_${snakeCase(field)}`
+  return `${group}_${snakeCase(field)}`;
 }
 
 /** DuckDB column name for a per-entity metric field — plain snake_case (no group collision within a single-family table). */
 export function entityMetricColumnName(field: string): string {
-  return snakeCase(field)
+  return snakeCase(field);
 }
 
 /** DuckDB column name for one of `cpuDetail`'s hand-declared host-global scalar fields. */
 export function cpuDetailHostColumnName(field: string): string {
   if (!(field in HOST_GLOBAL_CPU_DETAIL_FIELDS)) {
-    throw new TypeError(`unknown cpuDetail host-global field: ${field}`)
+    throw new TypeError(`unknown cpuDetail host-global field: ${field}`);
   }
-  return `cpu_detail_${snakeCase(field)}`
+  return `cpu_detail_${snakeCase(field)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,114 +387,124 @@ export function cpuDetailHostColumnName(field: string): string {
 // ---------------------------------------------------------------------------
 
 export const COMMON_METADATA_COLUMNS = [
-  'server_id',
-  'sampled_at',
-  'received_at',
-  'interval_seconds',
-  'collection_mode',
-  'sequence',
-  'topology_generation',
-  'boot_generation',
-] as const
+  "server_id",
+  "sampled_at",
+  "received_at",
+  "interval_seconds",
+  "collection_mode",
+  "sequence",
+  "topology_generation",
+  "boot_generation",
+] as const;
 
 const COMMON_METADATA_COLUMN_DEFS = [
-  'server_id UUID NOT NULL',
-  'sampled_at TIMESTAMP NOT NULL',
-  'received_at TIMESTAMP NOT NULL',
-  'interval_seconds SMALLINT NOT NULL',
-  'collection_mode VARCHAR NOT NULL',
-  'sequence BIGINT NOT NULL',
-  'topology_generation INTEGER NOT NULL',
-  'boot_generation INTEGER NOT NULL',
-]
+  "server_id UUID NOT NULL",
+  "sampled_at TIMESTAMP NOT NULL",
+  "received_at TIMESTAMP NOT NULL",
+  "interval_seconds SMALLINT NOT NULL",
+  "collection_mode VARCHAR NOT NULL",
+  "sequence BIGINT NOT NULL",
+  "topology_generation INTEGER NOT NULL",
+  "boot_generation INTEGER NOT NULL",
+];
 
 function indent(lines: readonly string[]): string {
-  return lines.map((line) => `    ${line}`).join(',\n')
+  return lines.map((line) => `    ${line}`).join(",\n");
 }
 
 function hostSamplesTableDdl(): string {
   const metricColumns = HOST_METRIC_FIELD_REFS.map(
-    (ref) => `${hostMetricColumnName(ref.group, ref.field)} DOUBLE`
-  )
+    (ref) => `${hostMetricColumnName(ref.group, ref.field)} DOUBLE`,
+  );
   const cpuDetailColumns = HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST.map(
-    (field) => `${cpuDetailHostColumnName(field)} DOUBLE`
-  )
+    (field) => `${cpuDetailHostColumnName(field)} DOUBLE`,
+  );
   return [
     `CREATE TABLE IF NOT EXISTS ${HOST_SAMPLES_TABLE} (`,
-    indent([...COMMON_METADATA_COLUMN_DEFS, ...metricColumns, ...cpuDetailColumns]),
+    indent([
+      ...COMMON_METADATA_COLUMN_DEFS,
+      ...metricColumns,
+      ...cpuDetailColumns,
+    ]),
     `)`,
-  ].join('\n')
+  ].join("\n");
 }
 
 /** DDL for a per-entity family table: common metadata + entity id column(s) + nullable DOUBLE metric columns. */
 function entitySamplesTableDdl(
   table: string,
   idColumnDefs: readonly string[],
-  metricFields: readonly string[]
+  metricFields: readonly string[],
 ): string {
-  const metricColumns = metricFields.map((field) => `${entityMetricColumnName(field)} DOUBLE`)
+  const metricColumns = metricFields.map((field) =>
+    `${entityMetricColumnName(field)} DOUBLE`
+  );
   return [
     `CREATE TABLE IF NOT EXISTS ${table} (`,
     indent([...COMMON_METADATA_COLUMN_DEFS, ...idColumnDefs, ...metricColumns]),
     `)`,
-  ].join('\n')
+  ].join("\n");
 }
 
 function networkSamplesTableDdl(): string {
   return entitySamplesTableDdl(
     NETWORK_SAMPLES_TABLE,
-    ['device_id VARCHAR NOT NULL'],
-    NETWORK_METRIC_FIELDS
-  )
+    ["device_id VARCHAR NOT NULL"],
+    NETWORK_METRIC_FIELDS,
+  );
 }
 
 function filesystemSamplesTableDdl(): string {
   return entitySamplesTableDdl(
     FILESYSTEM_SAMPLES_TABLE,
-    ['filesystem_id VARCHAR NOT NULL'],
-    FILESYSTEM_METRIC_FIELDS
-  )
+    ["filesystem_id VARCHAR NOT NULL"],
+    FILESYSTEM_METRIC_FIELDS,
+  );
 }
 
 function blockSamplesTableDdl(): string {
   return entitySamplesTableDdl(
     BLOCK_SAMPLES_TABLE,
-    ['device_id VARCHAR NOT NULL'],
-    BLOCK_METRIC_FIELDS
-  )
+    ["device_id VARCHAR NOT NULL"],
+    BLOCK_METRIC_FIELDS,
+  );
 }
 
 function gpuSamplesTableDdl(): string {
-  return entitySamplesTableDdl(GPU_SAMPLES_TABLE, ['gpu_id VARCHAR NOT NULL'], GPU_METRIC_FIELDS)
+  return entitySamplesTableDdl(
+    GPU_SAMPLES_TABLE,
+    ["gpu_id VARCHAR NOT NULL"],
+    GPU_METRIC_FIELDS,
+  );
 }
 
 function cpuHotspotSamplesTableDdl(): string {
   return entitySamplesTableDdl(
     CPU_HOTSPOT_SAMPLES_TABLE,
-    ['core_id VARCHAR NOT NULL'],
-    CPU_HOTSPOT_METRIC_FIELDS
-  )
+    ["core_id VARCHAR NOT NULL"],
+    CPU_HOTSPOT_METRIC_FIELDS,
+  );
 }
 
 /** Live-only: populated exclusively from `cpuCoreLive` rows during live sessions. */
 function cpuCoreSamplesTableDdl(): string {
   return entitySamplesTableDdl(
     CPU_CORE_SAMPLES_TABLE,
-    ['core_id VARCHAR NOT NULL'],
-    CPU_CORE_LIVE_METRIC_FIELDS
-  )
+    ["core_id VARCHAR NOT NULL"],
+    CPU_CORE_LIVE_METRIC_FIELDS,
+  );
 }
 
 /** Singleton per sample (no entity id column) — one row per sample when `memoryDetail` is present. */
 function memoryDetailSamplesTableDdl(): string {
   const metricColumns = MEMORY_DETAIL_METRIC_FIELDS.map(
-    (field) => `${entityMetricColumnName(field)} DOUBLE`
-  )
+    (field) => `${entityMetricColumnName(field)} DOUBLE`,
+  );
   return [
     `CREATE TABLE IF NOT EXISTS ${MEMORY_DETAIL_SAMPLES_TABLE} (`,
     indent([...COMMON_METADATA_COLUMN_DEFS, ...metricColumns]),
     `)`,
-  ].join('\n')
+  ].join("\n");
 }
 
 /** Long-form table: one row per (sample, signal), `kind` + `value` columns rather than one column per signal kind. */
@@ -461,28 +513,28 @@ function hardwareSignalSamplesTableDdl(): string {
     `CREATE TABLE IF NOT EXISTS ${HARDWARE_SIGNAL_SAMPLES_TABLE} (`,
     indent([
       ...COMMON_METADATA_COLUMN_DEFS,
-      'signal_id VARCHAR NOT NULL',
-      'kind VARCHAR NOT NULL',
-      'value DOUBLE',
+      "signal_id VARCHAR NOT NULL",
+      "kind VARCHAR NOT NULL",
+      "value DOUBLE",
     ]),
     `)`,
-  ].join('\n')
+  ].join("\n");
 }
 
 function ingressSamplesTableDdl(): string {
   return entitySamplesTableDdl(
     INGRESS_SAMPLES_TABLE,
-    ['source_id VARCHAR NOT NULL', 'source_kind VARCHAR NOT NULL'],
-    INGRESS_METRIC_FIELDS
-  )
+    ["source_id VARCHAR NOT NULL", "source_kind VARCHAR NOT NULL"],
+    INGRESS_METRIC_FIELDS,
+  );
 }
 
 function databaseProxySamplesTableDdl(): string {
   return entitySamplesTableDdl(
     DATABASE_PROXY_SAMPLES_TABLE,
-    ['source_id VARCHAR NOT NULL', 'source_kind VARCHAR NOT NULL'],
-    DATABASE_PROXY_METRIC_FIELDS
-  )
+    ["source_id VARCHAR NOT NULL", "source_kind VARCHAR NOT NULL"],
+    DATABASE_PROXY_METRIC_FIELDS,
+  );
 }
 
 /** Discrete event rows (`METRIC_EVENT_KINDS_V4`) — leaner shape than the sample tables, no interval/collection-mode/sequence columns. */
@@ -490,32 +542,32 @@ function metricEventsTableDdl(): string {
   return [
     `CREATE TABLE IF NOT EXISTS ${METRIC_EVENTS_TABLE} (`,
     indent([
-      'server_id UUID NOT NULL',
-      'event_id VARCHAR NOT NULL',
+      "server_id UUID NOT NULL",
+      "event_id VARCHAR NOT NULL",
       `"at" TIMESTAMP NOT NULL`,
-      'received_at TIMESTAMP NOT NULL',
-      'kind VARCHAR NOT NULL',
-      'severity VARCHAR NOT NULL',
-      'topology_generation INTEGER NOT NULL',
-      'entity_id VARCHAR',
-      'source VARCHAR',
-      'payload VARCHAR',
+      "received_at TIMESTAMP NOT NULL",
+      "kind VARCHAR NOT NULL",
+      "severity VARCHAR NOT NULL",
+      "topology_generation INTEGER NOT NULL",
+      "entity_id VARCHAR",
+      "source VARCHAR",
+      "payload VARCHAR",
     ]),
     `)`,
-  ].join('\n')
+  ].join("\n");
 }
 
 function statusEventsTableDdl(): string {
   return [
     `CREATE TABLE IF NOT EXISTS ${STATUS_EVENTS_TABLE} (`,
     indent([
-      'server_id UUID NOT NULL',
+      "server_id UUID NOT NULL",
       `"at" TIMESTAMP NOT NULL`,
-      'connected BOOLEAN NOT NULL',
-      'reason VARCHAR NOT NULL',
+      "connected BOOLEAN NOT NULL",
+      "reason VARCHAR NOT NULL",
     ]),
     `)`,
-  ].join('\n')
+  ].join("\n");
 }
 
 /** `(server_id, sampled_at)` + `(server_id, <entity id>, sampled_at)` indexes for a per-entity family table. */
@@ -523,7 +575,7 @@ function entityIndexes(table: string, idColumn: string): string[] {
   return [
     `CREATE INDEX IF NOT EXISTS idx_${table}_server_time ON ${table} (server_id, sampled_at)`,
     `CREATE INDEX IF NOT EXISTS idx_${table}_entity ON ${table} (server_id, ${idColumn}, sampled_at)`,
-  ]
+  ];
 }
 
 /**
@@ -536,30 +588,30 @@ export function buildSchemaStatements(): string[] {
     hostSamplesTableDdl(),
     `CREATE INDEX IF NOT EXISTS idx_${HOST_SAMPLES_TABLE}_server_time ON ${HOST_SAMPLES_TABLE} (server_id, sampled_at)`,
     networkSamplesTableDdl(),
-    ...entityIndexes(NETWORK_SAMPLES_TABLE, 'device_id'),
+    ...entityIndexes(NETWORK_SAMPLES_TABLE, "device_id"),
     filesystemSamplesTableDdl(),
-    ...entityIndexes(FILESYSTEM_SAMPLES_TABLE, 'filesystem_id'),
+    ...entityIndexes(FILESYSTEM_SAMPLES_TABLE, "filesystem_id"),
     blockSamplesTableDdl(),
-    ...entityIndexes(BLOCK_SAMPLES_TABLE, 'device_id'),
+    ...entityIndexes(BLOCK_SAMPLES_TABLE, "device_id"),
     gpuSamplesTableDdl(),
-    ...entityIndexes(GPU_SAMPLES_TABLE, 'gpu_id'),
+    ...entityIndexes(GPU_SAMPLES_TABLE, "gpu_id"),
     cpuHotspotSamplesTableDdl(),
-    ...entityIndexes(CPU_HOTSPOT_SAMPLES_TABLE, 'core_id'),
+    ...entityIndexes(CPU_HOTSPOT_SAMPLES_TABLE, "core_id"),
     cpuCoreSamplesTableDdl(),
-    ...entityIndexes(CPU_CORE_SAMPLES_TABLE, 'core_id'),
+    ...entityIndexes(CPU_CORE_SAMPLES_TABLE, "core_id"),
     memoryDetailSamplesTableDdl(),
     `CREATE INDEX IF NOT EXISTS idx_${MEMORY_DETAIL_SAMPLES_TABLE}_server_time ON ${MEMORY_DETAIL_SAMPLES_TABLE} (server_id, sampled_at)`,
     hardwareSignalSamplesTableDdl(),
-    ...entityIndexes(HARDWARE_SIGNAL_SAMPLES_TABLE, 'signal_id'),
+    ...entityIndexes(HARDWARE_SIGNAL_SAMPLES_TABLE, "signal_id"),
     ingressSamplesTableDdl(),
-    ...entityIndexes(INGRESS_SAMPLES_TABLE, 'source_id'),
+    ...entityIndexes(INGRESS_SAMPLES_TABLE, "source_id"),
     databaseProxySamplesTableDdl(),
-    ...entityIndexes(DATABASE_PROXY_SAMPLES_TABLE, 'source_id'),
+    ...entityIndexes(DATABASE_PROXY_SAMPLES_TABLE, "source_id"),
     metricEventsTableDdl(),
     `CREATE INDEX IF NOT EXISTS idx_${METRIC_EVENTS_TABLE}_server_time ON ${METRIC_EVENTS_TABLE} (server_id, "at")`,
     statusEventsTableDdl(),
     `CREATE INDEX IF NOT EXISTS idx_${STATUS_EVENTS_TABLE}_server_time ON ${STATUS_EVENTS_TABLE} (server_id, "at")`,
-  ]
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -569,98 +621,107 @@ export function buildSchemaStatements(): string[] {
 
 function hostSamplesDoubleColumnNames(): string[] {
   return [
-    ...HOST_METRIC_FIELD_REFS.map((ref) => hostMetricColumnName(ref.group, ref.field)),
+    ...HOST_METRIC_FIELD_REFS.map((ref) =>
+      hostMetricColumnName(ref.group, ref.field)
+    ),
     ...HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST.map(cpuDetailHostColumnName),
-  ]
+  ];
 }
 
 export function hostSamplesInsertColumns(): string[] {
-  return [...COMMON_METADATA_COLUMNS, ...hostSamplesDoubleColumnNames()]
+  return [...COMMON_METADATA_COLUMNS, ...hostSamplesDoubleColumnNames()];
 }
 
 export function networkSamplesInsertColumns(): string[] {
   return [
     ...COMMON_METADATA_COLUMNS,
-    'device_id',
+    "device_id",
     ...NETWORK_METRIC_FIELDS.map(entityMetricColumnName),
-  ]
+  ];
 }
 
 export function filesystemSamplesInsertColumns(): string[] {
   return [
     ...COMMON_METADATA_COLUMNS,
-    'filesystem_id',
+    "filesystem_id",
     ...FILESYSTEM_METRIC_FIELDS.map(entityMetricColumnName),
-  ]
+  ];
 }
 
 export function blockSamplesInsertColumns(): string[] {
   return [
     ...COMMON_METADATA_COLUMNS,
-    'device_id',
+    "device_id",
     ...BLOCK_METRIC_FIELDS.map(entityMetricColumnName),
-  ]
+  ];
 }
 
 export function gpuSamplesInsertColumns(): string[] {
-  return [...COMMON_METADATA_COLUMNS, 'gpu_id', ...GPU_METRIC_FIELDS.map(entityMetricColumnName)]
+  return [
+    ...COMMON_METADATA_COLUMNS,
+    "gpu_id",
+    ...GPU_METRIC_FIELDS.map(entityMetricColumnName),
+  ];
 }
 
 export function cpuHotspotSamplesInsertColumns(): string[] {
   return [
     ...COMMON_METADATA_COLUMNS,
-    'core_id',
+    "core_id",
     ...CPU_HOTSPOT_METRIC_FIELDS.map(entityMetricColumnName),
-  ]
+  ];
 }
 
 export function cpuCoreSamplesInsertColumns(): string[] {
   return [
     ...COMMON_METADATA_COLUMNS,
-    'core_id',
+    "core_id",
     ...CPU_CORE_LIVE_METRIC_FIELDS.map(entityMetricColumnName),
-  ]
+  ];
 }
 
 export function memoryDetailSamplesInsertColumns(): string[] {
-  return [...COMMON_METADATA_COLUMNS, ...MEMORY_DETAIL_METRIC_FIELDS.map(entityMetricColumnName)]
+  return [
+    ...COMMON_METADATA_COLUMNS,
+    ...MEMORY_DETAIL_METRIC_FIELDS.map(entityMetricColumnName),
+  ];
 }
 
 export function hardwareSignalSamplesInsertColumns(): string[] {
-  return [...COMMON_METADATA_COLUMNS, 'signal_id', 'kind', 'value']
+  return [...COMMON_METADATA_COLUMNS, "signal_id", "kind", "value"];
 }
 
 export function ingressSamplesInsertColumns(): string[] {
   return [
     ...COMMON_METADATA_COLUMNS,
-    'source_id',
-    'source_kind',
+    "source_id",
+    "source_kind",
     ...INGRESS_METRIC_FIELDS.map(entityMetricColumnName),
-  ]
+  ];
 }
 
 export function databaseProxySamplesInsertColumns(): string[] {
   return [
     ...COMMON_METADATA_COLUMNS,
-    'source_id',
-    'source_kind',
+    "source_id",
+    "source_kind",
     ...DATABASE_PROXY_METRIC_FIELDS.map(entityMetricColumnName),
-  ]
+  ];
 }
 
 export function metricEventsInsertColumns(): string[] {
   return [
-    'server_id',
-    'event_id',
+    "server_id",
+    "event_id",
     `"at"`,
-    'received_at',
-    'kind',
-    'severity',
-    'topology_generation',
-    'entity_id',
-    'source',
-    'payload',
-  ]
+    "received_at",
+    "kind",
+    "severity",
+    "topology_generation",
+    "entity_id",
+    "source",
+    "payload",
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -677,9 +738,13 @@ export function metricEventsInsertColumns(): string[] {
 // ---------------------------------------------------------------------------
 
 function assertHostFieldRefsCoverContract(): void {
-  const declared = new Set(HOST_METRIC_FIELD_REFS.map((ref) => `${ref.group}.${ref.field}`))
+  const declared = new Set(
+    HOST_METRIC_FIELD_REFS.map((ref) => `${ref.group}.${ref.field}`),
+  );
   if (declared.size !== HOST_METRIC_FIELD_REFS.length) {
-    throw new TypeError('HOST_METRIC_FIELD_REFS has duplicate group.field entries')
+    throw new TypeError(
+      "HOST_METRIC_FIELD_REFS has duplicate group.field entries",
+    );
   }
 }
-assertHostFieldRefsCoverContract()
+assertHostFieldRefsCoverContract();

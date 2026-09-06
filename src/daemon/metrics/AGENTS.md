@@ -27,12 +27,10 @@ canonical metric names, and the old `writeHostSample` compat method is gone.
 `app.ts`/`db.ts`/`workers.ts` carry only the `serverMetricsStoreV4` binding —
 there is no parallel v3 field. `do.ts`/`offline-sweep.ts`'s status sink and
 offline-sweep's AE-direct liveness read both resolve through the v4
-store/binding (`resolveServerMetricsStoreV4` / `SERVER_METRICS_V4`) — nothing
-writes or reads through `SERVER_METRICS` (v3) anymore. `wrangler.jsonc` keeps
-the old dataset name only as a retired comment next to the `SERVER_METRICS_V4`
-binding — the AE dataset itself can't be deleted, but the binding is gone and
-must never be re-added. Genuinely shared, version-neutral pieces that used to
-live in the v3 files (the HTTP/SQL transport primitives, the generic
+store/binding (`resolveServerMetricsStoreV4` / `SERVER_METRICS_V4`). The
+active Analytics Engine binding is `SERVER_METRICS_V4` on dataset
+`turbopanel_server_metrics_v4`. Genuinely shared, version-neutral pieces that
+used to live in the v3 files (the HTTP/SQL transport primitives, the generic
 `{timestamp, connected, reason}` status-row parser, the validation rate-limit
 helpers, `MetricsBackendKind`/`ServerStatusEvent`/`StatusHistoryQuery`/
 `StatusHistoryResult`) were relocated into their `-v4.ts` siblings
@@ -120,7 +118,7 @@ below).
 | Binding / config | Value                                                                                                                                                                                                                                                                                                       |
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Wrangler binding | `SERVER_METRICS_V4` (`analytics_engine_datasets`)                                                                                                                                                                                                                                                           |
-| Dataset name     | `turbopanel_server_metrics_v4` (`AE_V4_DATASET_NAME`, `field-map-v4.ts`) — distinct from the retired v3 `turbopanel_server_host_metrics` dataset, which is never queried again (AE datasets can't be deleted, so the name is retired rather than reused, and its binding was removed from `wrangler.jsonc`) |
+| Dataset name     | `turbopanel_server_metrics_v4` (`AE_V4_DATASET_NAME`, `field-map-v4.ts`)                                                                                                                                                                                                                                  |
 | Write API        | `writeDataPoint({ indexes, doubles, blobs })` — sync, non-blocking; one call per family row actually emitted (2 baseline + 0..N presence-gated), full 20/20 doubles/blobs shape on every row                                                                                                                |
 | SQL API          | `POST .../analytics_engine/sql` with `Authorization: Bearer <token>`; response envelope rows under `result.data`                                                                                                                                                                                            |
 | Max range        | Default `AE_DEFAULT_MAX_RANGE_SECONDS` = 90 days; override via `TURBOPANEL_SERVER_METRICS_AE_MAX_RANGE_SECONDS`                                                                                                                                                                                             |
@@ -263,10 +261,11 @@ flag. Entity tables carry arbitrary cardinality per sample (one row per reported
 entity), unlike v3's fixed-width part tables.
 
 **Schema on open** (`database.ts`): `CREATE TABLE IF NOT EXISTS` /
-`CREATE INDEX IF NOT EXISTS` for the current layout. Pre-MVP: no in-place
-column migration and no boot-time wipe. Delete `metrics.duckdb` (and
-`parquet/` for a clean archive) when a local file predates the current
-columns. Configured retention still prunes expired points
+`CREATE INDEX IF NOT EXISTS` for the current layout (schema marker **6**).
+A missing, corrupt, or non-6 sidecar marker discards `metrics.duckdb`,
+`parquet/`, `tmp/`, and `schema-version` before the current store is created
+— there is no in-place migration and no supported path for older DuckDB
+files. Configured retention still prunes expired points
 (`TURBOPANEL_SERVER_METRICS_RETENTION_DAYS`, default 90). Analytics Engine
 has no SQL `DELETE`; hosted points age out after Cloudflare's ~3-month
 retention. The sidecar marker is written after a successful open.
