@@ -25,6 +25,7 @@ function directAttachDaemonState() {
       publicJwk: { kty: 'OKP', crv: 'Ed25519', x: 'abc' },
       fingerprint: 'fp-1',
       createdAt: '2020-01-01T00:00:00.000Z',
+      machineClass: null,
     },
     projection: {
       remoteAddress: '__direct__',
@@ -109,6 +110,7 @@ test('cachedServerDetailReadModel returns row plus presence enrichment', async (
     licenseId: 'lic-1',
     options: null,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }
   const presenceRows = [{
     id: 'srv-1',
@@ -143,6 +145,7 @@ test('cachedServerDetailReadModel works without query cache in context', async (
     licenseId: null,
     options: null,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }
   const db = createStubDb({
     detailRows: [row],
@@ -174,6 +177,7 @@ test('cachedServerDetailReadModel reports colocated when projection is __direct_
     licenseId: null,
     options: null,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }
   const presenceRows = [{
     id: 'srv-1',
@@ -204,6 +208,7 @@ test('cachedServerDetailReadModel uses redis cache key for org and server', asyn
     licenseId: null,
     options: null,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }
   const db = createStubDb({ detailRows: [row], presenceRows: [] })
   const store = new Map<string, string>()
@@ -240,6 +245,7 @@ test('cachedServerDetailReadModel returns null presence when preload is empty', 
     licenseId: null,
     options: null,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }
   const db = createStubDb({ detailRows: [row], presenceRows: [] })
   const cache = createPassthroughQueryCache(db)
@@ -276,6 +282,7 @@ test('cachedServerDetailReadModel never returns a managedMonitor secret', async 
     licenseId: null,
     options: LEGACY_MONITOR_OPTIONS,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }
   const db = createStubDb({ detailRows: [row], presenceRows: [] })
   const cache = createPassthroughQueryCache(db)
@@ -299,6 +306,7 @@ test('cachedServerDetailReadModel never caches a managedMonitor secret in redis'
     licenseId: null,
     options: LEGACY_MONITOR_OPTIONS,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }
   const db = createStubDb({ detailRows: [row], presenceRows: [] })
   const store = new Map<string, string>()

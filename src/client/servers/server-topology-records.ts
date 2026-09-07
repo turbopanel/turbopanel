@@ -16,7 +16,7 @@
  * `sweepExpiredWebhookDeliveries` / `sweepExpiredCommandDispatch`) once real
  * growth and the "how far back do we ever query" answer are understood.
  */
-import { and, desc, eq, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 import type { Db } from '../../db.ts'
 import { topologyGeneration } from '../../lib/db/schema.ts'
 
@@ -170,4 +170,34 @@ export async function getTopologyGeneration(
     .limit(1)
   const row = rows[0]
   return row ? serializeRow(row) : undefined
+}
+
+/**
+ * Several historical generations at once, keyed by generation number.
+ *
+ * This is the "what did this server's topology look like at generation N"
+ * lookup this table exists for (see the module doc comment). A metrics range
+ * can span a RAM upgrade or a volume resize, and capacity totals are the
+ * denominator of every derived percentage — resolving them from the *latest*
+ * generation would silently restate history against today's hardware.
+ *
+ * Generations absent from the table are simply missing from the map; callers
+ * fall back to the latest context rather than failing the query, since a
+ * server that reported metrics before its first `topology-report` landed has
+ * samples with no recorded generation at all.
+ */
+export async function getTopologyGenerations(
+  db: Db,
+  serverId: string,
+  generations: readonly number[]
+): Promise<Map<number, TopologyGenerationRecord>> {
+  const wanted = [...new Set(generations.filter((g) => Number.isInteger(g) && g >= 0))]
+  if (wanted.length === 0) return new Map()
+  const rows = await db
+    .select()
+    .from(topologyGeneration)
+    .where(
+      and(eq(topologyGeneration.serverId, serverId), inArray(topologyGeneration.generation, wanted))
+    )
+  return new Map(rows.map((row) => [row.generation, serializeRow(row)]))
 }

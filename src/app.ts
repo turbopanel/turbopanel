@@ -6,7 +6,7 @@ import { registerClientRoutes } from './client/routes.ts'
 import { createBrowserWriteProtectionMiddleware } from './browser-write-protection.ts'
 import { registerCorsMiddleware } from './cors.ts'
 import type { DaemonCellRegistry } from './daemon/cell/contracts.ts'
-import type { ServerMetricsStoreV4 } from './daemon/metrics/types-v4.ts'
+import type { ServerMetricsStoreV5 } from './daemon/metrics/types-v5.ts'
 import type { ExecutionLogStore } from './lib/execution-logs/types.ts'
 import type { Db } from './db.ts'
 import type { SignupEnvOverride } from './client/authn/install-state.ts'
@@ -30,15 +30,15 @@ export type AppEnv = {
     queryCache?: QueryCache
     /**
      * Host server-metrics store for `POST /api/daemon/v1/metrics` and every
-     * v4 query route. Set by `createApp` from the `serverMetricsStoreV4`
+     * v5 query route. Set by `createApp` from the `serverMetricsStoreV5`
      * option below. On Deno this is the `DuckDbParquetServerMetricsStore`
      * instance; on Workers, the entrypoint passes a real
-     * `CloudflareAnalyticsEngineServerMetricsStoreV4` bound to
-     * `SERVER_METRICS_V4` (or `DisabledServerMetricsStoreV4` when that
+     * `CloudflareAnalyticsEngineServerMetricsStoreV5` bound to
+     * `SERVER_METRICS_V5` (or `DisabledServerMetricsStoreV5` when that
      * binding is unconfigured). Stays unset when no storage backend is
      * configured for the runtime.
      */
-    serverMetricsStoreV4?: ServerMetricsStoreV4
+    serverMetricsStoreV5?: ServerMetricsStoreV5
     /**
      * Command execution-log (transcript) store. Stays unset when no storage
      * backend is configured for the runtime — reads then report "no transcript".
@@ -78,7 +78,7 @@ export function createApp({
   signupEnvOverride,
   daemonCellRegistry,
   queryCache,
-  serverMetricsStoreV4,
+  serverMetricsStoreV5,
   executionLogStore,
   dataEncryptionSecrets,
   secretsConfig,
@@ -98,8 +98,8 @@ export function createApp({
   signupEnvOverride: SignupEnvOverride | undefined
   daemonCellRegistry?: DaemonCellRegistry
   queryCache?: QueryCache
-  /** Host server-metrics store — see `AppEnv.Variables.serverMetricsStoreV4`. */
-  serverMetricsStoreV4?: ServerMetricsStoreV4
+  /** Host server-metrics store — see `AppEnv.Variables.serverMetricsStoreV5`. */
+  serverMetricsStoreV5?: ServerMetricsStoreV5
   executionLogStore?: ExecutionLogStore
   dataEncryptionSecrets?: DerivedSecretsConfig
   secretsConfig?: SecretsConfig
@@ -156,9 +156,9 @@ export function createApp({
       return next()
     })
   }
-  if (serverMetricsStoreV4) {
+  if (serverMetricsStoreV5) {
     app.use('*', (c, next) => {
-      c.set('serverMetricsStoreV4', serverMetricsStoreV4)
+      c.set('serverMetricsStoreV5', serverMetricsStoreV5)
       return next()
     })
   }

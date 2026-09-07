@@ -1,5 +1,5 @@
-import type { MetricEventV4, MetricsSampleV4 } from './contract-v4.ts'
-import type { HostedFamilyV4 } from './metric-descriptors-v4.ts'
+import type { MetricEventV5, MetricsSampleV5 } from './contract-v5.ts'
+import type { HostedFamilyV5 } from './metric-descriptors-v5.ts'
 import type { SlotMapping } from '../../client/servers/topology-types.ts'
 
 export type { SlotMapping } from '../../client/servers/topology-types.ts'
@@ -63,29 +63,29 @@ export type StatusHistoryResult = {
   truncated: boolean
 }
 
-/** Authenticated v4 sample after validation — `serverId` always from auth context, never wire input. */
-export type AuthenticatedMetricsSampleV4 = MetricsSampleV4 & {
+/** Authenticated v5 sample after validation — `serverId` always from auth context, never wire input. */
+export type AuthenticatedMetricsSampleV5 = MetricsSampleV5 & {
   serverId: string
   receivedAt: string
 }
 
 /**
  * Per-entity metric families that can be queried by entity id via
- * `queryEntitySeries` / `queryEntityIdsSeen` — every {@link HostedFamilyV4}
+ * `queryEntitySeries` / `queryEntityIdsSeen` — every {@link HostedFamilyV5}
  * except the host-singleton `host.system` / `host.io` (those go through
  * `queryHostSeries` / `queryHostSummary` instead, since a server has exactly
  * one of each, never many).
  *
  * `managed.ingress` / `managed.database_proxy` are included even though they
  * physically write one unpaged row per entity rather than a shared page
- * (`field-map-v4.ts`'s `packSingleEntityRow`) — they still have multiple
+ * (`field-map-v5.ts`'s `packSingleEntityRow`) — they still have multiple
  * entity instances per server, so they still need entity-scoped querying.
  * For these two families, the "entity id" is `sourceId` — distinct source
  * instances stay distinct entities even when they share a `sourceKind` — see
- * `EntitySeriesQueryV4.entityIds` doc comment.
+ * `EntitySeriesQueryV5.entityIds` doc comment.
  */
-export type PerEntityHostedFamilyV4 = Extract<
-  HostedFamilyV4,
+export type PerEntityHostedFamilyV5 = Extract<
+  HostedFamilyV5,
   | 'gpu'
   | 'network'
   | 'filesystem'
@@ -93,7 +93,6 @@ export type PerEntityHostedFamilyV4 = Extract<
   | 'hardware.physical'
   | 'managed.ingress'
   | 'managed.database_proxy'
-  | 'cpu.core.live'
 >
 
 // ---------------------------------------------------------------------------
@@ -102,12 +101,12 @@ export type PerEntityHostedFamilyV4 = Extract<
 
 /**
  * Multi-metric host series query. `metrics` are canonical names from
- * `HOST_METRICS_METRIC_DESCRIPTORS_V4` scoped to a `host.*` entity scope
+ * `HOST_METRICS_METRIC_DESCRIPTORS_V5` scoped to a `host.*` entity scope
  * (`host.cpu.busyPercent`, `host.memory.availableBytes`, etc.) — see
  * `entity-metric-id.ts` for the host-singleton identity format, which is
  * exactly the canonical name.
  */
-export type HostSeriesQueryV4 = {
+export type HostSeriesQueryV5 = {
   serverId: string
   metrics: readonly string[]
   from: string
@@ -122,20 +121,7 @@ export type HostSeriesQueryV4 = {
  * generations), a boundary marker for series-continuity breaks. Omitted
  * when the backend doesn't track generations.
  */
-/**
- * One `cpu.detail` embedded hotspot slot's last-observed values within a
- * bucket, plus the `coreId` it was reporting for at that observation —
- * `coreId` can legitimately change bucket-to-bucket (the daemon re-selects
- * the busiest cores every interval), so it travels alongside the values
- * rather than being assumed stable. `null` `coreId` means the slot had no
- * hotspot at the last-observed sample in this bucket.
- */
-export type CpuHotspotPointV4 = {
-  coreId: string | null
-  values: Partial<Record<string, number | null>>
-}
-
-export type HostSeriesPointV4 = {
+export type HostSeriesPointV5 = {
   at: string
   values: Partial<Record<string, number | null>>
   /** Underlying samples contributing to this bucket. */
@@ -143,22 +129,15 @@ export type HostSeriesPointV4 = {
   /** Expected samples for full bucket coverage (gap detection). */
   expectedSampleCount?: number
   topologyGeneration?: number | null
-  /**
-   * `cpu.detail`'s 4 embedded hotspot slots (see
-   * `field-map-v4.ts`'s `CPU_DETAIL_HOTSPOT_FIELD_ORDER`), present only when
-   * the request's `metrics` included a `cpuDetail.*` field and a `cpu.detail`
-   * row exists in this bucket. Slot order matches the write-path embed order.
-   */
-  cpuHotspots?: CpuHotspotPointV4[]
 }
 
-export type HostSeriesResultV4 = {
+export type HostSeriesResultV5 = {
   kind: MetricsBackendKind
   available: boolean
   serverId: string
   /** Echo of the metrics requested. */
   metrics: readonly string[]
-  points: HostSeriesPointV4[]
+  points: HostSeriesPointV5[]
   resolutionSeconds: number | null
   /** Number of missing buckets in the resolved resolution grid. */
   gapCount: number
@@ -172,13 +151,13 @@ export type HostSeriesResultV4 = {
   topologyGenerations?: number[]
 }
 
-export type HostSummaryQueryV4 = {
+export type HostSummaryQueryV5 = {
   serverId: string
   from: string
   to: string
 }
 
-export type HostSummaryResultV4 = {
+export type HostSummaryResultV5 = {
   kind: MetricsBackendKind
   available: boolean
   serverId: string
@@ -193,7 +172,7 @@ export type HostSummaryResultV4 = {
 // ---------------------------------------------------------------------------
 
 /**
- * Multi-entity, multi-metric series query for one {@link PerEntityHostedFamilyV4}.
+ * Multi-entity, multi-metric series query for one {@link PerEntityHostedFamilyV5}.
  *
  * `entityIds` identifies which entity instances to return, within `family`:
  *  - `gpu` -> `gpuId`, `network` -> `deviceId`, `filesystem` -> `filesystemId`,
@@ -201,7 +180,7 @@ export type HostSummaryResultV4 = {
  *    entity id, matching `entity-metric-id.ts`'s per-entity identity.
  *  - `managed.ingress` / `managed.database_proxy` -> `sourceId`, **not**
  *    `sourceKind`. Cloudflare Analytics Engine writes `sourceId` to blob10 for
- *    these two families (`field-map-v4.ts`'s `AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX`
+ *    these two families (`field-map-v5.ts`'s `AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX`
  *    doc comment) — `sourceKind` never reaches AE at all. DuckDB stores both
  *    columns but groups by `source_id` here too so the two backends agree on
  *    what an "entity id" means for these families — two different sources of
@@ -209,12 +188,12 @@ export type HostSummaryResultV4 = {
  *    entities. Use `queryEntityIdsSeen` to discover which `sourceId` values
  *    actually appear in a range rather than assuming a fixed set.
  *
- * `metrics` are bare field names (`HostMetricsMetricDescriptorV4.fieldName`)
+ * `metrics` are bare field names (`HostMetricsMetricDescriptorV5.fieldName`)
  * scoped to `family`'s entity scope — not canonical names, since canonical
  * names for these scopes never carry an entity id anyway.
  *
  * Note on embedded NICs: a host's first one or two normal-NIC-slot network
- * devices are embedded directly into `host.io` (see `field-map-v4.ts`'s
+ * devices are embedded directly into `host.io` (see `field-map-v5.ts`'s
  * `resolveNetworkSlots`) and never page as standalone `network` rows on the
  * Cloudflare backend. DuckDB, by contrast, writes every reported network
  * device to its per-family table regardless of slot embedding.
@@ -223,7 +202,7 @@ export type HostSummaryResultV4 = {
  * answerable on both backends: DuckDB already has the full row, and the
  * Cloudflare backend reconstructs `receiveBytesPerSecond`/
  * `transmitBytesPerSecond` (the only two individually-addressable embedded
- * fields — see `field-map-v4.ts`'s `HOST_IO_EMBEDDED_NIC_FIELDS`) from
+ * fields — see `field-map-v5.ts`'s `HOST_IO_EMBEDDED_NIC_FIELDS`) from
  * `host.io`'s own rows when `slotMapping` identifies the entity as one of
  * the first two `normalNicSlots`. Any other requested `network` field
  * resolves to `null` for those two entities on Cloudflare, never a
@@ -233,9 +212,9 @@ export type HostSummaryResultV4 = {
  * on Cloudflare — callers must still reject those before querying (see
  * `metrics-routes-helpers.ts`'s `findFabricNetworkEntityId`).
  */
-export type EntitySeriesQueryV4 = {
+export type EntitySeriesQueryV5 = {
   serverId: string
-  family: PerEntityHostedFamilyV4
+  family: PerEntityHostedFamilyV5
   entityIds: readonly string[]
   metrics: readonly string[]
   from: string
@@ -263,40 +242,40 @@ export type EntitySeriesQueryV4 = {
   topologyGeneration?: number | null
 }
 
-export type EntitySeriesPointV4 = {
+export type EntitySeriesPointV5 = {
   at: string
   values: Partial<Record<string, number | null>>
   sampleCount?: number
-  /** Expected samples for full bucket coverage (gap detection) — see `HostSeriesPointV4.expectedSampleCount`. */
+  /** Expected samples for full bucket coverage (gap detection) — see `HostSeriesPointV5.expectedSampleCount`. */
   expectedSampleCount?: number
 }
 
-export type EntitySeriesEntityResultV4 = {
+export type EntitySeriesEntityResultV5 = {
   entityId: string
-  points: EntitySeriesPointV4[]
+  points: EntitySeriesPointV5[]
   sampleCount: number
   gapCount: number
 }
 
-export type EntitySeriesResultV4 = {
+export type EntitySeriesResultV5 = {
   kind: MetricsBackendKind
   available: boolean
   serverId: string
-  family: PerEntityHostedFamilyV4
+  family: PerEntityHostedFamilyV5
   metrics: readonly string[]
   resolutionSeconds: number | null
-  entities: EntitySeriesEntityResultV4[]
+  entities: EntitySeriesEntityResultV5[]
 }
 
-/** Discover which entity ids of `family` were actually observed in a range — see `EntitySeriesQueryV4` doc comment for what "id" means per family. */
-export type EntityIdsSeenQueryV4 = {
+/** Discover which entity ids of `family` were actually observed in a range — see `EntitySeriesQueryV5` doc comment for what "id" means per family. */
+export type EntityIdsSeenQueryV5 = {
   serverId: string
-  family: PerEntityHostedFamilyV4
+  family: PerEntityHostedFamilyV5
   from: string
   to: string
 }
 
-export type EntityIdsSeenResultV4 = {
+export type EntityIdsSeenResultV5 = {
   kind: MetricsBackendKind
   available: boolean
   entityIds: string[]
@@ -310,14 +289,14 @@ export type EntityIdsSeenResultV4 = {
  * One AE/DuckDB query for recent host usage across many servers.
  * Used by the org servers overview — never N per-server chart calls.
  */
-export type FleetHostSnapshotQueryV4 = {
+export type FleetHostSnapshotQueryV5 = {
   serverIds: readonly string[]
   metrics: readonly string[]
   from: string
   to: string
 }
 
-export type FleetHostSnapshotServerV4 = {
+export type FleetHostSnapshotServerV5 = {
   serverId: string
   latestAt: string | null
   values: Partial<Record<string, number | null>>
@@ -330,43 +309,43 @@ export type FleetHostSnapshotServerV4 = {
   topologyGeneration?: number | null
 }
 
-export type FleetHostSnapshotResultV4 = {
+export type FleetHostSnapshotResultV5 = {
   kind: MetricsBackendKind
   available: boolean
   metrics: readonly string[]
-  servers: FleetHostSnapshotServerV4[]
+  servers: FleetHostSnapshotServerV5[]
 }
 
 // ---------------------------------------------------------------------------
 // Metric events (`sample.events` — hardware-health / lifecycle notices).
 // ---------------------------------------------------------------------------
 
-export type MetricEventsQueryV4 = {
+export type MetricEventsQueryV5 = {
   serverId: string
   from: string
   to: string
 }
 
-export type MetricEventsResultV4 = {
+export type MetricEventsResultV5 = {
   kind: MetricsBackendKind
   available: boolean
   serverId: string
-  events: MetricEventV4[]
+  events: MetricEventV5[]
   /** `true` when more events exist in range than the backend's cap returned — same discipline as `StatusHistoryResult.truncated`. */
   truncated: boolean
 }
 
 /**
- * Backend-neutral write sink for v4 host metrics samples and connection
+ * Backend-neutral write sink for v5 host metrics samples and connection
  * status events, plus (where a real query-capable backend implements it)
- * the v4 read surface: host series/summary, per-entity series, entity-id
+ * the v5 read surface: host series/summary, per-entity series, entity-id
  * discovery, fleet host snapshot, metric events, and connection-status
  * history.
  *
  * Every query method is optional-on-interface (mirroring how
  * `queryStatusHistory` was optional before this phase) so
- * `DisabledServerMetricsStoreV4` needs no changes, and
- * `UnavailableServerMetricsStoreV4` (`store-selection-core.ts`) can add
+ * `DisabledServerMetricsStoreV5` needs no changes, and
+ * `UnavailableServerMetricsStoreV5` (`store-selection-core.ts`) can add
  * rejection stubs incrementally.
  *
  * `writeSample` / `writeStatusEvent` are fire-and-forget — callers must not
@@ -379,16 +358,16 @@ export type MetricEventsResultV4 = {
  * computed by the ingest route (which already does that work for capability
  * planning), never by the store itself. `undefined` means the generation
  * hasn't been recorded yet; implementations must fall back to a
- * topology-agnostic packing in that case (see `field-map-v4.ts`).
+ * topology-agnostic packing in that case (see `field-map-v5.ts`).
  */
-export interface ServerMetricsStoreV4 {
-  writeSample(input: AuthenticatedMetricsSampleV4, slotMapping?: SlotMapping): void | Promise<void>
+export interface ServerMetricsStoreV5 {
+  writeSample(input: AuthenticatedMetricsSampleV5, slotMapping?: SlotMapping): void | Promise<void>
   writeStatusEvent(input: ServerStatusEvent): void | Promise<void>
   queryStatusHistory?(input: StatusHistoryQuery): Promise<StatusHistoryResult>
-  queryHostSeries?(input: HostSeriesQueryV4): Promise<HostSeriesResultV4>
-  queryHostSummary?(input: HostSummaryQueryV4): Promise<HostSummaryResultV4>
-  queryEntitySeries?(input: EntitySeriesQueryV4): Promise<EntitySeriesResultV4>
-  queryEntityIdsSeen?(input: EntityIdsSeenQueryV4): Promise<EntityIdsSeenResultV4>
-  queryFleetHostSnapshot?(input: FleetHostSnapshotQueryV4): Promise<FleetHostSnapshotResultV4>
-  queryMetricEvents?(input: MetricEventsQueryV4): Promise<MetricEventsResultV4>
+  queryHostSeries?(input: HostSeriesQueryV5): Promise<HostSeriesResultV5>
+  queryHostSummary?(input: HostSummaryQueryV5): Promise<HostSummaryResultV5>
+  queryEntitySeries?(input: EntitySeriesQueryV5): Promise<EntitySeriesResultV5>
+  queryEntityIdsSeen?(input: EntityIdsSeenQueryV5): Promise<EntityIdsSeenResultV5>
+  queryFleetHostSnapshot?(input: FleetHostSnapshotQueryV5): Promise<FleetHostSnapshotResultV5>
+  queryMetricEvents?(input: MetricEventsQueryV5): Promise<MetricEventsResultV5>
 }

@@ -1,93 +1,93 @@
 import { assertEquals } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { AE_V4_FAMILY_HOST_IO, AE_V4_FAMILY_HOST_SYSTEM } from './field-map-v4.ts'
+import { AE_V5_FAMILY_HOST_IO, AE_V5_FAMILY_HOST_SYSTEM } from './field-map-v5.ts'
 import {
-  HOST_METRICS_METRIC_DESCRIPTORS_V4,
-  type HostMetricsMetricDescriptorV4,
-} from '../../metric-descriptors-v4.ts'
+  HOST_METRICS_METRIC_DESCRIPTORS_V5,
+  type HostMetricsMetricDescriptorV5,
+} from '../../metric-descriptors-v5.ts'
 import {
   AE_LIVENESS_WINDOW_SECONDS,
-  AE_V4_DATASET_NAME,
-  AE_V4_SUPPORTED_SCHEMA_VERSIONS,
-  aeV4MissingMetricSentinelSql,
-  aggregateExpressionForDescriptorV4,
-  buildRecentlyActiveServerIdsSqlV4,
-  deltaSumExpressionForColumnV4,
-  entityIdInPageIdentityPredicateV4,
-  eventV4DiscriminatorPredicates,
-  familyPredicateV4,
-  hostMetricsV4DiscriminatorPredicates,
-  lastValueExpressionForColumnV4,
-  latestAtExpressionV4,
-  maxValueExpressionForColumnV4,
-  queryEntityIdsSeenViaSqlApiV4,
-  queryEntitySeriesViaSqlApiV4,
-  queryFleetHostSnapshotViaSqlApiV4,
-  queryHostSeriesViaSqlApiV4,
-  queryHostSummaryViaSqlApiV4,
-  queryMetricEventsViaSqlApiV4,
-  queryRecentlyActiveServerIdsV4,
-  queryStatusHistoryViaSqlApiV4,
-  quoteSqlStringV4,
-  sampleCountExpressionV4,
-  serverIdPredicateV4,
-  statusV4DiscriminatorPredicates,
-  stripAeV4Sentinel,
-  timeRangePredicateV4,
-  v4EventDiscriminatorPredicates,
-  weightedAvgExpressionForColumnV4,
-} from './sql-api-v4.ts'
+  AE_V5_DATASET_NAME,
+  AE_V5_SUPPORTED_SCHEMA_VERSIONS,
+  aeV5MissingMetricSentinelSql,
+  aggregateExpressionForDescriptorV5,
+  buildRecentlyActiveServerIdsSqlV5,
+  deltaSumExpressionForColumnV5,
+  entityIdInPageIdentityPredicateV5,
+  eventV5DiscriminatorPredicates,
+  familyPredicateV5,
+  hostMetricsV5DiscriminatorPredicates,
+  lastValueExpressionForColumnV5,
+  latestAtExpressionV5,
+  maxValueExpressionForColumnV5,
+  queryEntityIdsSeenViaSqlApiV5,
+  queryEntitySeriesViaSqlApiV5,
+  queryFleetHostSnapshotViaSqlApiV5,
+  queryHostSeriesViaSqlApiV5,
+  queryHostSummaryViaSqlApiV5,
+  queryMetricEventsViaSqlApiV5,
+  queryRecentlyActiveServerIdsV5,
+  queryStatusHistoryViaSqlApiV5,
+  quoteSqlStringV5,
+  sampleCountExpressionV5,
+  serverIdPredicateV5,
+  statusV5DiscriminatorPredicates,
+  stripAeV5Sentinel,
+  timeRangePredicateV5,
+  v5EventDiscriminatorPredicates,
+  weightedAvgExpressionForColumnV5,
+} from './sql-api-v5.ts'
 
-it('AE_V4_DATASET_NAME is the v4 dataset, distinct from the v3 dataset', () => {
-  assertEquals(AE_V4_DATASET_NAME, 'turbopanel_server_metrics_v4')
+it('AE_V5_DATASET_NAME is the v5 dataset, distinct from the v3 dataset', () => {
+  assertEquals(AE_V5_DATASET_NAME, 'turbopanel_server_metrics_v5')
 })
 
-it('AE_V4_SUPPORTED_SCHEMA_VERSIONS is exactly [4]', () => {
-  assertEquals(AE_V4_SUPPORTED_SCHEMA_VERSIONS, [4])
+it('AE_V5_SUPPORTED_SCHEMA_VERSIONS is exactly [5]', () => {
+  assertEquals(AE_V5_SUPPORTED_SCHEMA_VERSIONS, [5])
 })
 
-it('quoteSqlStringV4 doubles single quotes', () => {
-  assertEquals(quoteSqlStringV4("O'Brien"), "'O''Brien'")
-  assertEquals(quoteSqlStringV4('plain'), "'plain'")
+it('quoteSqlStringV5 doubles single quotes', () => {
+  assertEquals(quoteSqlStringV5("O'Brien"), "'O''Brien'")
+  assertEquals(quoteSqlStringV5('plain'), "'plain'")
 })
 
-it('v4EventDiscriminatorPredicates: blob1 = kind, blob3 = schema version', () => {
-  const predicates = v4EventDiscriminatorPredicates('metrics')
-  assertEquals(predicates, [`blob1 = 'metrics'`, `blob3 = '4'`])
+it('v5EventDiscriminatorPredicates: blob1 = kind, blob3 = schema version', () => {
+  const predicates = v5EventDiscriminatorPredicates('metrics')
+  assertEquals(predicates, [`blob1 = 'metrics'`, `blob3 = '5'`])
 })
 
-it('hostMetricsV4DiscriminatorPredicates matches the metrics kind', () => {
-  assertEquals(hostMetricsV4DiscriminatorPredicates(), [`blob1 = 'metrics'`, `blob3 = '4'`])
+it('hostMetricsV5DiscriminatorPredicates matches the metrics kind', () => {
+  assertEquals(hostMetricsV5DiscriminatorPredicates(), [`blob1 = 'metrics'`, `blob3 = '5'`])
 })
 
-it('eventV4DiscriminatorPredicates matches the event kind', () => {
-  assertEquals(eventV4DiscriminatorPredicates(), [`blob1 = 'event'`, `blob3 = '4'`])
+it('eventV5DiscriminatorPredicates matches the event kind', () => {
+  assertEquals(eventV5DiscriminatorPredicates(), [`blob1 = 'event'`, `blob3 = '5'`])
 })
 
-it('statusV4DiscriminatorPredicates matches the status kind', () => {
-  assertEquals(statusV4DiscriminatorPredicates(), [`blob1 = 'status'`, `blob3 = '4'`])
+it('statusV5DiscriminatorPredicates matches the status kind', () => {
+  assertEquals(statusV5DiscriminatorPredicates(), [`blob1 = 'status'`, `blob3 = '5'`])
 })
 
-it("familyPredicateV4: blob2 = '<family>'", () => {
-  assertEquals(familyPredicateV4(AE_V4_FAMILY_HOST_SYSTEM), `blob2 = 'host.system'`)
-  assertEquals(familyPredicateV4(AE_V4_FAMILY_HOST_IO), `blob2 = 'host.io'`)
+it("familyPredicateV5: blob2 = '<family>'", () => {
+  assertEquals(familyPredicateV5(AE_V5_FAMILY_HOST_SYSTEM), `blob2 = 'host.system'`)
+  assertEquals(familyPredicateV5(AE_V5_FAMILY_HOST_IO), `blob2 = 'host.io'`)
 })
 
-it('aeV4MissingMetricSentinelSql: documented AE SQL, no scientific notation', () => {
-  assertEquals(aeV4MissingMetricSentinelSql(), '-pow(10, 308)')
+it('aeV5MissingMetricSentinelSql: documented AE SQL, no scientific notation', () => {
+  assertEquals(aeV5MissingMetricSentinelSql(), '-pow(10, 308)')
 })
 
-it('stripAeV4Sentinel: strips values at/below the threshold, keeps real values', () => {
-  assertEquals(stripAeV4Sentinel(-1e308), null)
-  assertEquals(stripAeV4Sentinel(-1e307), null)
-  assertEquals(stripAeV4Sentinel(-1e306), -1e306)
-  assertEquals(stripAeV4Sentinel(0), 0)
-  assertEquals(stripAeV4Sentinel(42.5), 42.5)
-  assertEquals(stripAeV4Sentinel(-100), -100)
+it('stripAeV5Sentinel: strips values at/below the threshold, keeps real values', () => {
+  assertEquals(stripAeV5Sentinel(-1e308), null)
+  assertEquals(stripAeV5Sentinel(-1e307), null)
+  assertEquals(stripAeV5Sentinel(-1e306), -1e306)
+  assertEquals(stripAeV5Sentinel(0), 0)
+  assertEquals(stripAeV5Sentinel(42.5), 42.5)
+  assertEquals(stripAeV5Sentinel(-100), -100)
 })
 
-it('weightedAvgExpressionForColumnV4: SUM(value*double20*_sample_interval)/SUM(double20*_sample_interval), scoped to family', () => {
-  const expr = weightedAvgExpressionForColumnV4(AE_V4_FAMILY_HOST_SYSTEM, 0)
+it('weightedAvgExpressionForColumnV5: SUM(value*double20*_sample_interval)/SUM(double20*_sample_interval), scoped to family', () => {
+  const expr = weightedAvgExpressionForColumnV5(AE_V5_FAMILY_HOST_SYSTEM, 0)
   assertEquals(
     expr,
     "SUM(if(blob2 = 'host.system', if(double1 = -pow(10, 308), 0.0, double1 * double20 * _sample_interval), 0.0)) / " +
@@ -95,8 +95,8 @@ it('weightedAvgExpressionForColumnV4: SUM(value*double20*_sample_interval)/SUM(d
   )
 })
 
-it('deltaSumExpressionForColumnV4: weight by _sample_interval only, never intervalSeconds', () => {
-  const expr = deltaSumExpressionForColumnV4(AE_V4_FAMILY_HOST_IO, 2)
+it('deltaSumExpressionForColumnV5: weight by _sample_interval only, never intervalSeconds', () => {
+  const expr = deltaSumExpressionForColumnV5(AE_V5_FAMILY_HOST_IO, 2)
   assertEquals(
     expr,
     "SUM(if(blob2 = 'host.io', if(double3 = -pow(10, 308), 0.0, double3 * _sample_interval), 0.0))"
@@ -105,13 +105,13 @@ it('deltaSumExpressionForColumnV4: weight by _sample_interval only, never interv
   assertEquals(expr.includes('double20'), false)
 })
 
-it('maxValueExpressionForColumnV4: MAX(if(family, col, sentinel))', () => {
-  const expr = maxValueExpressionForColumnV4(AE_V4_FAMILY_HOST_SYSTEM, 5)
+it('maxValueExpressionForColumnV5: MAX(if(family, col, sentinel))', () => {
+  const expr = maxValueExpressionForColumnV5(AE_V5_FAMILY_HOST_SYSTEM, 5)
   assertEquals(expr, "MAX(if(blob2 = 'host.system', double6, -pow(10, 308)))")
 })
 
-it('lastValueExpressionForColumnV4: argMax keyed by row timestamp, sentinel demoted to ordering key 0', () => {
-  const expr = lastValueExpressionForColumnV4(AE_V4_FAMILY_HOST_IO, 0)
+it('lastValueExpressionForColumnV5: argMax keyed by row timestamp, sentinel demoted to ordering key 0', () => {
+  const expr = lastValueExpressionForColumnV5(AE_V5_FAMILY_HOST_IO, 0)
   assertEquals(
     expr,
     "argMax(if(blob2 = 'host.io', double1, -pow(10, 308)), " +
@@ -119,43 +119,43 @@ it('lastValueExpressionForColumnV4: argMax keyed by row timestamp, sentinel demo
   )
 })
 
-it('sampleCountExpressionV4: anchored on host.system, weighted by _sample_interval', () => {
+it('sampleCountExpressionV5: anchored on host.system, weighted by _sample_interval', () => {
   assertEquals(
-    sampleCountExpressionV4(),
+    sampleCountExpressionV5(),
     "SUM(if(blob2 = 'host.system', _sample_interval * 1.0, 0.0))"
   )
 })
 
-it('latestAtExpressionV4: MAX unix-seconds timestamp anchored on host.system', () => {
+it('latestAtExpressionV5: MAX unix-seconds timestamp anchored on host.system', () => {
   assertEquals(
-    latestAtExpressionV4(),
+    latestAtExpressionV5(),
     "MAX(if(blob2 = 'host.system', toUnixTimestamp(timestamp), 0))"
   )
 })
 
-it('timeRangePredicateV4: canonical half-open [from, to)', () => {
+it('timeRangePredicateV5: canonical half-open [from, to)', () => {
   assertEquals(
-    timeRangePredicateV4(1_700_000_000, 1_700_003_600),
+    timeRangePredicateV5(1_700_000_000, 1_700_003_600),
     'timestamp >= toDateTime(1700000000) AND timestamp < toDateTime(1700003600)'
   )
 })
 
-it('timeRangePredicateV4: from === to yields an empty (never-true) range, not an error', () => {
+it('timeRangePredicateV5: from === to yields an empty (never-true) range, not an error', () => {
   assertEquals(
-    timeRangePredicateV4(1_700_000_000, 1_700_000_000),
+    timeRangePredicateV5(1_700_000_000, 1_700_000_000),
     'timestamp >= toDateTime(1700000000) AND timestamp < toDateTime(1700000000)'
   )
 })
 
-it("serverIdPredicateV4: index1 = '<serverId>'", () => {
+it("serverIdPredicateV5: index1 = '<serverId>'", () => {
   assertEquals(
-    serverIdPredicateV4('11111111-2222-4333-8444-555555555555'),
+    serverIdPredicateV5('11111111-2222-4333-8444-555555555555'),
     "index1 = '11111111-2222-4333-8444-555555555555'"
   )
 })
 
-it('entityIdInPageIdentityPredicateV4: matches exact, leading, trailing, and mid-list CSV positions', () => {
-  const predicate = entityIdInPageIdentityPredicateV4('gpu1')
+it('entityIdInPageIdentityPredicateV5: matches exact, leading, trailing, and mid-list CSV positions', () => {
+  const predicate = entityIdInPageIdentityPredicateV5('gpu1')
   assertEquals(predicate.includes("blob10 = 'gpu1'"), true)
   assertEquals(predicate.includes("CONCAT('gpu1,', '%')"), true)
   assertEquals(predicate.includes("CONCAT('%', ',gpu1')"), true)
@@ -163,13 +163,13 @@ it('entityIdInPageIdentityPredicateV4: matches exact, leading, trailing, and mid
 })
 
 // ---------------------------------------------------------------------------
-// queryStatusHistoryViaSqlApiV4 — real entry point, in scope for this phase
+// queryStatusHistoryViaSqlApiV5 — real entry point, in scope for this phase
 // (no per-entity/topology ambiguity for status rows — see module doc comment)
 // ---------------------------------------------------------------------------
 
 const STATUS_SERVER_ID = '11111111-2222-4333-8444-555555555555'
 
-function envelopedSqlResponseV4(data: Array<Record<string, unknown>>, rows = data.length): string {
+function envelopedSqlResponseV5(data: Array<Record<string, unknown>>, rows = data.length): string {
   return JSON.stringify({
     success: true,
     errors: [],
@@ -178,11 +178,11 @@ function envelopedSqlResponseV4(data: Array<Record<string, unknown>>, rows = dat
   })
 }
 
-it('queryStatusHistoryViaSqlApiV4: prior state + in-range transitions produce correct uptime split', async () => {
+it('queryStatusHistoryViaSqlApiV5: prior state + in-range transitions produce correct uptime split', async () => {
   const from = '2026-01-01T00:00:00.000Z'
   const to = '2026-01-01T01:00:00.000Z'
 
-  const result = await queryStatusHistoryViaSqlApiV4(
+  const result = await queryStatusHistoryViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
@@ -191,7 +191,7 @@ it('queryStatusHistoryViaSqlApiV4: prior state + in-range transitions produce co
         if (body.includes('ORDER BY timestamp DESC')) {
           // State just before `from`: connected.
           return new Response(
-            envelopedSqlResponseV4([
+            envelopedSqlResponseV5([
               {
                 timestamp: '2025-12-31T23:00:00.000Z',
                 connected: 1,
@@ -203,7 +203,7 @@ it('queryStatusHistoryViaSqlApiV4: prior state + in-range transitions produce co
         }
         // One disconnect transition 30 minutes into the range.
         return new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               timestamp: '2026-01-01T00:30:00.000Z',
               connected: 0,
@@ -231,12 +231,12 @@ it('queryStatusHistoryViaSqlApiV4: prior state + in-range transitions produce co
   assertEquals(result.truncated, false)
 })
 
-it('queryStatusHistoryViaSqlApiV4: no prior row and no transitions is entirely unknown', async () => {
-  const result = await queryStatusHistoryViaSqlApiV4(
+it('queryStatusHistoryViaSqlApiV5: no prior row and no transitions is entirely unknown', async () => {
+  const result = await queryStatusHistoryViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
-      fetch: async () => new Response(envelopedSqlResponseV4([]), { status: 200 }),
+      fetch: async () => new Response(envelopedSqlResponseV5([]), { status: 200 }),
     },
     {
       serverId: STATUS_SERVER_ID,
@@ -253,61 +253,61 @@ it('queryStatusHistoryViaSqlApiV4: no prior row and no transitions is entirely u
 })
 
 // ---------------------------------------------------------------------------
-// aggregateExpressionForDescriptorV4 — dispatch by declared aggregation
+// aggregateExpressionForDescriptorV5 — dispatch by declared aggregation
 // ---------------------------------------------------------------------------
 
 function descriptorWithAggregation(
-  aggregation: HostMetricsMetricDescriptorV4['aggregation']
-): HostMetricsMetricDescriptorV4 {
+  aggregation: HostMetricsMetricDescriptorV5['aggregation']
+): HostMetricsMetricDescriptorV5 {
   return {
-    ...HOST_METRICS_METRIC_DESCRIPTORS_V4['host.cpu.busyPercent'],
+    ...HOST_METRICS_METRIC_DESCRIPTORS_V5['host.cpu.busyPercent'],
     aggregation,
   }
 }
 
-it('aggregateExpressionForDescriptorV4 dispatches weighted-average/delta-sum/max/last to the matching builder', () => {
+it('aggregateExpressionForDescriptorV5 dispatches weighted-average/delta-sum/max/last to the matching builder', () => {
   assertEquals(
-    aggregateExpressionForDescriptorV4(
+    aggregateExpressionForDescriptorV5(
       descriptorWithAggregation('weighted-average'),
       'host.system',
       0
     ),
-    weightedAvgExpressionForColumnV4('host.system', 0)
+    weightedAvgExpressionForColumnV5('host.system', 0)
   )
   assertEquals(
-    aggregateExpressionForDescriptorV4(descriptorWithAggregation('delta-sum'), 'host.system', 4),
-    deltaSumExpressionForColumnV4('host.system', 4)
+    aggregateExpressionForDescriptorV5(descriptorWithAggregation('delta-sum'), 'host.system', 4),
+    deltaSumExpressionForColumnV5('host.system', 4)
   )
   assertEquals(
-    aggregateExpressionForDescriptorV4(descriptorWithAggregation('max'), 'host.system', 7),
-    maxValueExpressionForColumnV4('host.system', 7)
+    aggregateExpressionForDescriptorV5(descriptorWithAggregation('max'), 'host.system', 7),
+    maxValueExpressionForColumnV5('host.system', 7)
   )
   assertEquals(
-    aggregateExpressionForDescriptorV4(descriptorWithAggregation('last'), 'host.system', 2),
-    lastValueExpressionForColumnV4('host.system', 2)
+    aggregateExpressionForDescriptorV5(descriptorWithAggregation('last'), 'host.system', 2),
+    lastValueExpressionForColumnV5('host.system', 2)
   )
 })
 
 // ---------------------------------------------------------------------------
-// queryHostSeriesViaSqlApiV4 / queryHostSummaryViaSqlApiV4
+// queryHostSeriesViaSqlApiV5 / queryHostSummaryViaSqlApiV5
 // ---------------------------------------------------------------------------
 
 const HOST_SERVER_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 
-it('queryHostSeriesViaSqlApiV4: one bucket, one weighted-average metric, topology generation carried through', async () => {
-  const result = await queryHostSeriesViaSqlApiV4(
+it('queryHostSeriesViaSqlApiV5: one bucket, one weighted-average metric, topology generation carried through', async () => {
+  const result = await queryHostSeriesViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async (_url, init) => {
         const body = String(init?.body ?? '')
         if (body.includes('GROUP BY generation')) {
-          return new Response(envelopedSqlResponseV4([{ generation: 3 }]), {
+          return new Response(envelopedSqlResponseV5([{ generation: 3 }]), {
             status: 200,
           })
         }
         return new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               bucket: 1735689600,
               sample_count: 6,
@@ -339,20 +339,20 @@ it('queryHostSeriesViaSqlApiV4: one bucket, one weighted-average metric, topolog
   assertEquals(result.points[0].topologyGeneration, 3)
 })
 
-it('queryHostSeriesViaSqlApiV4: mixed topology generations in a bucket report null', async () => {
-  const result = await queryHostSeriesViaSqlApiV4(
+it('queryHostSeriesViaSqlApiV5: mixed topology generations in a bucket report null', async () => {
+  const result = await queryHostSeriesViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async (_url, init) => {
         const body = String(init?.body ?? '')
         if (body.includes('GROUP BY generation')) {
-          return new Response(envelopedSqlResponseV4([{ generation: 1 }, { generation: 2 }]), {
+          return new Response(envelopedSqlResponseV5([{ generation: 1 }, { generation: 2 }]), {
             status: 200,
           })
         }
         return new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               bucket: 1735689600,
               sample_count: 2,
@@ -378,10 +378,10 @@ it('queryHostSeriesViaSqlApiV4: mixed topology generations in a bucket report nu
   assertEquals(result.topologyGenerations, [1, 2])
 })
 
-it('queryHostSeriesViaSqlApiV4 rejects a non-host metric', async () => {
+it('queryHostSeriesViaSqlApiV5 rejects a non-host metric', async () => {
   let threw = false
   try {
-    await queryHostSeriesViaSqlApiV4(
+    await queryHostSeriesViaSqlApiV5(
       { accountId: 'a', apiToken: 'b', fetch: async () => new Response('{}') },
       {
         serverId: HOST_SERVER_ID,
@@ -396,112 +396,13 @@ it('queryHostSeriesViaSqlApiV4 rejects a non-host metric', async () => {
   assertEquals(threw, true)
 })
 
-it('queryHostSeriesViaSqlApiV4: cpuDetail.* request also selects+parses the 4 embedded hotspot slots', async () => {
-  const result = await queryHostSeriesViaSqlApiV4(
-    {
-      accountId: 'acct123',
-      apiToken: 'token-xyz',
-      fetch: async (_url, init) => {
-        const body = String(init?.body ?? '')
-        if (body.includes('GROUP BY generation')) {
-          return new Response(envelopedSqlResponseV4([]), { status: 200 })
-        }
-        // Row includes the cpuDetail scalar select (m0) plus every hotspot
-        // slot's 3 fields (h{slot}_{fieldIndex}) and the shared coreId label.
-        return new Response(
-          envelopedSqlResponseV4([
-            {
-              bucket: 1735689600,
-              sample_count: 6,
-              avg_interval_seconds: 10,
-              topology_gen_min: null,
-              topology_gen_max: null,
-              m0: 3200,
-              h0_0: 91.5,
-              h0_1: 1.5,
-              h0_2: 0,
-              h1_0: 80,
-              h1_1: 2,
-              h1_2: 0,
-              h2_0: 70,
-              h2_1: 0,
-              h2_2: 0,
-              h3_0: 60,
-              h3_1: 0,
-              h3_2: 0,
-              cpu_hotspot_core_ids: 'cpu0,cpu2,cpu5,cpu7',
-            },
-          ]),
-          { status: 200 }
-        )
-      },
-    },
-    {
-      serverId: HOST_SERVER_ID,
-      metrics: ['cpuDetail.averageFrequencyMHz'],
-      from: '2026-01-01T00:00:00.000Z',
-      to: '2026-01-01T00:05:00.000Z',
-      resolutionSeconds: 60,
-    }
-  )
-
-  assertEquals(result.points[0].values['cpuDetail.averageFrequencyMHz'], 3200)
-  const hotspots = result.points[0].cpuHotspots
-  assertEquals(hotspots?.length, 4)
-  assertEquals(hotspots?.[0], {
-    coreId: 'cpu0',
-    values: { busyPercent: 91.5, iowaitPercent: 1.5, stealPercent: 0 },
-  })
-  assertEquals(hotspots?.[3], {
-    coreId: 'cpu7',
-    values: { busyPercent: 60, iowaitPercent: 0, stealPercent: 0 },
-  })
-})
-
-it('queryHostSeriesViaSqlApiV4: a host.*-only request never selects/parses hotspot slots', async () => {
-  const result = await queryHostSeriesViaSqlApiV4(
-    {
-      accountId: 'acct123',
-      apiToken: 'token-xyz',
-      fetch: async (_url, init) => {
-        const body = String(init?.body ?? '')
-        if (body.includes('GROUP BY generation')) {
-          return new Response(envelopedSqlResponseV4([]), { status: 200 })
-        }
-        assertEquals(body.includes('cpu_hotspot_core_ids'), false)
-        return new Response(
-          envelopedSqlResponseV4([
-            {
-              bucket: 1735689600,
-              sample_count: 6,
-              avg_interval_seconds: 10,
-              topology_gen_min: null,
-              topology_gen_max: null,
-              m0: 42.5,
-            },
-          ]),
-          { status: 200 }
-        )
-      },
-    },
-    {
-      serverId: HOST_SERVER_ID,
-      metrics: ['host.cpu.busyPercent'],
-      from: '2026-01-01T00:00:00.000Z',
-      to: '2026-01-01T00:05:00.000Z',
-    }
-  )
-
-  assertEquals(result.points[0].cpuHotspots, undefined)
-})
-
-it('queryHostSummaryViaSqlApiV4: sample count and latest-at', async () => {
-  const result = await queryHostSummaryViaSqlApiV4(
+it('queryHostSummaryViaSqlApiV5: sample count and latest-at', async () => {
+  const result = await queryHostSummaryViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
-        new Response(envelopedSqlResponseV4([{ sample_count: 12, latest_at: 1735689600 }]), {
+        new Response(envelopedSqlResponseV5([{ sample_count: 12, latest_at: 1735689600 }]), {
           status: 200,
         }),
     },
@@ -515,13 +416,13 @@ it('queryHostSummaryViaSqlApiV4: sample count and latest-at', async () => {
   assertEquals(result.latestAt, new Date(1735689600 * 1000).toISOString())
 })
 
-it('queryHostSummaryViaSqlApiV4: zero samples reports latestAt null', async () => {
-  const result = await queryHostSummaryViaSqlApiV4(
+it('queryHostSummaryViaSqlApiV5: zero samples reports latestAt null', async () => {
+  const result = await queryHostSummaryViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
-        new Response(envelopedSqlResponseV4([{ sample_count: 0, latest_at: null }]), {
+        new Response(envelopedSqlResponseV5([{ sample_count: 0, latest_at: null }]), {
           status: 200,
         }),
     },
@@ -536,11 +437,11 @@ it('queryHostSummaryViaSqlApiV4: zero samples reports latestAt null', async () =
 })
 
 // ---------------------------------------------------------------------------
-// queryFleetHostSnapshotViaSqlApiV4
+// queryFleetHostSnapshotViaSqlApiV5
 // ---------------------------------------------------------------------------
 
-it('queryFleetHostSnapshotViaSqlApiV4: empty serverIds short-circuits without a fetch call', async () => {
-  const result = await queryFleetHostSnapshotViaSqlApiV4(
+it('queryFleetHostSnapshotViaSqlApiV5: empty serverIds short-circuits without a fetch call', async () => {
+  const result = await queryFleetHostSnapshotViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
@@ -558,14 +459,14 @@ it('queryFleetHostSnapshotViaSqlApiV4: empty serverIds short-circuits without a 
   assertEquals(result.servers, [])
 })
 
-it("queryFleetHostSnapshotViaSqlApiV4: one server's values and topology generation", async () => {
-  const result = await queryFleetHostSnapshotViaSqlApiV4(
+it("queryFleetHostSnapshotViaSqlApiV5: one server's values and topology generation", async () => {
+  const result = await queryFleetHostSnapshotViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
         new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               server_id: HOST_SERVER_ID,
               sample_count: 3,
@@ -592,17 +493,17 @@ it("queryFleetHostSnapshotViaSqlApiV4: one server's values and topology generati
 })
 
 // ---------------------------------------------------------------------------
-// queryMetricEventsViaSqlApiV4
+// queryMetricEventsViaSqlApiV5
 // ---------------------------------------------------------------------------
 
-it('queryMetricEventsViaSqlApiV4: parses kind/severity/entityId/payload', async () => {
-  const result = await queryMetricEventsViaSqlApiV4(
+it('queryMetricEventsViaSqlApiV5: parses kind/severity/entityId/payload', async () => {
+  const result = await queryMetricEventsViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
         new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               timestamp: '2026-01-01T00:00:00.500Z',
               event_id: 'evt1',
@@ -636,7 +537,7 @@ it('queryMetricEventsViaSqlApiV4: parses kind/severity/entityId/payload', async 
   ])
 })
 
-it('queryMetricEventsViaSqlApiV4: truncates beyond MAX_STATUS_EVENTS', async () => {
+it('queryMetricEventsViaSqlApiV5: truncates beyond MAX_STATUS_EVENTS', async () => {
   const overflowRows = Array.from({ length: 1001 }, (_, i) => ({
     timestamp: `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}.000Z`,
     event_id: `evt${i}`,
@@ -646,11 +547,11 @@ it('queryMetricEventsViaSqlApiV4: truncates beyond MAX_STATUS_EVENTS', async () 
     source: '',
     payload: '',
   }))
-  const result = await queryMetricEventsViaSqlApiV4(
+  const result = await queryMetricEventsViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
-      fetch: async () => new Response(envelopedSqlResponseV4(overflowRows), { status: 200 }),
+      fetch: async () => new Response(envelopedSqlResponseV5(overflowRows), { status: 200 }),
     },
     {
       serverId: HOST_SERVER_ID,
@@ -663,19 +564,19 @@ it('queryMetricEventsViaSqlApiV4: truncates beyond MAX_STATUS_EVENTS', async () 
 })
 
 // ---------------------------------------------------------------------------
-// queryEntitySeriesViaSqlApiV4 — paged families (position-based recombination
+// queryEntitySeriesViaSqlApiV5 — paged families (position-based recombination
 // across differing page compositions within the same bucket) and single-row
 // families (managed.ingress / managed.database_proxy).
 // ---------------------------------------------------------------------------
 
-it("queryEntitySeriesViaSqlApiV4 (paged family): recombines an entity's weighted-average across two different page compositions in the same bucket", async () => {
-  const result = await queryEntitySeriesViaSqlApiV4(
+it("queryEntitySeriesViaSqlApiV5 (paged family): recombines an entity's weighted-average across two different page compositions in the same bucket", async () => {
+  const result = await queryEntitySeriesViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
         new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               // Page composition A: eth0 at slot0, eth1 at slot1, eth2 at slot2.
               bucket: 1735689600,
@@ -731,12 +632,12 @@ it("queryEntitySeriesViaSqlApiV4 (paged family): recombines an entity's weighted
   assertEquals(eth1.sampleCount, 2) // only present in composition A
 })
 
-it('queryEntitySeriesViaSqlApiV4 (paged family): a requested entity absent from every row still comes back with empty points and full gapCount', async () => {
-  const result = await queryEntitySeriesViaSqlApiV4(
+it('queryEntitySeriesViaSqlApiV5 (paged family): a requested entity absent from every row still comes back with empty points and full gapCount', async () => {
+  const result = await queryEntitySeriesViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
-      fetch: async () => new Response(envelopedSqlResponseV4([]), { status: 200 }),
+      fetch: async () => new Response(envelopedSqlResponseV5([]), { status: 200 }),
     },
     {
       serverId: HOST_SERVER_ID,
@@ -765,8 +666,8 @@ const EMPTY_SLOT_MAPPING = {
   hardwareSignalPageOrder: [],
 }
 
-it("queryEntitySeriesViaSqlApiV4 (network family): reconstructs a slot-mapped NIC's rx/tx from host.io while a genuinely paged device still resolves via the paged path", async () => {
-  const result = await queryEntitySeriesViaSqlApiV4(
+it("queryEntitySeriesViaSqlApiV5 (network family): reconstructs a slot-mapped NIC's rx/tx from host.io while a genuinely paged device still resolves via the paged path", async () => {
+  const result = await queryEntitySeriesViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
@@ -774,7 +675,7 @@ it("queryEntitySeriesViaSqlApiV4 (network family): reconstructs a slot-mapped NI
         const body = String(init?.body ?? '')
         if (body.includes(`blob2 = 'host.io'`)) {
           return new Response(
-            envelopedSqlResponseV4([
+            envelopedSqlResponseV5([
               {
                 bucket: 1735689600,
                 sample_count: 2,
@@ -787,7 +688,7 @@ it("queryEntitySeriesViaSqlApiV4 (network family): reconstructs a slot-mapped NI
           )
         }
         return new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               bucket: 1735689600,
               ids: 'eth2',
@@ -829,14 +730,14 @@ it("queryEntitySeriesViaSqlApiV4 (network family): reconstructs a slot-mapped NI
   assertEquals(eth2.sampleCount, 2)
 })
 
-it('queryEntitySeriesViaSqlApiV4 (network family): a field with no embedded-slot equivalent resolves to null for a slot-mapped NIC, never a fabricated split of the combined problem-packets rate', async () => {
-  const result = await queryEntitySeriesViaSqlApiV4(
+it('queryEntitySeriesViaSqlApiV5 (network family): a field with no embedded-slot equivalent resolves to null for a slot-mapped NIC, never a fabricated split of the combined problem-packets rate', async () => {
+  const result = await queryEntitySeriesViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
         new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               bucket: 1735689600,
               sample_count: 2,
@@ -864,15 +765,15 @@ it('queryEntitySeriesViaSqlApiV4 (network family): a field with no embedded-slot
   assertEquals(eth0.points[0].values.receiveErrorsPerSecond, null)
 })
 
-it('queryEntitySeriesViaSqlApiV4 (network family): an embedded NIC with no resolved topology generation reports empty points rather than guessing which host.io history is current', async () => {
+it('queryEntitySeriesViaSqlApiV5 (network family): an embedded NIC with no resolved topology generation reports empty points rather than guessing which host.io history is current', async () => {
   let fetchCalls = 0
-  const result = await queryEntitySeriesViaSqlApiV4(
+  const result = await queryEntitySeriesViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () => {
         fetchCalls += 1
-        return new Response(envelopedSqlResponseV4([]), { status: 200 })
+        return new Response(envelopedSqlResponseV5([]), { status: 200 })
       },
     },
     {
@@ -893,14 +794,14 @@ it('queryEntitySeriesViaSqlApiV4 (network family): an embedded NIC with no resol
   assertEquals(result.entities[0].sampleCount, 0)
 })
 
-it('queryEntitySeriesViaSqlApiV4 (single-row family): groups managed.ingress by source_id, one row per bucket/entity', async () => {
-  const result = await queryEntitySeriesViaSqlApiV4(
+it('queryEntitySeriesViaSqlApiV5 (single-row family): groups managed.ingress by source_id, one row per bucket/entity', async () => {
+  const result = await queryEntitySeriesViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
         new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               bucket: 1735689600,
               entity_id: 'caddy-1',
@@ -927,14 +828,14 @@ it('queryEntitySeriesViaSqlApiV4 (single-row family): groups managed.ingress by 
   assertEquals(result.entities[0].sampleCount, 5)
 })
 
-it('queryEntitySeriesViaSqlApiV4 (single-row family): two sources sharing sourceKind resolve as distinct entities', async () => {
-  const result = await queryEntitySeriesViaSqlApiV4(
+it('queryEntitySeriesViaSqlApiV5 (single-row family): two sources sharing sourceKind resolve as distinct entities', async () => {
+  const result = await queryEntitySeriesViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
         new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             {
               bucket: 1735689600,
               entity_id: 'caddy-1',
@@ -969,10 +870,10 @@ it('queryEntitySeriesViaSqlApiV4 (single-row family): two sources sharing source
   assertEquals(caddy2.points[0].values.requests, 99)
 })
 
-it('queryEntitySeriesViaSqlApiV4 rejects an unknown field for the given family', async () => {
+it('queryEntitySeriesViaSqlApiV5 rejects an unknown field for the given family', async () => {
   let threw = false
   try {
-    await queryEntitySeriesViaSqlApiV4(
+    await queryEntitySeriesViaSqlApiV5(
       { accountId: 'a', apiToken: 'b', fetch: async () => new Response('{}') },
       {
         serverId: HOST_SERVER_ID,
@@ -990,16 +891,16 @@ it('queryEntitySeriesViaSqlApiV4 rejects an unknown field for the given family',
 })
 
 // ---------------------------------------------------------------------------
-// queryEntityIdsSeenViaSqlApiV4
+// queryEntityIdsSeenViaSqlApiV5
 // ---------------------------------------------------------------------------
 
-it('queryEntityIdsSeenViaSqlApiV4 (paged family): splits comma-joined page ids into a distinct sorted list', async () => {
-  const result = await queryEntityIdsSeenViaSqlApiV4(
+it('queryEntityIdsSeenViaSqlApiV5 (paged family): splits comma-joined page ids into a distinct sorted list', async () => {
+  const result = await queryEntityIdsSeenViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
-        new Response(envelopedSqlResponseV4([{ ids: 'eth0,eth1' }, { ids: 'eth0,eth2' }]), {
+        new Response(envelopedSqlResponseV5([{ ids: 'eth0,eth1' }, { ids: 'eth0,eth2' }]), {
           status: 200,
         }),
     },
@@ -1013,14 +914,20 @@ it('queryEntityIdsSeenViaSqlApiV4 (paged family): splits comma-joined page ids i
   assertEquals(result.entityIds, ['eth0', 'eth1', 'eth2'])
 })
 
-it("queryEntityIdsSeenViaSqlApiV4 (single-row family): each row's ids is already one entity's sourceId, distinct sources of the same sourceKind stay separate", async () => {
-  const result = await queryEntityIdsSeenViaSqlApiV4(
+it("queryEntityIdsSeenViaSqlApiV5 (single-row family): each row's ids is already one entity's sourceId, distinct sources of the same sourceKind stay separate", async () => {
+  const result = await queryEntityIdsSeenViaSqlApiV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
         new Response(
-          envelopedSqlResponseV4([{ ids: 'caddy-1' }, { ids: 'caddy-1' }, { ids: 'caddy-2' }]),
+          envelopedSqlResponseV5([
+            { ids: 'caddy-1' },
+            { ids: 'caddy-1' },
+            {
+              ids: 'caddy-2',
+            },
+          ]),
           { status: 200 }
         ),
     },
@@ -1035,28 +942,28 @@ it("queryEntityIdsSeenViaSqlApiV4 (single-row family): each row's ids is already
 })
 
 // ---------------------------------------------------------------------------
-// buildRecentlyActiveServerIdsSqlV4 / queryRecentlyActiveServerIdsV4
+// buildRecentlyActiveServerIdsSqlV5 / queryRecentlyActiveServerIdsV5
 // ---------------------------------------------------------------------------
 
-it('buildRecentlyActiveServerIdsSqlV4: scoped to host.system, since-window predicate, grouped by server', () => {
-  const sql = buildRecentlyActiveServerIdsSqlV4({
+it('buildRecentlyActiveServerIdsSqlV5: scoped to host.system, since-window predicate, grouped by server', () => {
+  const sql = buildRecentlyActiveServerIdsSqlV5({
     sinceSeconds: AE_LIVENESS_WINDOW_SECONDS,
     nowMs: 1735689600_000,
   })
   assertEquals(sql.includes(`blob1 = 'metrics'`), true)
-  assertEquals(sql.includes(familyPredicateV4(AE_V4_FAMILY_HOST_SYSTEM)), true)
+  assertEquals(sql.includes(familyPredicateV5(AE_V5_FAMILY_HOST_SYSTEM)), true)
   assertEquals(sql.includes(`>= toDateTime(${1735689600 - AE_LIVENESS_WINDOW_SECONDS})`), true)
   assertEquals(sql.includes('GROUP BY server_id'), true)
 })
 
-it('queryRecentlyActiveServerIdsV4: maps serverId to latest-sample epoch ms, skips unparseable rows', async () => {
-  const result = await queryRecentlyActiveServerIdsV4(
+it('queryRecentlyActiveServerIdsV5: maps serverId to latest-sample epoch ms, skips unparseable rows', async () => {
+  const result = await queryRecentlyActiveServerIdsV5(
     {
       accountId: 'acct123',
       apiToken: 'token-xyz',
       fetch: async () =>
         new Response(
-          envelopedSqlResponseV4([
+          envelopedSqlResponseV5([
             { server_id: HOST_SERVER_ID, latest_at: 1735689600 },
             { server_id: null, latest_at: 1735689600 },
           ]),

@@ -23,6 +23,8 @@ export type ServerDetailRow = {
   name: string | null
   organizationId: string
   licenseId: string | null
+  /** Declared `server.machine_class`; null until pinned or inferred physical. */
+  machineClass: string | null
   options: typeof server.$inferSelect.options
   createdAt: string
 }
@@ -72,6 +74,7 @@ async function loadCachedDetailRow(
       name: server.name,
       organizationId: server.organizationId,
       licenseId: license.id,
+      machineClass: server.machineClass,
       options: server.options,
       createdAt: server.createdAt,
     })

@@ -73,7 +73,7 @@ import {
 } from '../../lib/db/webhook-delivery-records.ts'
 import {
   type AnalyticsEngineDatasetLike,
-  resolveServerMetricsStoreV4,
+  resolveServerMetricsStoreV5,
 } from '../metrics/store-selection-workers.ts'
 import { setServerStatusEventSink } from '../metrics/status-events.ts'
 import {
@@ -103,8 +103,8 @@ import { resolveCloudflareAnalyticsSqlConfig } from '../metrics/store-selection-
 import {
   AE_LIVENESS_QUERY_TIMEOUT_MS,
   AE_LIVENESS_WINDOW_SECONDS,
-  queryRecentlyActiveServerIdsV4 as queryRecentlyActiveServerIds,
-} from '../metrics/backends/cloudflare/sql-api-v4.ts'
+  queryRecentlyActiveServerIdsV5 as queryRecentlyActiveServerIds,
+} from '../metrics/backends/cloudflare/sql-api-v5.ts'
 import { endOfflineSweep, tryBeginOfflineSweep } from './offline-sweep-lease.ts'
 
 /** Grace beyond the daemon's ~60s idle-ping cadence before declaring a server stale. */
@@ -1044,15 +1044,15 @@ export async function runOfflineSweep(
   lastScheduledTimeForTests = opts.scheduledTime
 
   // `workers.ts`'s `scheduled()` handler awaits `initWorkerApp` (which already
-  // registers the v4 sink) before calling this function, but re-register here
+  // registers the v5 sink) before calling this function, but re-register here
   // unconditionally anyway — this function is also called directly in tests
-  // and must not depend on that ordering. Always the v4 store so demotions /
+  // and must not depend on that ordering. Always the v5 store so demotions /
   // self-heal status rows land in the same dataset the read side queries.
   setServerStatusEventSink(
-    resolveServerMetricsStoreV4({
+    resolveServerMetricsStoreV5({
       runtime: 'workers',
-      analyticsEngine: (env as { SERVER_METRICS_V4?: AnalyticsEngineDatasetLike })
-        .SERVER_METRICS_V4,
+      analyticsEngine: (env as { SERVER_METRICS_V5?: AnalyticsEngineDatasetLike })
+        .SERVER_METRICS_V5,
     })
   )
 

@@ -5,7 +5,7 @@ import type { AuthRouteOpts } from '../authn/http.ts'
 import { createSessionMiddleware } from '../authn/middleware.ts'
 import { listVisible } from '../authz/index.ts'
 import { assertCanManageOr403, assertCanReadOr403, getOrgId } from '../shared.ts'
-import { getDaemonCellRegistry, getDb, getServerMetricsStoreV4 } from '../../db.ts'
+import { getDaemonCellRegistry, getDb, getServerMetricsStoreV5 } from '../../db.ts'
 import {
   type DaemonOutboundEnvelope,
   generateDeliveryId,
@@ -25,6 +25,7 @@ import {
 import {
   type MetricsDeploymentKind,
   metricsDeploymentKindForRuntime,
+  resolveServerMachineClass,
 } from '../../daemon/metrics/capability-plan.ts'
 import { parseOrganizationOptions } from '../../lib/organization-options.ts'
 import { getServerMetricsLiveMaxMinutes } from '../../lib/settings/server-metrics-settings.ts'
@@ -42,47 +43,48 @@ import {
 } from '../../daemon/metrics/query/resolution.ts'
 import {
   type HostSummaryChartResponse,
-  toHostSeriesChartResponseV4,
-} from '../../daemon/metrics/query/series-response-v4.ts'
+  toHostSeriesChartResponseV5,
+} from '../../daemon/metrics/query/series-response-v5.ts'
 import {
   METRICS_LIVE_INTERVAL_SECONDS,
   type MetricsLiveLeaseStartResponse,
   type StatusHistoryResult,
-} from '../../daemon/metrics/types-v4.ts'
+} from '../../daemon/metrics/types-v5.ts'
 import {
+  buildCapacitiesByGenerationV5,
   buildConnectionHistoryPayload,
   buildCpuLimitsEnvelope,
-  buildFleetLatestPayloadV4,
+  buildFleetLatestPayloadV5,
   buildHostSummaryPayload,
   buildMetricEventsPayload,
-  buildSeriesRouteResponseV4,
-  buildTopologyContextV4,
+  buildSeriesRouteResponseV5,
+  buildTopologyContextV5,
   type ConnectionHistoryChartResponse,
   connectionHistoryHasCacheableData,
   type CpuLimitsEnvelope,
-  fabricNetworkSelectionErrorV4,
+  fabricNetworkSelectionErrorV5,
   findInvalidTopologyIdField,
-  FLEET_HOST_METRICS_V4,
-  fleetHostCapacitiesFromSnapshotV4,
+  FLEET_HOST_METRICS_V5,
+  fleetHostCapacitiesFromSnapshotV5,
   hardwareProfileUpdateNeedsTopologyValidation,
-  machineClassFromTopologySnapshotV4,
   metricEventsHasCacheableData,
   type MetricEventsResponse,
   metricsBackendUnavailableResponse,
   metricsQueryErrorMessage,
-  nicSlotLimitViolationV4,
+  nicSlotLimitViolationV5,
   parseHardwareProfileBody,
   parseIsoTimestampQuery,
   parseOptionalResolution,
-  parseSeriesMetricSelectorsV4,
-  querySeriesResultsV4,
-  resolveStoreBackendKindV4,
-  seriesCacheMetricsListV4,
+  parseSeriesMetricSelectorsV5,
+  querySeriesResultsV5,
+  resolveStoreBackendKindV5,
+  seriesCacheMetricsListV5,
   type TopologyIdValidationSnapshot,
 } from './metrics-routes-helpers.ts'
 import {
   getLatestTopologyGeneration,
   getLatestTopologyGenerations,
+  getTopologyGenerations,
 } from './server-topology-records.ts'
 
 /** Fixed lookback for the org servers overview usage strip/bars (~1 sample/min). */
@@ -118,12 +120,15 @@ async function loadServerHardwareProfile(
   hardwareProfile: ServerHardwareProfile | undefined
   organizationId: string | null
   serverOptions: ReturnType<typeof parseServerOptions>
+  /** Declared `server.machine_class`; `null` until pinned or inferred physical. */
+  machineClass: string | null
 }> {
   const [serverRow] = await db
     .select({
       metadata: server.metadata,
       organizationId: server.organizationId,
       options: server.options,
+      machineClass: server.machineClass,
     })
     .from(server)
     .where(eq(server.id, serverId))
@@ -152,6 +157,7 @@ async function loadServerHardwareProfile(
     hardwareProfile: effectiveHardwareProfile,
     organizationId: serverRow?.organizationId ?? null,
     serverOptions: parseServerOptions(serverRow?.options),
+    machineClass: serverRow?.machineClass ?? null,
   }
 }
 
@@ -172,12 +178,14 @@ async function loadOrganizationOptions(
 /**
  * The server's effective monitored-NIC slot limit — `normalNicSlots` of its
  * resolved capability plan (platform default for this deployment → org →
- * server override), classified physical/virtual from its latest recorded
- * topology the same way ingest does. The single source the settings PUT
+ * server override), classified physical/virtual from the declared
+ * `server.machine_class` column — falling back to its latest recorded
+ * topology — the same way ingest does. The single source the settings PUT
  * validates against and the envelope reports to the UI.
  */
 function resolveNicSlotLimit(
   inputs: Readonly<{
+    machineClass: string | null
     latestSnapshot: unknown
     orgOptions: ReturnType<typeof parseOrganizationOptions> | null
     serverOptions: ReturnType<typeof parseServerOptions>
@@ -185,7 +193,7 @@ function resolveNicSlotLimit(
   }>
 ): number {
   return resolveEffectiveMetricsCapabilityPlan(
-    machineClassFromTopologySnapshotV4(inputs.latestSnapshot),
+    resolveServerMachineClass(inputs.machineClass, inputs.latestSnapshot),
     inputs.orgOptions ?? undefined,
     inputs.serverOptions ?? undefined,
     inputs.deployment
@@ -203,12 +211,14 @@ async function loadCpuLimitsEnvelope(
     hardwareProfile: ServerHardwareProfile | undefined
     organizationId: string | null
     serverOptions: ReturnType<typeof parseServerOptions>
+    machineClass: string | null
     latestSnapshot: unknown
     deployment: MetricsDeploymentKind
   }>
 ): Promise<CpuLimitsEnvelope> {
   const orgOptions = await loadOrganizationOptions(db, inputs.organizationId)
   const nicSlotLimit = resolveNicSlotLimit({
+    machineClass: inputs.machineClass,
     latestSnapshot: inputs.latestSnapshot,
     orgOptions,
     serverOptions: inputs.serverOptions,
@@ -255,13 +265,13 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       organizationId,
     })
 
-    const storeV4 = getServerMetricsStoreV4(c)
-    const backend = resolveStoreBackendKindV4(storeV4, opts.runtime)
+    const storeV5 = getServerMetricsStoreV5(c)
+    const backend = resolveStoreBackendKindV5(storeV5, opts.runtime)
     const toMs = Date.now()
     const fromMs = toMs - FLEET_USAGE_LOOKBACK_MS
     const fromIso = new Date(fromMs).toISOString()
     const toIso = new Date(toMs).toISOString()
-    const metrics = [...FLEET_HOST_METRICS_V4]
+    const metrics = [...FLEET_HOST_METRICS_V5]
 
     if (visibleIds.length === 0) {
       return c.json({
@@ -282,15 +292,15 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       metrics,
       resolutionSeconds: 60,
       backend,
-      schemaVersion: 4,
+      schemaVersion: 5,
       kind: 'fleet-latest',
     })
 
-    const cached = await cache.get<ReturnType<typeof buildFleetLatestPayloadV4>>(cacheKey)
+    const cached = await cache.get<ReturnType<typeof buildFleetLatestPayloadV5>>(cacheKey)
     if (cached) return c.json(cached)
 
-    if (!storeV4?.queryFleetHostSnapshot) {
-      const payload = buildFleetLatestPayloadV4({
+    if (!storeV5?.queryFleetHostSnapshot) {
+      const payload = buildFleetLatestPayloadV5({
         from: fromIso,
         to: toIso,
         backend,
@@ -304,7 +314,7 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
 
     let result
     try {
-      result = await storeV4.queryFleetHostSnapshot({
+      result = await storeV5.queryFleetHostSnapshot({
         serverIds: visibleIds,
         metrics,
         from: fromIso,
@@ -323,11 +333,11 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
     const capacitiesByServer = new Map(
       [...topologyByServer].map(([serverId, record]) => [
         serverId,
-        fleetHostCapacitiesFromSnapshotV4(record.snapshot),
+        fleetHostCapacitiesFromSnapshotV5(record.snapshot),
       ])
     )
 
-    const payload = buildFleetLatestPayloadV4({
+    const payload = buildFleetLatestPayloadV5({
       from: fromIso,
       to: toIso,
       backend: result.kind,
@@ -364,7 +374,7 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       return c.json({ ok: false, error: rangeCheck.message }, 400)
     }
 
-    const selectorsParsed = parseSeriesMetricSelectorsV4(c.req.query('metrics'))
+    const selectorsParsed = parseSeriesMetricSelectorsV5(c.req.query('metrics'))
     if (!selectorsParsed.ok) {
       return c.json({ ok: false, error: selectorsParsed.error }, 400)
     }
@@ -375,8 +385,8 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       return c.json({ ok: false, error: maxPointsParsed.message }, 400)
     }
 
-    const storeV4 = getServerMetricsStoreV4(c)
-    const backend = resolveStoreBackendKindV4(storeV4, opts.runtime)
+    const storeV5 = getServerMetricsStoreV5(c)
+    const backend = resolveStoreBackendKindV5(storeV5, opts.runtime)
 
     const resolutionSeconds = selectResolutionSeconds({
       fromMs: fromParsed.ms,
@@ -387,14 +397,12 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
 
     const queryRange = canonicalizeMetricsRange(fromParsed.ms, toParsed.ms, resolutionSeconds)
 
-    const { hardwareProfile, organizationId, serverOptions } = await loadServerHardwareProfile(
-      db,
-      serverId
-    )
+    const { hardwareProfile, organizationId, serverOptions, machineClass } =
+      await loadServerHardwareProfile(db, serverId)
     const latestGeneration = await getLatestTopologyGeneration(db, serverId)
-    const context = buildTopologyContextV4(latestGeneration, hardwareProfile)
+    const context = buildTopologyContextV5(latestGeneration, hardwareProfile)
 
-    const fabricError = fabricNetworkSelectionErrorV4(selectors, context.inventory)
+    const fabricError = fabricNetworkSelectionErrorV5(selectors, context.inventory)
     if (fabricError) {
       return c.json({ ok: false, error: fabricError }, 400)
     }
@@ -403,21 +411,21 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       serverId,
       fromBucketMs: queryRange.fromMs,
       toBucketMs: queryRange.toMs,
-      metrics: seriesCacheMetricsListV4(selectors),
+      metrics: seriesCacheMetricsListV5(selectors),
       resolutionSeconds,
       backend,
-      schemaVersion: 4,
+      schemaVersion: 5,
       kind: 'series',
       topologyGeneration: context.topologyGeneration ?? undefined,
     })
 
-    const cached = await cache.get<ReturnType<typeof buildSeriesRouteResponseV4>>(cacheKey)
+    const cached = await cache.get<ReturnType<typeof buildSeriesRouteResponseV5>>(cacheKey)
     if (cached) {
       return c.json(cached)
     }
 
-    const seriesQuery = await querySeriesResultsV4({
-      store: storeV4,
+    const seriesQuery = await querySeriesResultsV5({
+      store: storeV5,
       backend,
       serverId,
       selectors,
@@ -435,20 +443,31 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       hardwareProfile,
       organizationId,
       serverOptions,
+      machineClass,
       latestSnapshot: latestGeneration?.snapshot,
       deployment,
     })
+    // Capacity totals are the denominator of every derived percentage, so
+    // they must come from the generation each bucket was sampled under — not
+    // from today's. Only the generations this range actually spans are
+    // fetched, and a range that never crosses a topology change costs one
+    // extra indexed lookup.
+    const capacitiesByGeneration = buildCapacitiesByGenerationV5(
+      await getTopologyGenerations(db, serverId, hostResult?.topologyGenerations ?? []),
+      hardwareProfile
+    )
     const hostChartResponse = hostResult
-      ? toHostSeriesChartResponseV4({
+      ? toHostSeriesChartResponseV5({
           serverId,
           from: queryRange.fromIso,
           to: queryRange.toIso,
           result: hostResult,
           capacities: context.capacities,
+          capacitiesByGeneration,
         })
       : null
 
-    const payload = buildSeriesRouteResponseV4({
+    const payload = buildSeriesRouteResponseV5({
       serverId,
       from: queryRange.fromIso,
       to: queryRange.toIso,
@@ -502,8 +521,8 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       return c.json({ ok: false, error: rangeCheck.message }, 400)
     }
 
-    const storeV4 = getServerMetricsStoreV4(c)
-    const backend = resolveStoreBackendKindV4(storeV4, opts.runtime)
+    const storeV5 = getServerMetricsStoreV5(c)
+    const backend = resolveStoreBackendKindV5(storeV5, opts.runtime)
     const summaryResolutionSeconds = 300
     const queryRange = canonicalizeMetricsRange(
       fromParsed.ms,
@@ -511,10 +530,8 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       summaryResolutionSeconds
     )
 
-    const { hardwareProfile, organizationId, serverOptions } = await loadServerHardwareProfile(
-      db,
-      serverId
-    )
+    const { hardwareProfile, organizationId, serverOptions, machineClass } =
+      await loadServerHardwareProfile(db, serverId)
     const latestGeneration = await getLatestTopologyGeneration(db, serverId)
 
     const cacheKey = metricsChartCacheKey({
@@ -524,7 +541,7 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       metrics: [],
       resolutionSeconds: summaryResolutionSeconds,
       backend,
-      schemaVersion: 4,
+      schemaVersion: 5,
       kind: 'summary',
       topologyGeneration: latestGeneration?.generation,
     })
@@ -536,8 +553,8 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
 
     let result
     try {
-      result = storeV4?.queryHostSummary
-        ? await storeV4.queryHostSummary({
+      result = storeV5?.queryHostSummary
+        ? await storeV5.queryHostSummary({
             serverId,
             from: queryRange.fromIso,
             to: queryRange.toIso,
@@ -561,6 +578,7 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       hardwareProfile,
       organizationId,
       serverOptions,
+      machineClass,
       latestSnapshot: latestGeneration?.snapshot,
       deployment,
     })
@@ -603,12 +621,12 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       return c.json({ ok: false, error: rangeCheck.message }, 400)
     }
 
-    // Status transitions are v4-only: `queryStatusHistory` is optional on
-    // `ServerMetricsStoreV4` (only `DisabledServerMetricsStoreV4` omits it),
+    // Status transitions are v5-only: `queryStatusHistory` is optional on
+    // `ServerMetricsStoreV5` (only `DisabledServerMetricsStoreV5` omits it),
     // so an unconfigured backend falls back to an inline "disabled" result
     // below rather than reading from a v3 store.
-    const storeV4 = getServerMetricsStoreV4(c)
-    const backend = resolveStoreBackendKindV4(storeV4, opts.runtime)
+    const storeV5 = getServerMetricsStoreV5(c)
+    const backend = resolveStoreBackendKindV5(storeV5, opts.runtime)
 
     // Same resolution ladder as /series so cache keys round identically.
     const resolutionSeconds = selectResolutionSeconds({
@@ -628,7 +646,7 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       metrics: [],
       resolutionSeconds,
       backend,
-      schemaVersion: 4,
+      schemaVersion: 5,
       kind: 'connection',
       topologyGeneration: latestGeneration?.generation,
     })
@@ -640,8 +658,8 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
 
     let result: StatusHistoryResult
     try {
-      result = storeV4?.queryStatusHistory
-        ? await storeV4.queryStatusHistory({
+      result = storeV5?.queryStatusHistory
+        ? await storeV5.queryStatusHistory({
             serverId,
             from: queryRange.fromIso,
             to: queryRange.toIso,
@@ -687,11 +705,11 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
   })
 
   /**
-   * v4-only: hardware-health / lifecycle events (`sample.events`) for a
+   * v5-only: hardware-health / lifecycle events (`sample.events`) for a
    * server in a time range. No v3 equivalent — v3 has no discrete event
    * stream, only the fixed host-metrics allowlist. `available: false` (never
-   * a 503) when the resolved v4 store has no `queryMetricEvents` (e.g.
-   * `DisabledServerMetricsStoreV4` — no backend binding configured).
+   * a 503) when the resolved v5 store has no `queryMetricEvents` (e.g.
+   * `DisabledServerMetricsStoreV5` — no backend binding configured).
    */
   router.get('/servers/:id/metrics/events', async (c) => {
     const serverId = c.req.param('id')
@@ -712,10 +730,10 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       return c.json({ ok: false, error: rangeCheck.message }, 400)
     }
 
-    const storeV4 = getServerMetricsStoreV4(c)
-    const backend = resolveStoreBackendKindV4(storeV4, opts.runtime)
+    const storeV5 = getServerMetricsStoreV5(c)
+    const backend = resolveStoreBackendKindV5(storeV5, opts.runtime)
 
-    if (!storeV4?.queryMetricEvents) {
+    if (!storeV5?.queryMetricEvents) {
       return c.json(
         buildMetricEventsPayload({
           serverId,
@@ -747,7 +765,7 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
       metrics: [],
       resolutionSeconds,
       backend,
-      schemaVersion: 4,
+      schemaVersion: 5,
       kind: 'events',
     })
 
@@ -758,7 +776,7 @@ export function registerServerMetricsRoutes(router: Hono<AppEnv>, opts: AuthRout
 
     let result
     try {
-      result = await storeV4.queryMetricEvents({
+      result = await storeV5.queryMetricEvents({
         serverId,
         from: queryRange.fromIso,
         to: queryRange.toIso,
@@ -1095,11 +1113,15 @@ async function validateHardwareProfileTopologyIds(
   }
 
   if ((update.nicSlotDeviceIds?.length ?? 0) > 0) {
-    const { organizationId, serverOptions } = await loadServerHardwareProfile(db, serverId)
+    const { organizationId, serverOptions, machineClass } = await loadServerHardwareProfile(
+      db,
+      serverId
+    )
     const orgOptions = await loadOrganizationOptions(db, organizationId)
-    const limitError = nicSlotLimitViolationV4(
+    const limitError = nicSlotLimitViolationV5(
       update,
       resolveNicSlotLimit({
+        machineClass,
         latestSnapshot: latest?.snapshot,
         orgOptions,
         serverOptions,

@@ -1,6 +1,6 @@
 /**
- * Metrics capability plan (v4) — backend-neutral entitlement model for how
- * much of the v4 metrics contract (`contract-v4.ts`) a given server is
+ * Metrics capability plan (v5) — backend-neutral entitlement model for how
+ * much of the v5 metrics contract (`contract-v5.ts`) a given server is
  * allowed to report/store. Deliberately carries no pricing-tier names or
  * literals: this module only knows about slot counts and feature toggles,
  * never about what plan/SKU produced them. Org-wide defaults live in
@@ -13,18 +13,18 @@
  * Ingest call site: `POST /api/daemon/v1/metrics` (`api-routes.ts`) resolves
  * the effective plan for the reporting server via
  * `resolveEffectiveMetricsCapabilityPlan` (`server-metadata.ts`), calls
- * {@link truncateSampleToCapabilityPlanV4} on the incoming `MetricsSampleV4`,
+ * {@link truncateSampleToCapabilityPlanV5} on the incoming `MetricsSampleV5`,
  * then hands the truncated sample to the store.
  */
 
-import { isHardwareHealthEventKindV4, type MetricsSampleV4 } from './contract-v4.ts'
+import { isHardwareHealthEventKindV5, type MetricsSampleV5 } from './contract-v5.ts'
 import { MAX_NIC_SLOTS, type SlotMapping } from '../../client/servers/topology-types.ts'
 
 // ---------------------------------------------------------------------------
 // Plan shape
 // ---------------------------------------------------------------------------
 
-export type MetricsCapabilityPlanV4 = {
+export type MetricsCapabilityPlanV5 = {
   /** Steady-state sampling cadence, seconds. */
   baselineIntervalSeconds: number
   /** Fastest cadence a "live" on-demand session may request, seconds. */
@@ -43,10 +43,8 @@ export type MetricsCapabilityPlanV4 = {
   gpuInterconnectEnabled: boolean
   /** `hardwareSignals` entries allowed (fans/voltages/PSU/etc). */
   physicalHardwareSignalSlots: number
-  /** Whether `cpuDetail` (per-core breakdown) may be reported. */
+  /** Whether `cpuDetail` (host-wide frequency/scheduling counters) may be reported. */
   cpuDetailEnabled: boolean
-  /** Reserved slot count for live per-core CPU detail. */
-  cpuLiveCoreSlots: number
   /** Whether `memoryDetail` (hugepages/slab/dirty) may be reported. */
   memoryDetailEnabled: boolean
   /** `numaNodes` entries allowed. */
@@ -71,23 +69,71 @@ const METRICS_CAPABILITY_PLAN_FIELD_ORDER = [
   'gpuInterconnectEnabled',
   'physicalHardwareSignalSlots',
   'cpuDetailEnabled',
-  'cpuLiveCoreSlots',
   'memoryDetailEnabled',
   'numaNodeSlots',
   'managedIngressEnabled',
   'databaseProxyMetricsEnabled',
   'hardwareHealthEventsEnabled',
-] as const satisfies readonly (keyof MetricsCapabilityPlanV4)[]
+] as const satisfies readonly (keyof MetricsCapabilityPlanV5)[]
 
 /**
  * Per-server machine classification driving {@link platformDefaultMetricsCapabilityPlan}.
  * Not derived from any stored field yet — the caller (later phase: ingest,
  * once server topology/hardware detection is wired) is responsible for
- * classifying the reporting server. No default is offered here: a silent
- * fallback would recreate the "every server gets the same plan" bug this
- * type exists to fix.
+ * classifying the reporting server. The declared `server.machine_class`
+ * column is authoritative; {@link resolveServerMachineClass} holds the only
+ * fallback (topology inference), and it applies solely while that column is
+ * NULL — never as a silent default that would recreate the "every server
+ * gets the same plan" bug this type exists to fix.
  */
 export type ServerMachineClass = 'physical' | 'virtual'
+
+export function isServerMachineClass(value: unknown): value is ServerMachineClass {
+  return value === 'physical' || value === 'virtual'
+}
+
+/**
+ * Infer a machine class from whichever topology snapshot is on hand (the
+ * daemon's `topology-report.snapshot`, stored verbatim by
+ * `recordTopologyGeneration`): a physical host is the only kind that ever
+ * discovers host-level sensors, so a non-empty `hardwareSignals` array is
+ * proof of `'physical'`; an empty one is only absence of proof and resolves
+ * `'virtual'`. A snapshot that lacks the array entirely (none recorded, or a
+ * minimal test snapshot) falls through to `sampleSignalCount` — the raw,
+ * pre-truncation sample's own signal count at ingest, `0` on the read side
+ * where there is no sample.
+ */
+export function inferServerMachineClass(
+  topologySnapshot: unknown,
+  sampleSignalCount = 0
+): ServerMachineClass {
+  if (
+    typeof topologySnapshot === 'object' &&
+    topologySnapshot !== null &&
+    !Array.isArray(topologySnapshot)
+  ) {
+    const signals = (topologySnapshot as Record<string, unknown>).hardwareSignals
+    if (Array.isArray(signals)) return signals.length > 0 ? 'physical' : 'virtual'
+  }
+  return sampleSignalCount > 0 ? 'physical' : 'virtual'
+}
+
+/**
+ * The one machine-class resolution both ingest and the read-side routes use,
+ * so the plan a sample is truncated to and the limits the UI reports never
+ * disagree. The declared `server.machine_class` column wins outright — an
+ * operator can pin a VM that exposes a bogus thermal zone to `'virtual'`, or
+ * a physical box whose sensors are not exposed to `'physical'`. Only while
+ * the column is NULL does {@link inferServerMachineClass} run.
+ */
+export function resolveServerMachineClass(
+  declared: unknown,
+  topologySnapshot: unknown,
+  sampleSignalCount = 0
+): ServerMachineClass {
+  if (isServerMachineClass(declared)) return declared
+  return inferServerMachineClass(topologySnapshot, sampleSignalCount)
+}
 
 /**
  * Which deployment resolves the plan: the hosted platform (Cloudflare
@@ -124,18 +170,17 @@ export const SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS = MAX_NIC_SLOTS
  * voltage/PSU/etc. sensors to report and a self-hosted instance is not
  * NIC-metered.
  */
-export const PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN: MetricsCapabilityPlanV4 = {
+export const PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN: MetricsCapabilityPlanV5 = {
   baselineIntervalSeconds: 60,
   liveMinIntervalSeconds: 10,
   normalNicSlots: 2,
   turboFabricEnabled: true,
   extraFilesystemSlots: 0,
-  detailedBlockDeviceSlots: 1,
+  detailedBlockDeviceSlots: 2,
   gpuSlots: 1,
   gpuInterconnectEnabled: false,
   physicalHardwareSignalSlots: 19,
   cpuDetailEnabled: false,
-  cpuLiveCoreSlots: 0,
   memoryDetailEnabled: false,
   numaNodeSlots: 0,
   managedIngressEnabled: true,
@@ -154,7 +199,7 @@ export const PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN: MetricsCapabilityPlanV4 =
 export function platformDefaultMetricsCapabilityPlan(
   machineClass: ServerMachineClass,
   deployment: MetricsDeploymentKind
-): MetricsCapabilityPlanV4 {
+): MetricsCapabilityPlanV5 {
   return {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     normalNicSlots:
@@ -169,12 +214,12 @@ export function platformDefaultMetricsCapabilityPlan(
 }
 
 /** Partial override layer — org-wide (`organization.options`) or per-server (`server.options`). */
-export type MetricsCapabilityPlanOverrideV4 = Partial<MetricsCapabilityPlanV4>
+export type MetricsCapabilityPlanOverrideV5 = Partial<MetricsCapabilityPlanV5>
 
 const POSITIVE_INT_FIELDS = [
   'baselineIntervalSeconds',
   'liveMinIntervalSeconds',
-] as const satisfies readonly (keyof MetricsCapabilityPlanV4)[]
+] as const satisfies readonly (keyof MetricsCapabilityPlanV5)[]
 
 const NON_NEGATIVE_INT_FIELDS = [
   'normalNicSlots',
@@ -182,9 +227,8 @@ const NON_NEGATIVE_INT_FIELDS = [
   'detailedBlockDeviceSlots',
   'gpuSlots',
   'physicalHardwareSignalSlots',
-  'cpuLiveCoreSlots',
   'numaNodeSlots',
-] as const satisfies readonly (keyof MetricsCapabilityPlanV4)[]
+] as const satisfies readonly (keyof MetricsCapabilityPlanV5)[]
 
 const BOOLEAN_FIELDS = [
   'turboFabricEnabled',
@@ -194,7 +238,7 @@ const BOOLEAN_FIELDS = [
   'managedIngressEnabled',
   'databaseProxyMetricsEnabled',
   'hardwareHealthEventsEnabled',
-] as const satisfies readonly (keyof MetricsCapabilityPlanV4)[]
+] as const satisfies readonly (keyof MetricsCapabilityPlanV5)[]
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -217,9 +261,9 @@ function isNonNegativeInteger(value: unknown): value is number {
  */
 export function parseMetricsCapabilityPlanOverride(
   value: unknown
-): MetricsCapabilityPlanOverrideV4 {
+): MetricsCapabilityPlanOverrideV5 {
   if (!isRecord(value)) return {}
-  const override: MetricsCapabilityPlanOverrideV4 = {}
+  const override: MetricsCapabilityPlanOverrideV5 = {}
   for (const key of POSITIVE_INT_FIELDS) {
     if (isPositiveInteger(value[key])) override[key] = value[key] as number
   }
@@ -245,7 +289,7 @@ export function parseMetricsCapabilityPlanOverride(
  */
 export function parseServerMetricsCapabilityPlanOverride(
   value: unknown
-): MetricsCapabilityPlanOverrideV4 {
+): MetricsCapabilityPlanOverrideV5 {
   return parseMetricsCapabilityPlanOverride(value)
 }
 
@@ -263,10 +307,10 @@ export function parseServerMetricsCapabilityPlanOverride(
  */
 export function resolveMetricsCapabilityPlan(
   machineClass: ServerMachineClass,
-  orgOverride: MetricsCapabilityPlanOverrideV4 | undefined,
-  serverOverride: MetricsCapabilityPlanOverrideV4 | undefined,
+  orgOverride: MetricsCapabilityPlanOverrideV5 | undefined,
+  serverOverride: MetricsCapabilityPlanOverrideV5 | undefined,
   deployment: MetricsDeploymentKind
-): MetricsCapabilityPlanV4 {
+): MetricsCapabilityPlanV5 {
   return {
     ...platformDefaultMetricsCapabilityPlan(machineClass, deployment),
     ...orgOverride,
@@ -283,7 +327,7 @@ export function resolveMetricsCapabilityPlan(
  * APIs.
  */
 export async function computeMetricsCapabilityPlanHash(
-  plan: MetricsCapabilityPlanV4
+  plan: MetricsCapabilityPlanV5
 ): Promise<string> {
   const canonical = METRICS_CAPABILITY_PLAN_FIELD_ORDER.map((key) => [key, plan[key]] as const)
   const material = new TextEncoder().encode(
@@ -296,11 +340,11 @@ export async function computeMetricsCapabilityPlanHash(
 }
 
 // ---------------------------------------------------------------------------
-// Enforcement — truncate a discovered v4 sample down to plan entitlements.
+// Enforcement — truncate a discovered v5 sample down to plan entitlements.
 // ---------------------------------------------------------------------------
 
 /**
- * Truncate a `MetricsSampleV4`'s presence-gated entity arrays/optionals down
+ * Truncate a `MetricsSampleV5`'s presence-gated entity arrays/optionals down
  * to what `plan` entitles, without ever fabricating an entity that wasn't
  * present (0 discovered stays 0 regardless of the slot count). Pure — no I/O,
  * no mutation of `sample`.
@@ -315,7 +359,7 @@ export async function computeMetricsCapabilityPlanHash(
  *   `extraFilesystemSlots`, so an older daemon that still reports root in
  *   `filesystems[]` can never spend a slot budget on `/` itself.
  * - `events` filters out only the hardware-health kinds
- *   (`isHardwareHealthEventKindV4`, `contract-v4.ts`) when
+ *   (`isHardwareHealthEventKindV5`, `contract-v5.ts`) when
  *   `hardwareHealthEventsEnabled` is false; every other kind (OS/kernel,
  *   filesystem, fabric, clock-sync, topology/boot generation) is unrelated
  *   operational history and always survives.
@@ -336,30 +380,30 @@ export async function computeMetricsCapabilityPlanHash(
  * back to this only when no DB is available for the request or the real
  * resolution itself fails — never as the default path.
  */
-export function resolveDefaultMetricsCapabilityPlanV4(
+export function resolveDefaultMetricsCapabilityPlanV5(
   deployment: MetricsDeploymentKind
-): MetricsCapabilityPlanV4 {
+): MetricsCapabilityPlanV5 {
   return resolveMetricsCapabilityPlan('virtual', undefined, undefined, deployment)
 }
 
 /**
- * `networks` truncation — see {@link truncateSampleToCapabilityPlanV4}'s doc
+ * `networks` truncation — see {@link truncateSampleToCapabilityPlanV5}'s doc
  * comment. Identity-addressed when a `slotMapping` is available (a device is
  * kept because of *which* device it is, never its array position), ordered
  * slots-first so the positional packer fallback still embeds slot 1/2.
  */
-function truncateNetworksToPlanV4(
-  networks: MetricsSampleV4['networks'],
-  plan: MetricsCapabilityPlanV4,
+function truncateNetworksToPlanV5(
+  networks: MetricsSampleV5['networks'],
+  plan: MetricsCapabilityPlanV5,
   slotMapping: SlotMapping | undefined
-): MetricsSampleV4['networks'] {
+): MetricsSampleV5['networks'] {
   if (!slotMapping) return networks.slice(0, plan.normalNicSlots)
   const byId = new Map(networks.map((device) => [device.deviceId, device]))
   const keepIds = [
     ...slotMapping.normalNicSlots.slice(0, plan.normalNicSlots),
     ...(plan.turboFabricEnabled ? slotMapping.fabricDeviceIds : []),
   ]
-  const kept: MetricsSampleV4['networks'] = []
+  const kept: MetricsSampleV5['networks'] = []
   for (const id of keepIds) {
     const device = byId.get(id)
     if (device && !kept.includes(device)) kept.push(device)
@@ -367,17 +411,17 @@ function truncateNetworksToPlanV4(
   return kept
 }
 
-export function truncateSampleToCapabilityPlanV4(
-  sample: MetricsSampleV4,
-  plan: MetricsCapabilityPlanV4,
+export function truncateSampleToCapabilityPlanV5(
+  sample: MetricsSampleV5,
+  plan: MetricsCapabilityPlanV5,
   slotMapping?: SlotMapping
-): MetricsSampleV4 {
+): MetricsSampleV5 {
   const nonRootFilesystems = slotMapping?.rootFilesystemId
     ? sample.filesystems.filter((fs) => fs.filesystemId !== slotMapping.rootFilesystemId)
     : sample.filesystems
-  const truncated: MetricsSampleV4 = {
+  const truncated: MetricsSampleV5 = {
     ...sample,
-    networks: truncateNetworksToPlanV4(sample.networks, plan, slotMapping),
+    networks: truncateNetworksToPlanV5(sample.networks, plan, slotMapping),
     gpus: sample.gpus.slice(0, plan.gpuSlots),
     blockDevices: sample.blockDevices.slice(0, plan.detailedBlockDeviceSlots),
     filesystems: nonRootFilesystems.slice(0, plan.extraFilesystemSlots),
@@ -386,21 +430,12 @@ export function truncateSampleToCapabilityPlanV4(
     databaseProxies: plan.databaseProxyMetricsEnabled ? sample.databaseProxies : [],
     events: plan.hardwareHealthEventsEnabled
       ? sample.events
-      : sample.events.filter((event) => !isHardwareHealthEventKindV4(event.kind)),
+      : sample.events.filter((event) => !isHardwareHealthEventKindV5(event.kind)),
   }
 
   truncated.cpuDetail = plan.cpuDetailEnabled ? sample.cpuDetail : undefined
   truncated.memoryDetail = plan.memoryDetailEnabled ? sample.memoryDetail : undefined
   truncated.numaNodes = sample.numaNodes?.slice(0, plan.numaNodeSlots)
-
-  // `cpuCoreLive` is live-only regardless of slot count: a live session with
-  // zero slots gets nothing, and a baseline sample never carries per-core
-  // live data even if the plan grants slots (slots only bound a live
-  // session's array length, they don't turn on baseline emission).
-  truncated.cpuCoreLive =
-    sample.metadata.collectionMode === 'live'
-      ? sample.cpuCoreLive?.slice(0, plan.cpuLiveCoreSlots)
-      : undefined
 
   return truncated
 }

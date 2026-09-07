@@ -3,39 +3,42 @@
  * response shaping without a Hono Context.
  */
 
-import { CloudflareAnalyticsEngineServerMetricsStoreV4 } from '../../daemon/metrics/backends/cloudflare/store-v4.ts'
-import { DisabledServerMetricsStoreV4 } from '../../daemon/metrics/disabled-store-v4.ts'
+import { CloudflareAnalyticsEngineServerMetricsStoreV5 } from '../../daemon/metrics/backends/cloudflare/store-v5.ts'
+import { DisabledServerMetricsStoreV5 } from '../../daemon/metrics/disabled-store-v5.ts'
 import type {
-  EntitySeriesResultV4,
-  HostSeriesResultV4,
-  MetricEventsResultV4,
+  EntitySeriesResultV5,
+  HostSeriesResultV5,
+  MetricEventsResultV5,
   MetricsBackendKind,
-  PerEntityHostedFamilyV4,
-  ServerMetricsStoreV4,
+  PerEntityHostedFamilyV5,
+  ServerMetricsStoreV5,
   StatusHistoryResult,
-} from '../../daemon/metrics/types-v4.ts'
+} from '../../daemon/metrics/types-v5.ts'
 import {
-  HOST_METRICS_METRIC_DESCRIPTORS_V4,
-  type MetricEntityScopeV4,
-} from '../../daemon/metrics/metric-descriptors-v4.ts'
+  HOST_METRICS_METRIC_DESCRIPTORS_V5,
+  type MetricEntityScopeV5,
+} from '../../daemon/metrics/metric-descriptors-v5.ts'
 import {
   type EntityMetricSelector,
   parseEntityMetricId,
 } from '../../daemon/metrics/entity-metric-id.ts'
 import {
-  computeDerivedHostValuesV4,
-  type DerivedHostValuesV4,
-  type HostCapacitiesV4,
-} from '../../daemon/metrics/query/derived-metrics-v4.ts'
-import type { HostSeriesChartResponseV4 } from '../../daemon/metrics/query/series-response-v4.ts'
+  computeDerivedHostValuesV5,
+  type DerivedHostValuesV5,
+  type HostCapacitiesV5,
+} from '../../daemon/metrics/query/derived-metrics-v5.ts'
+import type { HostSeriesChartResponseV5 } from '../../daemon/metrics/query/series-response-v5.ts'
 import { computeSlotMapping } from './topology-slot-mapping.ts'
 import {
-  buildTopologyInventoryV4,
-  rootFilesystemTotalBytesV4,
-  type TopologyInventoryV4,
+  buildTopologyInventoryV5,
+  rootFilesystemTotalBytesV5,
+  type TopologyInventoryV5,
 } from './topology-inventory.ts'
 import type { AuthRouteOpts } from '../authn/http.ts'
-import type { ServerMachineClass } from '../../daemon/metrics/capability-plan.ts'
+import {
+  inferServerMachineClass,
+  type ServerMachineClass,
+} from '../../daemon/metrics/capability-plan.ts'
 import {
   type EffectiveCpuThermalLimits,
   HARDWARE_PROFILE_NIC_KEYS,
@@ -50,11 +53,11 @@ import {
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
   type FilesystemId,
+  MAX_NIC_SLOTS,
   type SlotMapping,
   type TopologyDeviceId,
   type TopologyOverrides,
   type TopologySnapshot,
-  MAX_NIC_SLOTS,
 } from './topology-types.ts'
 import {
   type OrganizationOptions,
@@ -201,7 +204,12 @@ function parseCpuTjMaxCelsiusField(value: unknown): NumberFieldParse {
 
 type HardwareProfileFieldResult = { ok: true } | { ok: false; message: string }
 
-type NicSlotListParse = { ok: true; value: string[] | null } | { ok: false; message: string }
+type NicSlotListParse =
+  | { ok: true; value: string[] | null }
+  | {
+      ok: false
+      message: string
+    }
 
 /**
  * `nicSlotDeviceIds`: `null` returns the server to auto selection; an array
@@ -228,7 +236,9 @@ function parseNicSlotListField(value: unknown): NicSlotListParse {
     }
     const parsed = parseOptionalStringField(HARDWARE_PROFILE_NIC_SLOT_LIST_KEY, entry)
     if (!parsed.ok) return parsed
-    if (parsed.value !== null && !ids.includes(parsed.value)) ids.push(parsed.value)
+    if (parsed.value !== null && !ids.includes(parsed.value)) {
+      ids.push(parsed.value)
+    }
   }
   if (ids.length > MAX_NIC_SLOTS) {
     return {
@@ -488,7 +498,7 @@ export function findUnmonitorableNicSlotId(
  * PUT time so a hosted operator never pins NICs that ingest would silently
  * drop.
  */
-export function nicSlotLimitViolationV4(
+export function nicSlotLimitViolationV5(
   update: ServerHardwareProfileUpdate,
   nicSlotLimit: number
 ): string | null {
@@ -501,27 +511,23 @@ export function nicSlotLimitViolationV4(
 }
 
 /**
- * Machine class for capability-plan resolution, from a recorded topology
- * snapshot: only a physical host ever discovers host-level hardware signals,
- * so a non-empty `hardwareSignals` array is the classification (mirrors the
- * daemon ingest route's `classifyServerMachineForMetrics`). Unknown/missing
- * snapshot → `'virtual'`, the conservative default.
+ * Inferred machine class from a recorded topology snapshot, with no sample
+ * to fall back on — the read-side half of the shared
+ * {@link inferServerMachineClass}. Routes should prefer
+ * `resolveServerMachineClass` with the declared `server.machine_class`
+ * column; this stays for callers that only hold a snapshot.
  */
-export function machineClassFromTopologySnapshotV4(snapshot: unknown): ServerMachineClass {
-  if (typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) {
-    return 'virtual'
-  }
-  const signals = (snapshot as Record<string, unknown>).hardwareSignals
-  return Array.isArray(signals) && signals.length > 0 ? 'physical' : 'virtual'
+export function machineClassFromTopologySnapshotV5(snapshot: unknown): ServerMachineClass {
+  return inferServerMachineClass(snapshot)
 }
 
-export function resolveStoreBackendKindV4(
-  store: ServerMetricsStoreV4 | undefined,
+export function resolveStoreBackendKindV5(
+  store: ServerMetricsStoreV5 | undefined,
   runtime: AuthRouteOpts['runtime']
 ): MetricsBackendKind {
   if (!store) return 'disabled'
-  if (store instanceof DisabledServerMetricsStoreV4) return 'disabled'
-  if (store instanceof CloudflareAnalyticsEngineServerMetricsStoreV4) {
+  if (store instanceof DisabledServerMetricsStoreV5) return 'disabled'
+  if (store instanceof CloudflareAnalyticsEngineServerMetricsStoreV5) {
     return 'analytics-engine'
   }
   // Deno → DuckDB (or unavailable DuckDB). Workers bundles must not import the
@@ -530,17 +536,17 @@ export function resolveStoreBackendKindV4(
 }
 
 // ---------------------------------------------------------------------------
-// v4 entity-metric selector parsing — `/servers/:id/metrics/series`'s
+// v5 entity-metric selector parsing — `/servers/:id/metrics/series`'s
 // `metrics` query param, one wire identity per selector
 // (`entity-metric-id.ts`), grouped into a host-singleton request plus a
-// per-`PerEntityHostedFamilyV4` request.
+// per-`PerEntityHostedFamilyV5` request.
 // ---------------------------------------------------------------------------
 
-/** At most this many `metrics` selectors per `/series` request — same defensive-cap idiom as the v4 ingest entity-array caps. */
-export const MAX_SERIES_METRIC_SELECTORS_V4 = 128
+/** At most this many `metrics` selectors per `/series` request — same defensive-cap idiom as the v5 ingest entity-array caps. */
+export const MAX_SERIES_METRIC_SELECTORS_V5 = 128
 
-/** `host.*` scopes actually packed/queryable (`field-map-v4.ts` / `queryHostSeries`) — the default `metrics` selection when the query param is absent. */
-const HOST_SINGLETON_QUERYABLE_SCOPES_V4: ReadonlySet<MetricEntityScopeV4> = new Set([
+/** `host.*` scopes actually packed/queryable (`field-map-v5.ts` / `queryHostSeries`) — the default `metrics` selection when the query param is absent. */
+const HOST_SINGLETON_QUERYABLE_SCOPES_V5: ReadonlySet<MetricEntityScopeV5> = new Set([
   'host.cpu',
   'host.kernel',
   'host.memory',
@@ -555,13 +561,13 @@ const HOST_SINGLETON_QUERYABLE_SCOPES_V4: ReadonlySet<MetricEntityScopeV4> = new
  * enable them and the org servers overview shouldn't pay for columns it
  * never renders.
  */
-const HOST_SINGLETON_EXPLICIT_ONLY_SCOPES_V4: ReadonlySet<MetricEntityScopeV4> = new Set([
+const HOST_SINGLETON_EXPLICIT_ONLY_SCOPES_V5: ReadonlySet<MetricEntityScopeV5> = new Set([
   'cpuDetail',
   'memoryDetail',
 ])
 
-/** Per-entity scope -> the `PerEntityHostedFamilyV4` its entity id/metrics are queried under. */
-const ENTITY_SCOPE_TO_FAMILY_V4: Partial<Record<MetricEntityScopeV4, PerEntityHostedFamilyV4>> = {
+/** Per-entity scope -> the `PerEntityHostedFamilyV5` its entity id/metrics are queried under. */
+const ENTITY_SCOPE_TO_FAMILY_V5: Partial<Record<MetricEntityScopeV5, PerEntityHostedFamilyV5>> = {
   network: 'network',
   filesystem: 'filesystem',
   block: 'block',
@@ -569,39 +575,42 @@ const ENTITY_SCOPE_TO_FAMILY_V4: Partial<Record<MetricEntityScopeV4, PerEntityHo
   hardwareSignal: 'hardware.physical',
   ingress: 'managed.ingress',
   databaseProxy: 'managed.database_proxy',
-  cpuCore: 'cpu.core.live',
 }
 
 /** Every queryable `host.*` canonical name — the default `metrics` selection when the query param is absent. */
-export function defaultHostCanonicalNamesV4(): string[] {
-  return Object.values(HOST_METRICS_METRIC_DESCRIPTORS_V4)
-    .filter((descriptor) => HOST_SINGLETON_QUERYABLE_SCOPES_V4.has(descriptor.entityScope))
+export function defaultHostCanonicalNamesV5(): string[] {
+  return Object.values(HOST_METRICS_METRIC_DESCRIPTORS_V5)
+    .filter((descriptor) => HOST_SINGLETON_QUERYABLE_SCOPES_V5.has(descriptor.entityScope))
     .map((descriptor) => descriptor.canonicalName)
 }
 
-export type EntityFamilySelectionV4 = {
+export type EntityFamilySelectionV5 = {
   entityIds: Set<string>
   fields: Set<string>
 }
 
-export type SeriesMetricSelectorsV4 = {
+export type SeriesMetricSelectorsV5 = {
   hostCanonicalNames: string[]
-  entityFamilies: Map<PerEntityHostedFamilyV4, EntityFamilySelectionV4>
+  entityFamilies: Map<PerEntityHostedFamilyV5, EntityFamilySelectionV5>
 }
 
-export type ParseSeriesMetricSelectorsResultV4 =
-  { ok: true; value: SeriesMetricSelectorsV4 } | { ok: false; error: string }
+export type ParseSeriesMetricSelectorsResultV5 =
+  | {
+      ok: true
+      value: SeriesMetricSelectorsV5
+    }
+  | { ok: false; error: string }
 
 type SelectorApplyResult = { ok: true } | { ok: false; error: string }
 
-function applyHostSingletonSelectorV4(
+function applyHostSingletonSelectorV5(
   id: string,
-  scope: MetricEntityScopeV4,
+  scope: MetricEntityScopeV5,
   hostCanonicalNames: Set<string>
 ): SelectorApplyResult {
   if (
-    !HOST_SINGLETON_QUERYABLE_SCOPES_V4.has(scope) &&
-    !HOST_SINGLETON_EXPLICIT_ONLY_SCOPES_V4.has(scope)
+    !HOST_SINGLETON_QUERYABLE_SCOPES_V5.has(scope) &&
+    !HOST_SINGLETON_EXPLICIT_ONLY_SCOPES_V5.has(scope)
   ) {
     return {
       ok: false,
@@ -612,12 +621,12 @@ function applyHostSingletonSelectorV4(
   return { ok: true }
 }
 
-function applyEntityFamilySelectorV4(
+function applyEntityFamilySelectorV5(
   selector: EntityMetricSelector,
   entityId: string,
-  entityFamilies: Map<PerEntityHostedFamilyV4, EntityFamilySelectionV4>
+  entityFamilies: Map<PerEntityHostedFamilyV5, EntityFamilySelectionV5>
 ): SelectorApplyResult {
-  const family = ENTITY_SCOPE_TO_FAMILY_V4[selector.scope]
+  const family = ENTITY_SCOPE_TO_FAMILY_V5[selector.scope]
   if (!family) {
     return {
       ok: false,
@@ -634,10 +643,10 @@ function applyEntityFamilySelectorV4(
   return { ok: true }
 }
 
-function applySeriesMetricSelectorV4(
+function applySeriesMetricSelectorV5(
   id: string,
   hostCanonicalNames: Set<string>,
-  entityFamilies: Map<PerEntityHostedFamilyV4, EntityFamilySelectionV4>
+  entityFamilies: Map<PerEntityHostedFamilyV5, EntityFamilySelectionV5>
 ): SelectorApplyResult {
   let selector: EntityMetricSelector
   try {
@@ -646,9 +655,9 @@ function applySeriesMetricSelectorV4(
     return { ok: false, error: metricsQueryErrorMessage(err) }
   }
   if (selector.entityId === undefined) {
-    return applyHostSingletonSelectorV4(id, selector.scope, hostCanonicalNames)
+    return applyHostSingletonSelectorV5(id, selector.scope, hostCanonicalNames)
   }
-  return applyEntityFamilySelectorV4(selector, selector.entityId, entityFamilies)
+  return applyEntityFamilySelectorV5(selector, selector.entityId, entityFamilies)
 }
 
 /**
@@ -658,12 +667,12 @@ function applySeriesMetricSelectorV4(
  * `cpuDetail.averageFrequencyMHz`, `cpuCore:cpu3.busyPercent`, …). Absent or
  * blank defaults to every queryable `host.*` canonical name (never includes
  * the explicit-only `cpuDetail`/`memoryDetail` scopes — see
- * {@link HOST_SINGLETON_EXPLICIT_ONLY_SCOPES_V4}). Rejects an unparseable id,
+ * {@link HOST_SINGLETON_EXPLICIT_ONLY_SCOPES_V5}). Rejects an unparseable id,
  * an unknown/unqueryable scope, or too many selectors.
  */
-export function parseSeriesMetricSelectorsV4(
+export function parseSeriesMetricSelectorsV5(
   raw: string | undefined
-): ParseSeriesMetricSelectorsResultV4 {
+): ParseSeriesMetricSelectorsResultV5 {
   const ids =
     raw === undefined
       ? []
@@ -675,23 +684,23 @@ export function parseSeriesMetricSelectorsV4(
     return {
       ok: true,
       value: {
-        hostCanonicalNames: defaultHostCanonicalNamesV4(),
+        hostCanonicalNames: defaultHostCanonicalNamesV5(),
         entityFamilies: new Map(),
       },
     }
   }
-  if (ids.length > MAX_SERIES_METRIC_SELECTORS_V4) {
+  if (ids.length > MAX_SERIES_METRIC_SELECTORS_V5) {
     return {
       ok: false,
-      error: `at most ${MAX_SERIES_METRIC_SELECTORS_V4} metrics may be requested at once`,
+      error: `at most ${MAX_SERIES_METRIC_SELECTORS_V5} metrics may be requested at once`,
     }
   }
 
   const hostCanonicalNames = new Set<string>()
-  const entityFamilies = new Map<PerEntityHostedFamilyV4, EntityFamilySelectionV4>()
+  const entityFamilies = new Map<PerEntityHostedFamilyV5, EntityFamilySelectionV5>()
 
   for (const id of ids) {
-    const applied = applySeriesMetricSelectorV4(id, hostCanonicalNames, entityFamilies)
+    const applied = applySeriesMetricSelectorV5(id, hostCanonicalNames, entityFamilies)
     if (!applied.ok) return applied
   }
 
@@ -702,7 +711,7 @@ export function parseSeriesMetricSelectorsV4(
 }
 
 /** Cache-key token list for `/series`: host canonical names plus `family:entityId.field` entity selectors. */
-export function seriesCacheMetricsListV4(selectors: SeriesMetricSelectorsV4): string[] {
+export function seriesCacheMetricsListV5(selectors: SeriesMetricSelectorsV5): string[] {
   return [
     ...selectors.hostCanonicalNames,
     ...[...selectors.entityFamilies.entries()].flatMap(([family, selection]) =>
@@ -726,8 +735,8 @@ export function seriesCacheMetricsListV4(selectors: SeriesMetricSelectorsV4): st
  * here (unlike the pre-reconstruction behavior this replaces): Cloudflare
  * now reconstructs its `receiveBytesPerSecond`/`transmitBytesPerSecond` from
  * `host.io`'s own rows when `queryEntitySeries` is called with a resolved
- * `slotMapping`/`topologyGeneration` (see `types-v4.ts`'s
- * `EntitySeriesQueryV4` doc comment), and DuckDB already had the full row —
+ * `slotMapping`/`topologyGeneration` (see `types-v5.ts`'s
+ * `EntitySeriesQueryV5` doc comment), and DuckDB already had the full row —
  * so both backends can answer, even though Cloudflare's answer is partial
  * (every other requested field resolves to `null` for that entity).
  *
@@ -737,7 +746,7 @@ export function seriesCacheMetricsListV4(selectors: SeriesMetricSelectorsV4): st
  */
 export function findFabricNetworkEntityId(
   entityIds: Iterable<string>,
-  inventory: TopologyInventoryV4 | null
+  inventory: TopologyInventoryV5 | null
 ): string | null {
   if (!inventory) return null
   const fabric = new Set(
@@ -754,9 +763,9 @@ export function findFabricNetworkEntityId(
  * standalone `network` entity — same rejection {@link findFabricNetworkEntityId}
  * encodes, shaped for the HTTP 400 body.
  */
-export function fabricNetworkSelectionErrorV4(
-  selectors: SeriesMetricSelectorsV4,
-  inventory: TopologyInventoryV4 | null
+export function fabricNetworkSelectionErrorV5(
+  selectors: SeriesMetricSelectorsV5,
+  inventory: TopologyInventoryV5 | null
 ): string | null {
   const networkSelection = selectors.entityFamilies.get('network')
   if (!networkSelection) return null
@@ -787,7 +796,7 @@ export function topologyOverridesFromHardwareProfile(
 }
 
 /** A snapshot is only usable for slot mapping once it carries every array `computeSlotMapping` reads — mirrors `api-routes.ts`'s `isSlotMappableTopologySnapshot`. */
-function isSlotMappableTopologySnapshotV4(value: unknown): value is TopologySnapshot {
+function isSlotMappableTopologySnapshotV5(value: unknown): value is TopologySnapshot {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false
   }
@@ -801,23 +810,23 @@ function isSlotMappableTopologySnapshotV4(value: unknown): value is TopologySnap
   )
 }
 
-export const EMPTY_HOST_CAPACITIES_V4: HostCapacitiesV4 = {
+export const EMPTY_HOST_CAPACITIES_V5: HostCapacitiesV5 = {
   memoryTotalBytes: null,
   swapTotalBytes: null,
   rootFilesystemTotalBytes: null,
 }
 
-export type TopologyContextV4 = {
+export type TopologyContextV5 = {
   topologyGeneration: number | null
   slotMapping: SlotMapping | null
-  inventory: TopologyInventoryV4 | null
-  capacities: HostCapacitiesV4
+  inventory: TopologyInventoryV5 | null
+  capacities: HostCapacitiesV5
 }
 
-const EMPTY_TOPOLOGY_CONTEXT_V4: Omit<TopologyContextV4, 'topologyGeneration'> = {
+const EMPTY_TOPOLOGY_CONTEXT_V5: Omit<TopologyContextV5, 'topologyGeneration'> = {
   slotMapping: null,
   inventory: null,
-  capacities: EMPTY_HOST_CAPACITIES_V4,
+  capacities: EMPTY_HOST_CAPACITIES_V5,
 }
 
 /**
@@ -827,13 +836,13 @@ const EMPTY_TOPOLOGY_CONTEXT_V4: Omit<TopologyContextV4, 'topologyGeneration'> =
  * no usable snapshot yet — a server that has never reported topology, or
  * whose recorded snapshot predates `computeSlotMapping`'s required arrays.
  */
-export function buildTopologyContextV4(
+export function buildTopologyContextV5(
   record: { generation: number; snapshot: unknown } | undefined,
   hardwareProfile: ServerHardwareProfile | undefined
-): TopologyContextV4 {
+): TopologyContextV5 {
   const topologyGeneration = record?.generation ?? null
-  if (!isSlotMappableTopologySnapshotV4(record?.snapshot)) {
-    return { topologyGeneration, ...EMPTY_TOPOLOGY_CONTEXT_V4 }
+  if (!isSlotMappableTopologySnapshotV5(record?.snapshot)) {
+    return { topologyGeneration, ...EMPTY_TOPOLOGY_CONTEXT_V5 }
   }
   const snapshot = record!.snapshot
   const overrides = topologyOverridesFromHardwareProfile(hardwareProfile)
@@ -841,27 +850,76 @@ export function buildTopologyContextV4(
   try {
     slotMapping = computeSlotMapping(snapshot, overrides)
   } catch {
-    return { topologyGeneration, ...EMPTY_TOPOLOGY_CONTEXT_V4 }
+    return { topologyGeneration, ...EMPTY_TOPOLOGY_CONTEXT_V5 }
   }
-  const rootFilesystemTotalBytes = rootFilesystemTotalBytesV4(snapshot, slotMapping)
   return {
     topologyGeneration,
     slotMapping,
-    inventory: buildTopologyInventoryV4(snapshot, slotMapping),
-    capacities: {
-      memoryTotalBytes: snapshot.memoryTotalBytes,
-      swapTotalBytes: snapshot.swapTotalBytes,
-      rootFilesystemTotalBytes,
-    },
+    inventory: buildTopologyInventoryV5(snapshot, slotMapping),
+    capacities: capacitiesFromSnapshotV5(snapshot, slotMapping),
   }
 }
 
+/**
+ * Host capacity totals (RAM, swap, root filesystem) for one topology
+ * snapshot. Split out of {@link buildTopologyContextV5} so the same
+ * derivation can run against a *historical* generation — see
+ * {@link buildCapacitiesByGenerationV5}.
+ */
+function capacitiesFromSnapshotV5(
+  snapshot: TopologySnapshot,
+  slotMapping: SlotMapping
+): HostCapacitiesV5 {
+  return {
+    memoryTotalBytes: snapshot.memoryTotalBytes,
+    swapTotalBytes: snapshot.swapTotalBytes,
+    rootFilesystemTotalBytes: rootFilesystemTotalBytesV5(snapshot, slotMapping),
+  }
+}
+
+/**
+ * Capacity totals per topology generation, for the generations a queried
+ * range actually spans.
+ *
+ * Capacities are the denominator of every derived percentage
+ * (`memoryUsedPercent`, `rootFilesystemUsedPercent`). Resolving them once
+ * from the latest generation — which is what v4 did — means adding RAM or
+ * resizing a volume silently restates every historical point against the new
+ * total, so a box that was at 90% memory last week reads as 45% today. Each
+ * bucket carries the generation that was active when it was sampled, so this
+ * maps that generation back to the capacities that were true at the time.
+ *
+ * A generation with no recorded snapshot, or one whose snapshot predates
+ * `computeSlotMapping`'s required arrays, is omitted; the caller falls back
+ * to the latest context's capacities for those points.
+ */
+export function buildCapacitiesByGenerationV5(
+  records: ReadonlyMap<number, { snapshot: unknown }>,
+  hardwareProfile: ServerHardwareProfile | undefined
+): Map<number, HostCapacitiesV5> {
+  const overrides = topologyOverridesFromHardwareProfile(hardwareProfile)
+  const out = new Map<number, HostCapacitiesV5>()
+  for (const [generation, record] of records) {
+    if (!isSlotMappableTopologySnapshotV5(record.snapshot)) continue
+    try {
+      out.set(
+        generation,
+        capacitiesFromSnapshotV5(record.snapshot, computeSlotMapping(record.snapshot, overrides))
+      )
+    } catch {
+      // A snapshot the slot mapper rejects contributes nothing rather than
+      // failing the whole series query.
+    }
+  }
+  return out
+}
+
 // ---------------------------------------------------------------------------
-// `/servers/:id/metrics/series` response shaping — bundles the v4 host chart
+// `/servers/:id/metrics/series` response shaping — bundles the v5 host chart
 // response with per-family entity series results and the topology context.
 // ---------------------------------------------------------------------------
 
-export type SeriesRouteResponseV4 = {
+export type SeriesRouteResponseV5 = {
   ok: true
   serverId: string
   from: string
@@ -869,28 +927,28 @@ export type SeriesRouteResponseV4 = {
   backend: MetricsBackendKind
   available: boolean
   resolutionSeconds: number | null
-  host: HostSeriesChartResponseV4 | null
-  entities: EntitySeriesResultV4[]
-  inventory: TopologyInventoryV4 | null
+  host: HostSeriesChartResponseV5 | null
+  entities: EntitySeriesResultV5[]
+  inventory: TopologyInventoryV5 | null
   topologyGeneration: number | null
   cpuLimits: EffectiveCpuThermalLimits
   temperatureUnit: TemperatureUnit
   nicSlotLimit: number
 }
 
-export function buildSeriesRouteResponseV4(
+export function buildSeriesRouteResponseV5(
   params: Readonly<{
     serverId: string
     from: string
     to: string
     backend: MetricsBackendKind
     resolutionSeconds: number | null
-    host: HostSeriesChartResponseV4 | null
-    entities: EntitySeriesResultV4[]
-    context: TopologyContextV4
+    host: HostSeriesChartResponseV5 | null
+    entities: EntitySeriesResultV5[]
+    context: TopologyContextV5
     envelope: CpuLimitsEnvelope
   }>
-): SeriesRouteResponseV4 {
+): SeriesRouteResponseV5 {
   const available =
     (params.host?.available ?? true) && params.entities.every((entity) => entity.available)
   return {
@@ -911,8 +969,8 @@ export function buildSeriesRouteResponseV4(
   }
 }
 
-/** Synthesized `HostSeriesResultV4`-shaped unavailable result when the resolved store has no `queryHostSeries` (e.g. `DisabledServerMetricsStoreV4`) — never a throw. */
-export function unavailableHostSeriesResultV4(input: {
+/** Synthesized `HostSeriesResultV5`-shaped unavailable result when the resolved store has no `queryHostSeries` (e.g. `DisabledServerMetricsStoreV5`) — never a throw. */
+export function unavailableHostSeriesResultV5(input: {
   serverId: string
   metrics: readonly string[]
   backend: MetricsBackendKind
@@ -938,13 +996,13 @@ export function unavailableHostSeriesResultV4(input: {
   }
 }
 
-/** Synthesized `EntitySeriesResultV4`-shaped unavailable result when the resolved store has no `queryEntitySeries` — never a throw. */
-export function unavailableEntitySeriesResultV4(input: {
+/** Synthesized `EntitySeriesResultV5`-shaped unavailable result when the resolved store has no `queryEntitySeries` — never a throw. */
+export function unavailableEntitySeriesResultV5(input: {
   serverId: string
-  family: PerEntityHostedFamilyV4
+  family: PerEntityHostedFamilyV5
   metrics: readonly string[]
   backend: MetricsBackendKind
-}): EntitySeriesResultV4 {
+}): EntitySeriesResultV5 {
   return {
     kind: input.backend,
     available: false,
@@ -956,22 +1014,22 @@ export function unavailableEntitySeriesResultV4(input: {
   }
 }
 
-export type SeriesQueryInputV4 = {
-  store: ServerMetricsStoreV4 | undefined
+export type SeriesQueryInputV5 = {
+  store: ServerMetricsStoreV5 | undefined
   backend: MetricsBackendKind
   serverId: string
-  selectors: SeriesMetricSelectorsV4
+  selectors: SeriesMetricSelectorsV5
   fromIso: string
   toIso: string
   resolutionSeconds: number
-  context: TopologyContextV4
+  context: TopologyContextV5
 }
 
-export type SeriesQueryOutcomeV4 =
+export type SeriesQueryOutcomeV5 =
   | {
       ok: true
-      hostResult: HostSeriesResultV4 | null
-      entityResults: EntitySeriesResultV4[]
+      hostResult: HostSeriesResultV5 | null
+      entityResults: EntitySeriesResultV5[]
     }
   | { ok: false }
 
@@ -980,15 +1038,15 @@ export type SeriesQueryOutcomeV4 =
  * A store throw (backend unavailable) becomes `{ ok: false }` so the route can
  * 503 without duplicating the try/catch per family.
  */
-export async function querySeriesResultsV4(
-  input: SeriesQueryInputV4
-): Promise<SeriesQueryOutcomeV4> {
-  const hostOutcome = await queryHostSeriesForRouteV4(input)
+export async function querySeriesResultsV5(
+  input: SeriesQueryInputV5
+): Promise<SeriesQueryOutcomeV5> {
+  const hostOutcome = await queryHostSeriesForRouteV5(input)
   if (!hostOutcome.ok) return { ok: false }
 
-  const entityResults: EntitySeriesResultV4[] = []
+  const entityResults: EntitySeriesResultV5[] = []
   for (const [family, selection] of input.selectors.entityFamilies) {
-    const outcome = await queryOneEntityFamilySeriesV4(input, family, selection)
+    const outcome = await queryOneEntityFamilySeriesV5(input, family, selection)
     if (!outcome.ok) return { ok: false }
     entityResults.push(outcome.result)
   }
@@ -996,11 +1054,16 @@ export async function querySeriesResultsV4(
   return { ok: true, hostResult: hostOutcome.hostResult, entityResults }
 }
 
-type HostSeriesQueryOutcomeV4 = { ok: true; hostResult: HostSeriesResultV4 | null } | { ok: false }
+type HostSeriesQueryOutcomeV5 =
+  | {
+      ok: true
+      hostResult: HostSeriesResultV5 | null
+    }
+  | { ok: false }
 
-async function queryHostSeriesForRouteV4(
-  input: SeriesQueryInputV4
-): Promise<HostSeriesQueryOutcomeV4> {
+async function queryHostSeriesForRouteV5(
+  input: SeriesQueryInputV5
+): Promise<HostSeriesQueryOutcomeV5> {
   if (input.selectors.hostCanonicalNames.length === 0) {
     return { ok: true, hostResult: null }
   }
@@ -1009,7 +1072,7 @@ async function queryHostSeriesForRouteV4(
     if (!store?.queryHostSeries) {
       return {
         ok: true,
-        hostResult: unavailableHostSeriesResultV4({
+        hostResult: unavailableHostSeriesResultV5({
           serverId: input.serverId,
           metrics: input.selectors.hostCanonicalNames,
           backend: input.backend,
@@ -1036,13 +1099,17 @@ async function queryHostSeriesForRouteV4(
   }
 }
 
-type EntityFamilyQueryOutcomeV4 = { ok: true; result: EntitySeriesResultV4 } | { ok: false }
+type EntityFamilyQueryOutcomeV5 =
+  | { ok: true; result: EntitySeriesResultV5 }
+  | {
+      ok: false
+    }
 
-async function queryOneEntityFamilySeriesV4(
-  input: SeriesQueryInputV4,
-  family: PerEntityHostedFamilyV4,
-  selection: EntityFamilySelectionV4
-): Promise<EntityFamilyQueryOutcomeV4> {
+async function queryOneEntityFamilySeriesV5(
+  input: SeriesQueryInputV5,
+  family: PerEntityHostedFamilyV5,
+  selection: EntityFamilySelectionV5
+): Promise<EntityFamilyQueryOutcomeV5> {
   const entityIds = [...selection.entityIds]
   const fields = [...selection.fields]
   const networkExtra =
@@ -1057,7 +1124,7 @@ async function queryOneEntityFamilySeriesV4(
     if (!store?.queryEntitySeries) {
       return {
         ok: true,
-        result: unavailableEntitySeriesResultV4({
+        result: unavailableEntitySeriesResultV5({
           serverId: input.serverId,
           family,
           metrics: fields,
@@ -1088,22 +1155,22 @@ async function queryOneEntityFamilySeriesV4(
 }
 
 // ---------------------------------------------------------------------------
-// `/servers/metrics/latest` (fleet snapshot) — v4 host metric set + derived
+// `/servers/metrics/latest` (fleet snapshot) — v5 host metric set + derived
 // values from a batched topology-capacity join, kept O(1) in server count
 // (one metrics query + one topology-generations query, never N).
 // ---------------------------------------------------------------------------
 
 /**
  * Metrics shown on the org servers overview (CPU stack + memory/swap).
- * Canonical v4 host names only — derived percentages (`memoryUsedPercent`,
- * `swapUsedPercent`) are computed by {@link buildFleetLatestPayloadV4} from
+ * Canonical v5 host names only — derived percentages (`memoryUsedPercent`,
+ * `swapUsedPercent`) are computed by {@link buildFleetLatestPayloadV5} from
  * these plus each server's topology capacity, never stored/requested as
  * their own metric. v3's load-average fields (`load1`/`load5`/`load15`) have
- * no v4 analogue — the daemon contract carries no load-average metric at
+ * no v5 analogue — the daemon contract carries no load-average metric at
  * all — so the fleet overview's load column has nothing to show post-cutover;
  * this is a known, deliberate capability gap, not an oversight.
  */
-export const FLEET_HOST_METRICS_V4 = [
+export const FLEET_HOST_METRICS_V5 = [
   'host.cpu.busyPercent',
   'host.cpu.userPercent',
   'host.cpu.systemPercent',
@@ -1113,15 +1180,15 @@ export const FLEET_HOST_METRICS_V4 = [
 ] as const
 
 /**
- * `HostCapacitiesV4` for the fleet route from one server's topology
+ * `HostCapacitiesV5` for the fleet route from one server's topology
  * snapshot — memory/swap totals only (never `rootFilesystemTotalBytes`,
  * which needs a per-server `SlotMapping`/hardware-profile-override lookup
  * that would break this route's O(1)-in-server-count invariant; the fleet
  * overview never showed disk usage even pre-cutover).
  */
-export function fleetHostCapacitiesFromSnapshotV4(snapshot: unknown): HostCapacitiesV4 {
+export function fleetHostCapacitiesFromSnapshotV5(snapshot: unknown): HostCapacitiesV5 {
   if (typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) {
-    return EMPTY_HOST_CAPACITIES_V4
+    return EMPTY_HOST_CAPACITIES_V5
   }
   const record = snapshot as Record<string, unknown>
   return {
@@ -1131,26 +1198,26 @@ export function fleetHostCapacitiesFromSnapshotV4(snapshot: unknown): HostCapaci
   }
 }
 
-export type FleetServerUsageRecordV4 = {
+export type FleetServerUsageRecordV5 = {
   serverId: string
   latestAt: string | null
   values: Partial<Record<string, number | null>>
   sampleCount: number
   topologyGeneration?: number | null
-  derived: DerivedHostValuesV4
+  derived: DerivedHostValuesV5
 }
 
-export type FleetLatestResponseV4 = {
+export type FleetLatestResponseV5 = {
   ok: true
   from: string
   to: string
   backend: MetricsBackendKind
   available: boolean
   metrics: readonly string[]
-  servers: FleetServerUsageRecordV4[]
+  servers: FleetServerUsageRecordV5[]
 }
 
-export function buildFleetLatestPayloadV4(
+export function buildFleetLatestPayloadV5(
   params: Readonly<{
     from: string
     to: string
@@ -1164,9 +1231,9 @@ export function buildFleetLatestPayloadV4(
       sampleCount: number
       topologyGeneration?: number | null
     }>
-    capacitiesByServer: ReadonlyMap<string, HostCapacitiesV4>
+    capacitiesByServer: ReadonlyMap<string, HostCapacitiesV5>
   }>
-): FleetLatestResponseV4 {
+): FleetLatestResponseV5 {
   return {
     ok: true,
     from: params.from,
@@ -1176,9 +1243,9 @@ export function buildFleetLatestPayloadV4(
     metrics: params.metrics,
     servers: params.servers.map((row) => ({
       ...row,
-      derived: computeDerivedHostValuesV4(
+      derived: computeDerivedHostValuesV5(
         row.values,
-        params.capacitiesByServer.get(row.serverId) ?? EMPTY_HOST_CAPACITIES_V4
+        params.capacitiesByServer.get(row.serverId) ?? EMPTY_HOST_CAPACITIES_V5
       ),
     })),
   }
@@ -1336,7 +1403,7 @@ export type MetricEventsResponse = {
   to: string
   backend: MetricsBackendKind
   available: boolean
-  events: MetricEventsResultV4['events']
+  events: MetricEventsResultV5['events']
   truncated: boolean
 }
 
@@ -1345,7 +1412,7 @@ export function buildMetricEventsPayload(
     serverId: string
     from: string
     to: string
-    result: MetricEventsResultV4
+    result: MetricEventsResultV5
   }>
 ): MetricEventsResponse {
   const { result } = params
@@ -1362,6 +1429,6 @@ export function buildMetricEventsPayload(
 }
 
 /** True when metric-events history has something worth caching. */
-export function metricEventsHasCacheableData(result: MetricEventsResultV4): boolean {
+export function metricEventsHasCacheableData(result: MetricEventsResultV5): boolean {
   return result.events.length > 0
 }

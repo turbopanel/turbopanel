@@ -33,14 +33,14 @@ import {
   MAX_SECRETS_DECRYPT_CIPHERTEXT_CHARS,
   registerDaemonApiRoutes,
 } from './api-routes.ts'
-import { MAX_METRICS_PAYLOAD_BYTES_V4 } from './metrics/validation-v4.ts'
-import { METRICS_SCHEMA_VERSION_V4 } from './metrics/contract-v4.ts'
+import { MAX_METRICS_PAYLOAD_BYTES_V5 } from './metrics/validation-v5.ts'
+import { METRICS_SCHEMA_VERSION_V5 } from './metrics/contract-v5.ts'
 import type { DaemonCell, DaemonCellRegistry, DaemonCellSnapshot } from './cell/contracts.ts'
 import type {
-  AuthenticatedMetricsSampleV4,
-  ServerMetricsStoreV4,
+  AuthenticatedMetricsSampleV5,
+  ServerMetricsStoreV5,
   SlotMapping,
-} from './metrics/types-v4.ts'
+} from './metrics/types-v5.ts'
 import { recordTopologyGeneration } from '../client/servers/server-topology-records.ts'
 import {
   consumeChallenge,
@@ -57,14 +57,14 @@ import {
 } from './authn/server-key.ts'
 import {
   type AnalyticsEngineDatasetLike,
-  CloudflareAnalyticsEngineServerMetricsStoreV4,
-} from './metrics/backends/cloudflare/store-v4.ts'
+  CloudflareAnalyticsEngineServerMetricsStoreV5,
+} from './metrics/backends/cloudflare/store-v5.ts'
 import {
-  AE_V4_BLOB_FAMILY_INDEX,
-  AE_V4_BLOB_KIND_INDEX,
-  AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX,
-  type AnalyticsEngineDataPointLikeV4,
-} from './metrics/backends/cloudflare/field-map-v4.ts'
+  AE_V5_BLOB_FAMILY_INDEX,
+  AE_V5_BLOB_KIND_INDEX,
+  AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX,
+  type AnalyticsEngineDataPointLikeV5,
+} from './metrics/backends/cloudflare/field-map-v5.ts'
 
 const dbUrl = getDatabaseUrl()
 const encoder = new TextEncoder()
@@ -1749,19 +1749,19 @@ test('Enrolled daemon can auto-refresh JWT', async () => {
   })
 })
 
-/** Empty group — every numeric field absent, which the v4 validator treats as `null`. */
+/** Empty group — every numeric field absent, which the v5 validator treats as `null`. */
 function emptyHostGroup(): Record<string, never> {
   return {}
 }
 
-function buildValidMetricsFrameV4(
+function buildValidMetricsFrameV5(
   overrides: Record<string, unknown> & { metadata?: Record<string, unknown> } = {}
 ): Record<string, unknown> {
   const { metadata: metadataOverrides, ...topOverrides } = overrides
   return {
     type: 'metrics',
     metadata: {
-      version: METRICS_SCHEMA_VERSION_V4,
+      version: METRICS_SCHEMA_VERSION_V5,
       sampledAt: new Date().toISOString(),
       intervalSeconds: 60,
       sequence: 1,
@@ -1789,25 +1789,6 @@ function buildValidMetricsFrameV4(
   }
 }
 
-/** v3 wire shape (retired) — used only to prove the v4 route rejects it. */
-function buildLegacyV3MetricsFrame(): Record<string, unknown> {
-  return {
-    type: 'metrics',
-    version: 3,
-    at: new Date().toISOString(),
-    intervalSeconds: 60,
-    sequence: 1,
-    parts: ['core', 'extended'],
-    metrics: {},
-    dimensions: {
-      schemaVersion: 3,
-      collectionMode: 'baseline',
-      hardwareProfileGeneration: 1,
-      trafficSources: { caddy: false, proxysql: false },
-    },
-  }
-}
-
 async function createMetricsTestApp(
   options: {
     restLimiter?: {
@@ -1819,10 +1800,10 @@ async function createMetricsTestApp(
   } = {}
 ): Promise<{
   app: Hono<AppEnv>
-  writes: AuthenticatedMetricsSampleV4[]
+  writes: AuthenticatedMetricsSampleV5[]
 }> {
-  const writes: AuthenticatedMetricsSampleV4[] = []
-  const fakeStore: ServerMetricsStoreV4 = {
+  const writes: AuthenticatedMetricsSampleV5[] = []
+  const fakeStore: ServerMetricsStoreV5 = {
     writeSample(sample) {
       writes.push(sample)
     },
@@ -1833,7 +1814,7 @@ async function createMetricsTestApp(
 
   const app = new Hono<AppEnv>()
   app.use('*', (c, next) => {
-    c.set('serverMetricsStoreV4', fakeStore)
+    c.set('serverMetricsStoreV5', fakeStore)
     return next()
   })
   const secrets = await createTestSecrets()
@@ -1851,29 +1832,29 @@ async function createMetricsTestApp(
 
 /**
  * Same shape as {@link createMetricsTestApp}, but wires a real
- * `CloudflareAnalyticsEngineServerMetricsStoreV4` (the same class Workers
+ * `CloudflareAnalyticsEngineServerMetricsStoreV5` (the same class Workers
  * production wiring uses — see `workers.ts`) over a fake in-memory AE
- * dataset, instead of a hand-rolled fake `ServerMetricsStoreV4`. Exercises the
+ * dataset, instead of a hand-rolled fake `ServerMetricsStoreV5`. Exercises the
  * ingest route's `store.writeSample(sample, slotMapping)` call all the way
- * through `buildMetricsDataPointsV4` so a regression that silently drops
+ * through `buildMetricsDataPointsV5` so a regression that silently drops
  * entity families or `sample.events` (e.g. reintroducing a v3 projection
  * bridge in front of the real store) shows up as missing `points` here.
  */
 async function createMetricsTestAppWithRealCloudflareStore(): Promise<{
   app: Hono<AppEnv>
-  points: AnalyticsEngineDataPointLikeV4[]
+  points: AnalyticsEngineDataPointLikeV5[]
 }> {
-  const points: AnalyticsEngineDataPointLikeV4[] = []
+  const points: AnalyticsEngineDataPointLikeV5[] = []
   const fakeDataset: AnalyticsEngineDatasetLike = {
     writeDataPoint(event) {
-      points.push(event as AnalyticsEngineDataPointLikeV4)
+      points.push(event as AnalyticsEngineDataPointLikeV5)
     },
   }
-  const store = new CloudflareAnalyticsEngineServerMetricsStoreV4(fakeDataset)
+  const store = new CloudflareAnalyticsEngineServerMetricsStoreV5(fakeDataset)
 
   const app = new Hono<AppEnv>()
   app.use('*', (c, next) => {
-    c.set('serverMetricsStoreV4', store)
+    c.set('serverMetricsStoreV5', store)
     return next()
   })
   const secrets = await createTestSecrets()
@@ -1899,12 +1880,12 @@ async function createMetricsTestAppWithRealCloudflareStore(): Promise<{
  */
 async function createMetricsTestAppWithDb(db: ReturnType<typeof createDenoDb>): Promise<{
   app: Hono<AppEnv>
-  writes: AuthenticatedMetricsSampleV4[]
+  writes: AuthenticatedMetricsSampleV5[]
   slotMappings: (SlotMapping | undefined)[]
 }> {
-  const writes: AuthenticatedMetricsSampleV4[] = []
+  const writes: AuthenticatedMetricsSampleV5[] = []
   const slotMappings: (SlotMapping | undefined)[] = []
-  const fakeStore: ServerMetricsStoreV4 = {
+  const fakeStore: ServerMetricsStoreV5 = {
     writeSample(sample, slotMapping) {
       writes.push(sample)
       slotMappings.push(slotMapping)
@@ -1917,7 +1898,7 @@ async function createMetricsTestAppWithDb(db: ReturnType<typeof createDenoDb>): 
   const app = new Hono<AppEnv>()
   app.use('*', (c, next) => {
     c.set('db', db)
-    c.set('serverMetricsStoreV4', fakeStore)
+    c.set('serverMetricsStoreV5', fakeStore)
     return next()
   })
   const secrets = await createTestSecrets()
@@ -1974,7 +1955,7 @@ test('POST /metrics accepts valid frame and writes sample', async () => {
       Authorization: `Bearer ${daemonToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(buildValidMetricsFrameV4()),
+    body: JSON.stringify(buildValidMetricsFrameV5()),
   })
   assertEquals(response.status, 202)
   assertEquals(await response.json(), { ok: true })
@@ -1991,7 +1972,7 @@ test('POST /metrics rejects invalid frame without writing', async () => {
       Authorization: `Bearer ${daemonToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(buildValidMetricsFrameV4({ metadata: { version: 99 } })),
+    body: JSON.stringify(buildValidMetricsFrameV5({ metadata: { version: 99 } })),
   })
   assertEquals(response.status, 400)
   const body = (await response.json()) as { ok: boolean; error: string }
@@ -2000,30 +1981,12 @@ test('POST /metrics rejects invalid frame without writing', async () => {
   assertEquals(writes.length, 0)
 })
 
-test('POST /metrics rejects a retired v3-shaped payload', async () => {
-  const { app, writes } = await createMetricsTestApp()
-  const daemonToken = await issueDaemonToken('srv-metrics-v3', 'key-metrics-v3')
-  const response = await app.request('/api/daemon/v1/metrics', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${daemonToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(buildLegacyV3MetricsFrame()),
-  })
-  assertEquals(response.status, 400)
-  const body = (await response.json()) as { ok: boolean; error: string }
-  assertEquals(body.ok, false)
-  assert(body.error.includes('retired schema v3'))
-  assertEquals(writes.length, 0)
-})
-
 test('POST /metrics returns 401 without JWT', async () => {
   const { app, writes } = await createMetricsTestApp()
   const response = await app.request('/api/daemon/v1/metrics', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(buildValidMetricsFrameV4()),
+    body: JSON.stringify(buildValidMetricsFrameV5()),
   })
   assertEquals(response.status, 401)
   assertEquals(writes.length, 0)
@@ -2042,7 +2005,7 @@ test('POST /metrics returns 429 when metricsLimiter denies with valid JWT', asyn
       Authorization: `Bearer ${daemonToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(buildValidMetricsFrameV4()),
+    body: JSON.stringify(buildValidMetricsFrameV5()),
   })
   assertEquals(response.status, 429)
   assertEquals(await response.json(), { ok: false, error: 'rate_limited' })
@@ -2058,7 +2021,7 @@ test('POST /metrics rejects an unrecognized top-level field (e.g. body-supplied 
       Authorization: `Bearer ${daemonToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(buildValidMetricsFrameV4({ serverId: 'attacker' })),
+    body: JSON.stringify(buildValidMetricsFrameV5({ serverId: 'attacker' })),
   })
   assertEquals(response.status, 400)
   assertEquals(writes.length, 0)
@@ -2075,7 +2038,7 @@ test('POST /metrics truncates entity arrays to the resolved capability plan', as
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(
-      buildValidMetricsFrameV4({
+      buildValidMetricsFrameV5({
         // Default (virtual) plan: gpuSlots=1, detailedBlockDeviceSlots=1,
         // extraFilesystemSlots=0, physicalHardwareSignalSlots=0.
         gpus: [{ gpuId: 'gpu0' }, { gpuId: 'gpu1' }],
@@ -2096,7 +2059,7 @@ test('POST /metrics truncates entity arrays to the resolved capability plan', as
   assertEquals(sample?.hardwareSignals, [])
 })
 
-test('POST /metrics through a real CloudflareAnalyticsEngineServerMetricsStoreV4: entity families and events all land as AE rows, ingress sources keyed by sourceId', async () => {
+test('POST /metrics through a real CloudflareAnalyticsEngineServerMetricsStoreV5: entity families and events all land as AE rows, ingress sources keyed by sourceId', async () => {
   const { app, points } = await createMetricsTestAppWithRealCloudflareStore()
   const serverId = 'srv-metrics-cf-real'
   const daemonToken = await issueDaemonToken(serverId, 'key-metrics-cf-real')
@@ -2107,7 +2070,7 @@ test('POST /metrics through a real CloudflareAnalyticsEngineServerMetricsStoreV4
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(
-      buildValidMetricsFrameV4({
+      buildValidMetricsFrameV5({
         // Default hosted (virtual) plan: normalNicSlots=2 — with no recorded
         // topology the first two embed into host.io positionally and eth2 is
         // dropped by the plan before it reaches the store; gpuSlots=1,
@@ -2133,8 +2096,8 @@ test('POST /metrics through a real CloudflareAnalyticsEngineServerMetricsStoreV4
   assertEquals(response.status, 202)
 
   // A regression that bridges writeSample onto a v3 projection (dropping
-  // every v4-only family) would produce none of these rows.
-  const family = (kind: string) => points.filter((p) => p.blobs[AE_V4_BLOB_FAMILY_INDEX] === kind)
+  // every v5-only family) would produce none of these rows.
+  const family = (kind: string) => points.filter((p) => p.blobs[AE_V5_BLOB_FAMILY_INDEX] === kind)
   assertEquals(family('host.system').length, 1)
   assertEquals(family('host.io').length, 1)
   assertEquals(family('network').length, 0) // eth0/eth1 embed; eth2 exceeds the 2-slot hosted plan
@@ -2142,15 +2105,15 @@ test('POST /metrics through a real CloudflareAnalyticsEngineServerMetricsStoreV4
 
   const ingressRows = family('managed.ingress')
   assertEquals(ingressRows.length, 2)
-  const ingressIds = ingressRows.map((p) => p.blobs[AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX]).sort()
+  const ingressIds = ingressRows.map((p) => p.blobs[AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX]).sort()
   // Two sources sharing sourceKind "caddy" stay distinct rows keyed by sourceId.
   assertEquals(ingressIds, ['caddy-1', 'caddy-2'])
 
   const proxyRows = family('managed.database_proxy')
   assertEquals(proxyRows.length, 1)
-  assertEquals(proxyRows[0]!.blobs[AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX], 'proxysql-1')
+  assertEquals(proxyRows[0]!.blobs[AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX], 'proxysql-1')
 
-  const eventRows = points.filter((p) => p.blobs[AE_V4_BLOB_KIND_INDEX] === 'event')
+  const eventRows = points.filter((p) => p.blobs[AE_V5_BLOB_KIND_INDEX] === 'event')
   assertEquals(eventRows.length, 1)
 })
 
@@ -2165,8 +2128,8 @@ test('POST /metrics does not await the store write before responding', async () 
     releaseWrite = resolve
   })
   let writeSettled = false
-  const writes: AuthenticatedMetricsSampleV4[] = []
-  const fakeStore: ServerMetricsStoreV4 = {
+  const writes: AuthenticatedMetricsSampleV5[] = []
+  const fakeStore: ServerMetricsStoreV5 = {
     async writeSample(sample) {
       await writeGate
       writeSettled = true
@@ -2179,7 +2142,7 @@ test('POST /metrics does not await the store write before responding', async () 
 
   const app = new Hono<AppEnv>()
   app.use('*', (c, next) => {
-    c.set('serverMetricsStoreV4', fakeStore)
+    c.set('serverMetricsStoreV5', fakeStore)
     return next()
   })
   registerDaemonApiRoutes(app, {
@@ -2194,7 +2157,7 @@ test('POST /metrics does not await the store write before responding', async () 
       Authorization: `Bearer ${daemonToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify(buildValidMetricsFrameV4()),
+    body: JSON.stringify(buildValidMetricsFrameV5()),
   })
 
   assertEquals(response.status, 202)
@@ -2228,7 +2191,7 @@ test('POST /metrics accepts a known topology generation without requesting a res
       },
       // Default frame reports metadata.topologyGeneration: 0 — matches the
       // generation just recorded above.
-      body: JSON.stringify(buildValidMetricsFrameV4()),
+      body: JSON.stringify(buildValidMetricsFrameV5()),
     })
     assertEquals(response.status, 202)
     assertEquals(writes.length, 1)
@@ -2273,7 +2236,7 @@ test('POST /metrics resolves a SlotMapping from a full recorded topology snapsho
         Authorization: `Bearer ${daemonToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(buildValidMetricsFrameV4()),
+      body: JSON.stringify(buildValidMetricsFrameV5()),
     })
     assertEquals(response.status, 202)
     assertEquals(writes.length, 1)
@@ -2305,7 +2268,7 @@ test('POST /metrics accepts an unknown topology generation and requests a resync
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(
-        buildValidMetricsFrameV4({
+        buildValidMetricsFrameV5({
           metadata: { topologyGeneration: 7 },
         })
       ),
@@ -2326,8 +2289,8 @@ test('POST /metrics retains hardwareSignals for a server classified physical fro
     await recordTopologyGeneration(db, serverId, {
       generation: 0,
       bootGeneration: 0,
-      // Non-empty hardwareSignals is what classifies the server physical —
-      // see `classifyServerMachineForMetrics` in api-routes.ts.
+      // Non-empty hardwareSignals is what infers the server physical while
+      // `server.machine_class` is NULL — see `resolveServerMachineClass`.
       snapshot: { hardwareSignals: [{ signalId: 'board-fan' }] },
       appliedAt: new Date().toISOString(),
     })
@@ -2341,7 +2304,7 @@ test('POST /metrics retains hardwareSignals for a server classified physical fro
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(
-        buildValidMetricsFrameV4({
+        buildValidMetricsFrameV5({
           hardwareSignals: [{ signalId: 'sig0', kind: 'fan' }],
         })
       ),
@@ -2350,6 +2313,142 @@ test('POST /metrics retains hardwareSignals for a server classified physical fro
     assertEquals(writes.length, 1)
     assertEquals(writes[0]?.hardwareSignals.length, 1)
     assertEquals(writes[0]?.hardwareSignals[0]?.signalId, 'sig0')
+  })
+})
+
+/** The `machine_class` write-back is fire-and-forget; poll briefly for it. */
+async function readMachineClassSettled(
+  db: Parameters<typeof recordTopologyGeneration>[0],
+  serverId: string,
+  expected: string | null
+): Promise<string | null> {
+  let value: string | null = null
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const [row] = await db
+      .select({ machineClass: server.machineClass })
+      .from(server)
+      .where(eq(server.id, serverId))
+      .limit(1)
+    value = row?.machineClass ?? null
+    if (value === expected) return value
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  return value
+}
+
+test('POST /metrics writes machine_class=physical back once topology proves it, only while undeclared', async () => {
+  await withEnrollFixture(async ({ db, serverId, keyId }) => {
+    await recordTopologyGeneration(db, serverId, {
+      generation: 0,
+      bootGeneration: 0,
+      snapshot: { hardwareSignals: [{ signalId: 'board-fan' }] },
+      appliedAt: new Date().toISOString(),
+    })
+    const [before] = await db
+      .select({ machineClass: server.machineClass })
+      .from(server)
+      .where(eq(server.id, serverId))
+    assertEquals(before?.machineClass ?? null, null)
+
+    const { app, writes } = await createMetricsTestAppWithDb(db)
+    const daemonToken = await issueDaemonToken(serverId, keyId)
+    const response = await app.request('/api/daemon/v1/metrics', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${daemonToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(
+        buildValidMetricsFrameV5({
+          hardwareSignals: [{ signalId: 'sig0', kind: 'fan' }],
+        })
+      ),
+    })
+    assertEquals(response.status, 202)
+    assertEquals(writes[0]?.hardwareSignals.length, 1)
+    assertEquals(await readMachineClassSettled(db, serverId, 'physical'), 'physical')
+  })
+})
+
+test('POST /metrics never writes machine_class=virtual back — absence of sensors is not proof', async () => {
+  await withEnrollFixture(async ({ db, serverId, keyId }) => {
+    await recordTopologyGeneration(db, serverId, {
+      generation: 0,
+      bootGeneration: 0,
+      snapshot: { hardwareSignals: [] },
+      appliedAt: new Date().toISOString(),
+    })
+
+    const { app, writes } = await createMetricsTestAppWithDb(db)
+    const daemonToken = await issueDaemonToken(serverId, keyId)
+    const response = await app.request('/api/daemon/v1/metrics', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${daemonToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(
+        buildValidMetricsFrameV5({
+          hardwareSignals: [{ signalId: 'sig0', kind: 'fan' }],
+        })
+      ),
+    })
+    assertEquals(response.status, 202)
+    // Inferred virtual → signals truncated, but the column stays NULL so a
+    // later topology generation that discovers sensors can still promote it.
+    assertEquals(writes[0]?.hardwareSignals, [])
+    assertEquals(await readMachineClassSettled(db, serverId, 'physical'), null)
+  })
+})
+
+test('POST /metrics: a declared machine_class=virtual beats a topology that carries sensors', async () => {
+  await withEnrollFixture(async ({ db, serverId, keyId }) => {
+    await recordTopologyGeneration(db, serverId, {
+      generation: 0,
+      bootGeneration: 0,
+      snapshot: { hardwareSignals: [{ signalId: 'bogus-thermal-zone' }] },
+      appliedAt: new Date().toISOString(),
+    })
+    await db.update(server).set({ machineClass: 'virtual' }).where(eq(server.id, serverId))
+
+    const { app, writes } = await createMetricsTestAppWithDb(db)
+    const daemonToken = await issueDaemonToken(serverId, keyId)
+    const response = await app.request('/api/daemon/v1/metrics', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${daemonToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(
+        buildValidMetricsFrameV5({
+          hardwareSignals: [{ signalId: 'sig0', kind: 'fan' }],
+        })
+      ),
+    })
+    assertEquals(response.status, 202)
+    assertEquals(writes[0]?.hardwareSignals, [])
+    assertEquals(await readMachineClassSettled(db, serverId, 'virtual'), 'virtual')
+  })
+})
+
+test('POST /metrics: a declared machine_class=physical retains sensors with no topology recorded', async () => {
+  await withEnrollFixture(async ({ db, serverId, keyId }) => {
+    await db.update(server).set({ machineClass: 'physical' }).where(eq(server.id, serverId))
+
+    const { app, writes } = await createMetricsTestAppWithDb(db)
+    const daemonToken = await issueDaemonToken(serverId, keyId)
+    const response = await app.request('/api/daemon/v1/metrics', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${daemonToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(buildValidMetricsFrameV5({ hardwareSignals: [] })),
+    })
+    assertEquals(response.status, 202)
+    assertEquals(writes.length, 1)
+    // No sample signals and no topology would infer virtual; the pin wins.
+    assertEquals(await readMachineClassSettled(db, serverId, 'physical'), 'physical')
   })
 })
 
@@ -2377,7 +2476,7 @@ test('POST /metrics truncates hardwareSignals when the org overrides physicalHar
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(
-        buildValidMetricsFrameV4({
+        buildValidMetricsFrameV5({
           hardwareSignals: [{ signalId: 'sig0', kind: 'fan' }],
         })
       ),
@@ -2419,7 +2518,7 @@ test('POST /metrics truncates hardwareSignals when a server override wins over a
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(
-        buildValidMetricsFrameV4({
+        buildValidMetricsFrameV5({
           hardwareSignals: [{ signalId: 'sig0', kind: 'fan' }],
         })
       ),
@@ -2433,7 +2532,7 @@ test('POST /metrics truncates hardwareSignals when a server override wins over a
 test('POST /metrics rejects an oversized request body', async () => {
   const { app, writes } = await createMetricsTestApp()
   const daemonToken = await issueDaemonToken('srv-metrics-big', 'key-metrics-big')
-  const oversized = 'x'.repeat(MAX_METRICS_PAYLOAD_BYTES_V4 + 64)
+  const oversized = 'x'.repeat(MAX_METRICS_PAYLOAD_BYTES_V5 + 64)
   const response = await app.request('/api/daemon/v1/metrics', {
     method: 'POST',
     headers: {
@@ -2500,7 +2599,7 @@ test('POST /metrics rejects JWT after license invalidation', async () => {
         Authorization: `Bearer ${daemonToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(buildValidMetricsFrameV4()),
+      body: JSON.stringify(buildValidMetricsFrameV5()),
     })
     assertEquals(before.status, 202)
 
@@ -2513,7 +2612,7 @@ test('POST /metrics rejects JWT after license invalidation', async () => {
         Authorization: `Bearer ${daemonToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(buildValidMetricsFrameV4()),
+      body: JSON.stringify(buildValidMetricsFrameV5()),
     })
     assertEquals(after.status, 401)
   })

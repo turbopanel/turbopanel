@@ -1,16 +1,19 @@
 import { assertEquals, assertNotEquals } from '@std/assert'
 import {
   computeMetricsCapabilityPlanHash,
-  type MetricsCapabilityPlanV4,
+  inferServerMachineClass,
+  isServerMachineClass,
+  type MetricsCapabilityPlanV5,
   metricsDeploymentKindForRuntime,
   parseMetricsCapabilityPlanOverride,
   PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
   platformDefaultMetricsCapabilityPlan,
   resolveMetricsCapabilityPlan,
+  resolveServerMachineClass,
   SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS,
-  truncateSampleToCapabilityPlanV4,
+  truncateSampleToCapabilityPlanV5,
 } from './capability-plan.ts'
-import type { MetricsSampleV4 } from './contract-v4.ts'
+import type { MetricsSampleV5 } from './contract-v5.ts'
 import { MAX_NIC_SLOTS, type SlotMapping } from '../../client/servers/topology-types.ts'
 
 /**
@@ -101,7 +104,13 @@ test('platformDefaultMetricsCapabilityPlan: hosted servers get 2 NIC slots, self
   assertEquals(hosted.normalNicSlots, 2)
   assertEquals(selfHosted.normalNicSlots, SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS)
   assertEquals(SELF_HOSTED_DEFAULT_NORMAL_NIC_SLOTS, MAX_NIC_SLOTS)
-  assertEquals({ ...hosted, normalNicSlots: 0 }, { ...selfHosted, normalNicSlots: 0 })
+  assertEquals(
+    { ...hosted, normalNicSlots: 0 },
+    {
+      ...selfHosted,
+      normalNicSlots: 0,
+    }
+  )
   assertEquals(metricsDeploymentKindForRuntime('workers'), 'hosted')
   assertEquals(metricsDeploymentKindForRuntime('deno'), 'self-hosted')
 })
@@ -123,7 +132,9 @@ test('parseMetricsCapabilityPlanOverride clamps normalNicSlots to MAX_NIC_SLOTS'
   assertEquals(parseMetricsCapabilityPlanOverride({ normalNicSlots: 99 }), {
     normalNicSlots: MAX_NIC_SLOTS,
   })
-  assertEquals(parseMetricsCapabilityPlanOverride({ normalNicSlots: 3 }), { normalNicSlots: 3 })
+  assertEquals(parseMetricsCapabilityPlanOverride({ normalNicSlots: 3 }), {
+    normalNicSlots: 3,
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -148,7 +159,6 @@ test('parseMetricsCapabilityPlanOverride reads every field type', () => {
     gpuInterconnectEnabled: true,
     physicalHardwareSignalSlots: 24,
     cpuDetailEnabled: true,
-    cpuLiveCoreSlots: 8,
     memoryDetailEnabled: true,
     numaNodeSlots: 2,
     managedIngressEnabled: false,
@@ -166,7 +176,6 @@ test('parseMetricsCapabilityPlanOverride reads every field type', () => {
     gpuInterconnectEnabled: true,
     physicalHardwareSignalSlots: 24,
     cpuDetailEnabled: true,
-    cpuLiveCoreSlots: 8,
     memoryDetailEnabled: true,
     numaNodeSlots: 2,
     managedIngressEnabled: false,
@@ -231,11 +240,11 @@ test('computeMetricsCapabilityPlanHash changes when one field changes', async ()
 // Truncation matrix
 // ---------------------------------------------------------------------------
 
-function emptySample(): MetricsSampleV4 {
+function emptySample(): MetricsSampleV5 {
   return {
     type: 'metrics',
     metadata: {
-      version: 4,
+      version: 5,
       sampledAt: '2026-01-01T00:00:00.000Z',
       intervalSeconds: 60,
       sequence: 0,
@@ -252,14 +261,15 @@ function emptySample(): MetricsSampleV4 {
         stealPercent: null,
         softirqPercent: null,
         pressureSomePercent: null,
-        maxCoreBusyPercent: null,
+        saturatedCoreCount: null,
         procsRunning: null,
         procsBlocked: null,
         processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {
-        availableBytes: null,
+        usedBytes: null,
+        cachedFilesBytes: null,
         swapUsedBytes: null,
         pressureSomePercent: null,
         pressureFullPercent: null,
@@ -272,9 +282,7 @@ function emptySample(): MetricsSampleV4 {
         ioPressureFullPercent: null,
         diskReadBytesPerSecond: null,
         diskWriteBytesPerSecond: null,
-        diskReadLatencyMs: null,
-        diskWriteLatencyMs: null,
-        maxBlockDeviceUtilPercent: null,
+        diskLatencyMs: null,
         rootFilesystemAvailableBytes: null,
         rootFilesystemFreeInodes: null,
       },
@@ -330,63 +338,63 @@ function makeIngressSource(sourceId: string) {
   }
 }
 
-test('truncateSampleToCapabilityPlanV4: 0 discovered GPUs stays 0 regardless of gpuSlots', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: 0 discovered GPUs stays 0 regardless of gpuSlots', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     gpuSlots: 1,
   }
   const sample = emptySample()
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(truncated.gpus, [])
 })
 
-test('truncateSampleToCapabilityPlanV4: 2 discovered GPUs with gpuSlots=1 keeps the first only', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: 2 discovered GPUs with gpuSlots=1 keeps the first only', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     gpuSlots: 1,
   }
   const sample = emptySample()
   sample.gpus = [makeGpu('gpu-0'), makeGpu('gpu-1')]
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(
     truncated.gpus.map((g) => g.gpuId),
     ['gpu-0']
   )
 })
 
-test('truncateSampleToCapabilityPlanV4: 2 discovered GPUs with gpuSlots=2 keeps both', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: 2 discovered GPUs with gpuSlots=2 keeps both', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     gpuSlots: 2,
   }
   const sample = emptySample()
   sample.gpus = [makeGpu('gpu-0'), makeGpu('gpu-1')]
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(
     truncated.gpus.map((g) => g.gpuId),
     ['gpu-0', 'gpu-1']
   )
 })
 
-test('truncateSampleToCapabilityPlanV4: managedIngressEnabled=false drops all ingress sources regardless of count', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: managedIngressEnabled=false drops all ingress sources regardless of count', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     managedIngressEnabled: false,
   }
   const sample = emptySample()
   sample.ingressSources = [makeIngressSource('caddy'), makeIngressSource('nginx')]
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(truncated.ingressSources, [])
 })
 
-test('truncateSampleToCapabilityPlanV4: managedIngressEnabled=true keeps ingress sources', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: managedIngressEnabled=true keeps ingress sources', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     managedIngressEnabled: true,
   }
   const sample = emptySample()
   sample.ingressSources = [makeIngressSource('caddy')]
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(
     truncated.ingressSources.map((s) => s.sourceId),
     ['caddy']
@@ -395,7 +403,6 @@ test('truncateSampleToCapabilityPlanV4: managedIngressEnabled=true keeps ingress
 
 function makeCpuDetail() {
   return {
-    hotspots: [{ coreId: 'cpu0', busyPercent: 80, iowaitPercent: 1, stealPercent: 0 }],
     averageFrequencyMHz: null,
     minimumFrequencyMHz: null,
     maximumFrequencyMHz: null,
@@ -434,8 +441,8 @@ function makeCpuCoreLive(coreId: string) {
   return { coreId, busyPercent: 50, iowaitPercent: 0, stealPercent: 0 }
 }
 
-test('truncateSampleToCapabilityPlanV4: disabled detail flags clear cpuDetail/memoryDetail', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: disabled detail flags clear cpuDetail/memoryDetail', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     cpuDetailEnabled: false,
     memoryDetailEnabled: false,
@@ -443,13 +450,13 @@ test('truncateSampleToCapabilityPlanV4: disabled detail flags clear cpuDetail/me
   const sample = emptySample()
   sample.cpuDetail = makeCpuDetail()
   sample.memoryDetail = makeMemoryDetail()
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(truncated.cpuDetail, undefined)
   assertEquals(truncated.memoryDetail, undefined)
 })
 
-test('truncateSampleToCapabilityPlanV4: enabled detail flags keep cpuDetail/memoryDetail', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: enabled detail flags keep cpuDetail/memoryDetail', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     cpuDetailEnabled: true,
     memoryDetailEnabled: true,
@@ -457,7 +464,7 @@ test('truncateSampleToCapabilityPlanV4: enabled detail flags keep cpuDetail/memo
   const sample = emptySample()
   const cpuDetail = makeCpuDetail()
   sample.cpuDetail = cpuDetail
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(truncated.cpuDetail, cpuDetail)
 })
 
@@ -465,47 +472,8 @@ test('truncateSampleToCapabilityPlanV4: enabled detail flags keep cpuDetail/memo
 // cpuCoreLive: live-only + slot-count gating
 // ---------------------------------------------------------------------------
 
-test('truncateSampleToCapabilityPlanV4: baseline sample with cpuCoreLive populated is stripped', () => {
-  const plan: MetricsCapabilityPlanV4 = {
-    ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
-    cpuLiveCoreSlots: 8,
-  }
-  const sample = emptySample()
-  sample.metadata.collectionMode = 'baseline'
-  sample.cpuCoreLive = [makeCpuCoreLive('cpu0'), makeCpuCoreLive('cpu1')]
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
-  assertEquals(truncated.cpuCoreLive, undefined)
-})
-
-test('truncateSampleToCapabilityPlanV4: live sample with cpuLiveCoreSlots=0 is stripped', () => {
-  const plan: MetricsCapabilityPlanV4 = {
-    ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
-    cpuLiveCoreSlots: 0,
-  }
-  const sample = emptySample()
-  sample.metadata.collectionMode = 'live'
-  sample.cpuCoreLive = [makeCpuCoreLive('cpu0'), makeCpuCoreLive('cpu1')]
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
-  assertEquals(truncated.cpuCoreLive?.length ?? 0, 0)
-})
-
-test('truncateSampleToCapabilityPlanV4: live sample within slot budget passes through, over budget truncates', () => {
-  const plan: MetricsCapabilityPlanV4 = {
-    ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
-    cpuLiveCoreSlots: 2,
-  }
-  const sample = emptySample()
-  sample.metadata.collectionMode = 'live'
-  sample.cpuCoreLive = [makeCpuCoreLive('cpu0'), makeCpuCoreLive('cpu1'), makeCpuCoreLive('cpu2')]
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
-  assertEquals(
-    truncated.cpuCoreLive?.map((c) => c.coreId),
-    ['cpu0', 'cpu1']
-  )
-})
-
-test('truncateSampleToCapabilityPlanV4: truncates blockDevices/filesystems/hardwareSignals/numaNodes to slot counts', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: truncates blockDevices/filesystems/hardwareSignals/numaNodes to slot counts', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     detailedBlockDeviceSlots: 1,
     extraFilesystemSlots: 1,
@@ -564,7 +532,7 @@ test('truncateSampleToCapabilityPlanV4: truncates blockDevices/filesystems/hardw
     },
   ]
 
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(
     truncated.blockDevices.map((d) => d.deviceId),
     ['sda']
@@ -583,8 +551,8 @@ test('truncateSampleToCapabilityPlanV4: truncates blockDevices/filesystems/hardw
   )
 })
 
-test('truncateSampleToCapabilityPlanV4: a root-tagged filesystem entry is dropped before extraFilesystemSlots applies, never spending a slot on /', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: a root-tagged filesystem entry is dropped before extraFilesystemSlots applies, never spending a slot on /', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     extraFilesystemSlots: 1,
   }
@@ -606,21 +574,21 @@ test('truncateSampleToCapabilityPlanV4: a root-tagged filesystem entry is droppe
   // Without slotMapping there is nothing to identify as root, so the naive
   // count-based slice still applies (matches an unmappable/pre-topology
   // sample's behavior).
-  const withoutMapping = truncateSampleToCapabilityPlanV4(sample, plan)
+  const withoutMapping = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(
     withoutMapping.filesystems.map((f) => f.filesystemId),
     ['fs-root']
   )
 
-  const withMapping = truncateSampleToCapabilityPlanV4(sample, plan, slotMapping)
+  const withMapping = truncateSampleToCapabilityPlanV5(sample, plan, slotMapping)
   assertEquals(
     withMapping.filesystems.map((f) => f.filesystemId),
     ['fs-data']
   )
 })
 
-test('truncateSampleToCapabilityPlanV4: databaseProxyMetricsEnabled and hardwareHealthEventsEnabled gate their arrays', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: databaseProxyMetricsEnabled and hardwareHealthEventsEnabled gate their arrays', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     databaseProxyMetricsEnabled: false,
     hardwareHealthEventsEnabled: false,
@@ -646,13 +614,13 @@ test('truncateSampleToCapabilityPlanV4: databaseProxyMetricsEnabled and hardware
       severity: 'critical',
     },
   ]
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(truncated.databaseProxies, [])
   assertEquals(truncated.events, [])
 })
 
-test('truncateSampleToCapabilityPlanV4: hardwareHealthEventsEnabled=false drops only hardware-health event kinds', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: hardwareHealthEventsEnabled=false drops only hardware-health event kinds', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     hardwareHealthEventsEnabled: false,
   }
@@ -702,15 +670,15 @@ test('truncateSampleToCapabilityPlanV4: hardwareHealthEventsEnabled=false drops 
     },
   ]
 
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(
     truncated.events.map((event) => event.eventId),
     ['evt-oom', 'evt-fabric', 'evt-clock', 'evt-topology', 'evt-boot', 'evt-remount']
   )
 })
 
-test('truncateSampleToCapabilityPlanV4: hardwareHealthEventsEnabled=true keeps every event kind', () => {
-  const plan: MetricsCapabilityPlanV4 = {
+test('truncateSampleToCapabilityPlanV5: hardwareHealthEventsEnabled=true keeps every event kind', () => {
+  const plan: MetricsCapabilityPlanV5 = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
     hardwareHealthEventsEnabled: true,
   }
@@ -730,7 +698,7 @@ test('truncateSampleToCapabilityPlanV4: hardwareHealthEventsEnabled=true keeps e
     },
   ]
 
-  const truncated = truncateSampleToCapabilityPlanV4(sample, plan)
+  const truncated = truncateSampleToCapabilityPlanV5(sample, plan)
   assertEquals(
     truncated.events.map((event) => event.eventId),
     ['evt-hw', 'evt-oom']
@@ -741,7 +709,7 @@ test('truncateSampleToCapabilityPlanV4: hardwareHealthEventsEnabled=true keeps e
 // networks truncation
 // ---------------------------------------------------------------------------
 
-function makeNetwork(deviceId: string): MetricsSampleV4['networks'][number] {
+function makeNetwork(deviceId: string): MetricsSampleV5['networks'][number] {
   return {
     deviceId,
     receiveBytesPerSecond: 1,
@@ -766,25 +734,32 @@ function emptySlotMappingForNetworks(overrides: Partial<SlotMapping> = {}): Slot
   }
 }
 
-test('truncateSampleToCapabilityPlanV4: networks keeps the slot-mapped NICs within normalNicSlots (slot order) plus fabric, and drops everything else', () => {
-  const sample: MetricsSampleV4 = {
+test('truncateSampleToCapabilityPlanV5: networks keeps the slot-mapped NICs within normalNicSlots (slot order) plus fabric, and drops everything else', () => {
+  const sample: MetricsSampleV5 = {
     ...emptySample(),
     // Deliberately out of slot order, with an unmonitored device mixed in.
     networks: ['veth9', 'eth2', 'tp0', 'eth0', 'eth1'].map(makeNetwork),
   }
-  const plan = resolveMetricsCapabilityPlan('virtual', undefined, { normalNicSlots: 2 }, 'hosted')
+  const plan = resolveMetricsCapabilityPlan(
+    'virtual',
+    undefined,
+    {
+      normalNicSlots: 2,
+    },
+    'hosted'
+  )
   const mapping = emptySlotMappingForNetworks({
     normalNicSlots: ['eth0', 'eth1', 'eth2'],
     fabricDeviceIds: ['tp0'],
   })
-  const kept = truncateSampleToCapabilityPlanV4(sample, plan, mapping).networks.map(
+  const kept = truncateSampleToCapabilityPlanV5(sample, plan, mapping).networks.map(
     (n) => n.deviceId
   )
   assertEquals(kept, ['eth0', 'eth1', 'tp0'])
 
   const selfHosted = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'self-hosted')
   assertEquals(
-    truncateSampleToCapabilityPlanV4(sample, selfHosted, mapping).networks.map((n) => n.deviceId),
+    truncateSampleToCapabilityPlanV5(sample, selfHosted, mapping).networks.map((n) => n.deviceId),
     ['eth0', 'eth1', 'eth2', 'tp0']
   )
 
@@ -795,38 +770,79 @@ test('truncateSampleToCapabilityPlanV4: networks keeps the slot-mapped NICs with
     'self-hosted'
   )
   assertEquals(
-    truncateSampleToCapabilityPlanV4(sample, noFabric, mapping).networks.map((n) => n.deviceId),
+    truncateSampleToCapabilityPlanV5(sample, noFabric, mapping).networks.map((n) => n.deviceId),
     ['eth0', 'eth1', 'eth2']
   )
 })
 
-test('truncateSampleToCapabilityPlanV4: a slot-mapped NIC absent from the sample is simply missing — no other device takes its slot', () => {
-  const sample: MetricsSampleV4 = {
+test('truncateSampleToCapabilityPlanV5: a slot-mapped NIC absent from the sample is simply missing — no other device takes its slot', () => {
+  const sample: MetricsSampleV5 = {
     ...emptySample(),
     networks: ['eth1', 'eth5'].map(makeNetwork),
   }
   const plan = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'hosted')
-  const mapping = emptySlotMappingForNetworks({ normalNicSlots: ['eth0', 'eth1'] })
+  const mapping = emptySlotMappingForNetworks({
+    normalNicSlots: ['eth0', 'eth1'],
+  })
   assertEquals(
-    truncateSampleToCapabilityPlanV4(sample, plan, mapping).networks.map((n) => n.deviceId),
+    truncateSampleToCapabilityPlanV5(sample, plan, mapping).networks.map((n) => n.deviceId),
     ['eth1']
   )
 })
 
-test('truncateSampleToCapabilityPlanV4: without a slot mapping, networks fall back to the first normalNicSlots entries positionally', () => {
-  const sample: MetricsSampleV4 = {
+test('truncateSampleToCapabilityPlanV5: without a slot mapping, networks fall back to the first normalNicSlots entries positionally', () => {
+  const sample: MetricsSampleV5 = {
     ...emptySample(),
     networks: ['eth0', 'eth1', 'eth2', 'tp0'].map(makeNetwork),
   }
   const hosted = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'hosted')
   assertEquals(
-    truncateSampleToCapabilityPlanV4(sample, hosted).networks.map((n) => n.deviceId),
+    truncateSampleToCapabilityPlanV5(sample, hosted).networks.map((n) => n.deviceId),
     ['eth0', 'eth1']
   )
   const selfHosted = resolveMetricsCapabilityPlan('virtual', undefined, undefined, 'self-hosted')
   assertEquals(selfHosted.normalNicSlots, MAX_NIC_SLOTS)
   assertEquals(
-    truncateSampleToCapabilityPlanV4(sample, selfHosted).networks.map((n) => n.deviceId),
+    truncateSampleToCapabilityPlanV5(sample, selfHosted).networks.map((n) => n.deviceId),
     ['eth0', 'eth1', 'eth2', 'tp0']
   )
+})
+
+// ---------------------------------------------------------------------------
+// Machine class
+// ---------------------------------------------------------------------------
+
+test('isServerMachineClass accepts only the two declared values', () => {
+  assertEquals(isServerMachineClass('physical'), true)
+  assertEquals(isServerMachineClass('virtual'), true)
+  assertEquals(isServerMachineClass(null), false)
+  assertEquals(isServerMachineClass(undefined), false)
+  assertEquals(isServerMachineClass('PHYSICAL'), false)
+  assertEquals(isServerMachineClass('bare-metal'), false)
+})
+
+test('inferServerMachineClass: a non-empty hardwareSignals array is proof of physical', () => {
+  assertEquals(inferServerMachineClass({ hardwareSignals: [{ signalId: 'cpu' }] }), 'physical')
+  assertEquals(inferServerMachineClass({ hardwareSignals: [] }), 'virtual')
+})
+
+test('inferServerMachineClass falls through to the sample only when the snapshot lacks the array', () => {
+  assertEquals(inferServerMachineClass(undefined, 2), 'physical')
+  assertEquals(inferServerMachineClass(undefined, 0), 'virtual')
+  assertEquals(inferServerMachineClass({}, 1), 'physical')
+  assertEquals(inferServerMachineClass([], 1), 'physical')
+  // A snapshot that carries the array is authoritative over the sample.
+  assertEquals(inferServerMachineClass({ hardwareSignals: [] }, 5), 'virtual')
+})
+
+test('resolveServerMachineClass: the declared column beats every inference', () => {
+  assertEquals(resolveServerMachineClass('virtual', { hardwareSignals: [{}] }, 3), 'virtual')
+  assertEquals(resolveServerMachineClass('physical', { hardwareSignals: [] }, 0), 'physical')
+})
+
+test('resolveServerMachineClass: NULL and out-of-range declarations fall back to inference', () => {
+  assertEquals(resolveServerMachineClass(null, { hardwareSignals: [{}] }), 'physical')
+  assertEquals(resolveServerMachineClass(undefined, { hardwareSignals: [] }), 'virtual')
+  assertEquals(resolveServerMachineClass('bare-metal', undefined, 1), 'physical')
+  assertEquals(resolveServerMachineClass('', undefined, 0), 'virtual')
 })

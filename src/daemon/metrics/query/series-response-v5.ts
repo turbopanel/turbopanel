@@ -1,5 +1,5 @@
 /**
- * Chart-response shaping for `HostSeriesResultV4`.
+ * Chart-response shaping for `HostSeriesResultV5`.
  *
  * `computeSeriesGapCount` / `defaultExpectedSamplesPerBucket` are structurally
  * generic over `{ at, sampleCount?, expectedSampleCount? }`, so they live here
@@ -7,18 +7,13 @@
  * home after the v3 cutover.
  */
 
-import type {
-  CpuHotspotPointV4,
-  HostSeriesPointV4,
-  HostSeriesResultV4,
-  MetricsBackendKind,
-} from '../types-v4.ts'
+import type { HostSeriesPointV5, HostSeriesResultV5, MetricsBackendKind } from '../types-v5.ts'
 import { bucketFloor } from './buckets.ts'
 import {
-  computeDerivedHostValuesV4,
-  type DerivedHostValuesV4,
-  type HostCapacitiesV4,
-} from './derived-metrics-v4.ts'
+  computeDerivedHostValuesV5,
+  type DerivedHostValuesV5,
+  type HostCapacitiesV5,
+} from './derived-metrics-v5.ts'
 
 /**
  * Expected samples per bucket. Buckets with data pass their observed average
@@ -97,18 +92,16 @@ export type HostSummaryChartResponse = {
   latestAt: string | null
 }
 
-export type HostSeriesChartPointV4 = {
+export type HostSeriesChartPointV5 = {
   at: string
   values: Partial<Record<string, number | null>>
-  derived: DerivedHostValuesV4
+  derived: DerivedHostValuesV5
   sampleCount: number
   expectedSampleCount?: number
   topologyGeneration?: number | null
-  /** See `HostSeriesPointV4.cpuHotspots`. */
-  cpuHotspots?: CpuHotspotPointV4[]
 }
 
-export type HostSeriesChartResponseV4 = {
+export type HostSeriesChartResponseV5 = {
   ok: true
   serverId: string
   from: string
@@ -119,23 +112,23 @@ export type HostSeriesChartResponseV4 = {
   metrics: readonly string[]
   sampleCount: number
   gapCount: number
-  points: HostSeriesChartPointV4[]
+  points: HostSeriesChartPointV5[]
   /**
    * Point indices where `topologyGeneration` differs from the previous known
-   * generation — v4 analogue of v3's `generationBreaks`, renamed since v4
+   * generation — v5 analogue of v3's `generationBreaks`, renamed since v5
    * tracks topology generations rather than hardware-profile generations.
    * See {@link computeTopologyGenerationBreaks}.
    */
   topologyGenerationBreaks: number[]
-  /** Distinct topology generations observed anywhere in the queried range — see `HostSeriesResultV4.topologyGenerations`. */
+  /** Distinct topology generations observed anywhere in the queried range — see `HostSeriesResultV5.topologyGenerations`. */
   topologyGenerations?: number[]
 }
 
-export function finalizeHostSeriesResultV4(
+export function finalizeHostSeriesResultV5(
   from: string,
   to: string,
-  result: HostSeriesResultV4
-): HostSeriesResultV4 {
+  result: HostSeriesResultV5
+): HostSeriesResultV5 {
   if (!result.available || result.resolutionSeconds === null) {
     return result
   }
@@ -156,7 +149,7 @@ export function finalizeHostSeriesResultV4(
 }
 
 /**
- * v4 analogue of v3's `computeGenerationBreaks`, reading `topologyGeneration`
+ * v5 analogue of v3's `computeGenerationBreaks`, reading `topologyGeneration`
  * instead of `hardwareProfileGeneration` — same semantics: a `null`/`undefined`
  * entry is "unknown" and never itself a break, and the first point
  * establishing a known generation is never a break.
@@ -177,18 +170,30 @@ export function computeTopologyGenerationBreaks(
   return breaks
 }
 
-export function toHostSeriesChartResponseV4(input: {
+export function toHostSeriesChartResponseV5(input: {
   serverId: string
   from: string
   to: string
-  result: HostSeriesResultV4
-  capacities: HostCapacitiesV4
-}): HostSeriesChartResponseV4 {
-  const result = finalizeHostSeriesResultV4(input.from, input.to, input.result)
-  const points: HostSeriesChartPointV4[] = result.points.map((point: HostSeriesPointV4) => ({
+  result: HostSeriesResultV5
+  /** Fallback capacities — the latest recorded generation. */
+  capacities: HostCapacitiesV5
+  /**
+   * Capacities that were true at each topology generation the range spans.
+   * A bucket is divided by the totals its own generation had, so a RAM
+   * upgrade or volume resize mid-range no longer restates history against
+   * today's hardware. Points whose generation isn't in the map (or that
+   * carry no generation at all) fall back to `capacities`.
+   */
+  capacitiesByGeneration?: ReadonlyMap<number, HostCapacitiesV5>
+}): HostSeriesChartResponseV5 {
+  const result = finalizeHostSeriesResultV5(input.from, input.to, input.result)
+  const capacitiesFor = (generation: number | null | undefined): HostCapacitiesV5 =>
+    (generation != null ? input.capacitiesByGeneration?.get(generation) : undefined) ??
+    input.capacities
+  const points: HostSeriesChartPointV5[] = result.points.map((point: HostSeriesPointV5) => ({
     at: point.at,
     values: point.values,
-    derived: computeDerivedHostValuesV4(point.values, input.capacities),
+    derived: computeDerivedHostValuesV5(point.values, capacitiesFor(point.topologyGeneration)),
     sampleCount: point.sampleCount ?? 0,
     ...(point.expectedSampleCount !== undefined
       ? { expectedSampleCount: point.expectedSampleCount }
@@ -196,7 +201,6 @@ export function toHostSeriesChartResponseV4(input: {
     ...(point.topologyGeneration !== undefined
       ? { topologyGeneration: point.topologyGeneration }
       : {}),
-    ...(point.cpuHotspots !== undefined ? { cpuHotspots: point.cpuHotspots } : {}),
   }))
 
   return {
@@ -218,7 +222,7 @@ export function toHostSeriesChartResponseV4(input: {
   }
 }
 
-export type HostSummaryChartResponseV4 = {
+export type HostSummaryChartResponseV5 = {
   ok: true
   serverId: string
   from: string

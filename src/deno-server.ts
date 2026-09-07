@@ -41,9 +41,9 @@ import { registerDaemonWebSocket } from './daemon/deno-ws.ts'
 import {
   parseMetricsRetentionDays,
   parsePositiveIntEnv,
-  resolveServerMetricsStoreV4,
+  resolveServerMetricsStoreV5,
 } from './daemon/metrics/store-selection.ts'
-import type { ServerMetricsStoreV4 } from './daemon/metrics/types-v4.ts'
+import type { ServerMetricsStoreV5 } from './daemon/metrics/types-v5.ts'
 import { setServerStatusEventSink } from './daemon/metrics/status-events.ts'
 import { setActiveServerMetricsStore } from './daemon/metrics/active-store.ts'
 import {
@@ -178,8 +178,8 @@ async function startOptionalCommandConsumer(opts: {
  * Arm the DuckDB store's daily Parquet-archive timer. No-ops for stores
  * without one (e.g. the disabled fallback store) so boot stays backend-neutral.
  */
-function startMetricsDailyArchiveIfSupported(store: ServerMetricsStoreV4): void {
-  const candidate = store as ServerMetricsStoreV4 & {
+function startMetricsDailyArchiveIfSupported(store: ServerMetricsStoreV5): void {
+  const candidate = store as ServerMetricsStoreV5 & {
     startDailyArchiveTimer?: () => void
   }
   candidate.startDailyArchiveTimer?.()
@@ -190,8 +190,8 @@ function startMetricsDailyArchiveIfSupported(store: ServerMetricsStoreV4): void 
  * accepted samples are persisted before the process exits. No-ops for stores
  * without a close() (e.g. the disabled fallback store).
  */
-async function closeMetricsStoreIfSupported(store: ServerMetricsStoreV4): Promise<void> {
-  const candidate = store as ServerMetricsStoreV4 & {
+async function closeMetricsStoreIfSupported(store: ServerMetricsStoreV5): Promise<void> {
+  const candidate = store as ServerMetricsStoreV5 & {
     close?: () => Promise<void>
   }
   try {
@@ -251,7 +251,7 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
   })
   // Metrics directory itself stays unconfigured here — `resolveMetricsDir()`
   // already reads TURBOPANEL_METRICS_DIR inside the DuckDB store.
-  const serverMetricsStoreV4 = resolveServerMetricsStoreV4({
+  const serverMetricsStoreV5 = resolveServerMetricsStoreV5({
     runtime: 'deno',
     duckdb: {
       retentionDays: parseMetricsRetentionDays(
@@ -263,9 +263,9 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
       ),
     },
   })
-  setServerStatusEventSink(serverMetricsStoreV4)
-  setActiveServerMetricsStore(serverMetricsStoreV4)
-  startMetricsDailyArchiveIfSupported(serverMetricsStoreV4)
+  setServerStatusEventSink(serverMetricsStoreV5)
+  setActiveServerMetricsStore(serverMetricsStoreV5)
+  startMetricsDailyArchiveIfSupported(serverMetricsStoreV5)
   const executionLogRetentionDays = parseExecutionLogRetentionDays(
     Deno.env.get('TURBOPANEL_EXECUTION_LOG_RETENTION_DAYS')
   )
@@ -365,7 +365,7 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
     baseUrl: Deno.env.get('TURBOPANEL_BASE_URL') ?? undefined,
     daemonCellRegistry,
     queryCache,
-    serverMetricsStoreV4,
+    serverMetricsStoreV5,
     executionLogStore,
     dataEncryptionSecrets,
     secretsConfig,
@@ -549,7 +549,7 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
       await daemonCellRegistry.close()
       // Persist any pending batched metrics rows before tearing the process
       // down — accepted (202) samples must survive a normal SIGINT/SIGTERM.
-      await closeMetricsStoreIfSupported(serverMetricsStoreV4)
+      await closeMetricsStoreIfSupported(serverMetricsStoreV5)
       abort.abort()
     })
   }

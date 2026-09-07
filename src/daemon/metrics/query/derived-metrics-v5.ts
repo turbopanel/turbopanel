@@ -1,9 +1,9 @@
 /**
- * Backend-neutral derived-value math for v4 chart/summary route responses —
- * the v4 analogue of `derived-metrics.ts`, generalized for v4's canonical-
+ * Backend-neutral derived-value math for v5 chart/summary route responses —
+ * the v5 analogue of `derived-metrics.ts`, generalized for v5's canonical-
  * name-keyed value maps instead of a fixed `HostMetricKey` union.
  *
- * Unlike v3 (which stores `cpuIdlePercent` and inverts it), v4's
+ * Unlike v3 (which stores `cpuIdlePercent` and inverts it), v5's
  * `host.cpu.busyPercent` is already the "used" semantic, so
  * `cpuUsagePercent` is a direct passthrough — no `100 - idle` arithmetic.
  *
@@ -12,7 +12,7 @@
  * raw metrics), and consumed only at the route layer.
  */
 
-export type DerivedHostValuesV4 = {
+export type DerivedHostValuesV5 = {
   cpuUsagePercent: number | null
   memoryUsedBytes: number | null
   memoryUsedPercent: number | null
@@ -22,13 +22,13 @@ export type DerivedHostValuesV4 = {
 }
 
 /**
- * Host capacities needed to turn v4's "available"/"used" raw readings into
+ * Host capacities needed to turn v5's "available"/"used" raw readings into
  * used-percent figures — sourced from the server's latest `TopologySnapshot`
  * (`memoryTotalBytes`/`swapTotalBytes`) plus the root-role filesystem's
  * `totalBytes` (`TopologyFilesystem` with `roles` including `"root"`).
  * `null` when the topology hasn't reported the figure yet.
  */
-export type HostCapacitiesV4 = {
+export type HostCapacitiesV5 = {
   memoryTotalBytes: number | null
   swapTotalBytes: number | null
   rootFilesystemTotalBytes: number | null
@@ -47,15 +47,18 @@ function usedPercent(used: number | null, totalBytes: number | null): number | n
   return (used / totalBytes) * 100
 }
 
-/** Compute all route-layer derived host values from a v4 canonical-name-keyed value map. */
-export function computeDerivedHostValuesV4(
+/** Compute all route-layer derived host values from a v5 canonical-name-keyed value map. */
+export function computeDerivedHostValuesV5(
   values: Partial<Record<string, number | null>>,
-  capacities: HostCapacitiesV4
-): DerivedHostValuesV4 {
+  capacities: HostCapacitiesV5
+): DerivedHostValuesV5 {
   const cpuUsagePercent = values['host.cpu.busyPercent'] ?? null
 
-  const memoryAvailableBytes = values['host.memory.availableBytes'] ?? null
-  const memoryUsedBytes = usedFromAvailable(capacities.memoryTotalBytes, memoryAvailableBytes)
+  // v5 stores used memory directly (`MemTotal - MemAvailable`, computed on
+  // the daemon) rather than the available side, so this is a passthrough —
+  // v4 had to reconstruct it from the capacity, which silently rewrote
+  // history whenever the host's RAM changed.
+  const memoryUsedBytes = values['host.memory.usedBytes'] ?? null
 
   const swapUsedBytes = values['host.memory.swapUsedBytes'] ?? null
 
@@ -78,7 +81,7 @@ export function computeDerivedHostValuesV4(
   }
 }
 
-export type IngressDerivedValuesV4 = {
+export type IngressDerivedValuesV5 = {
   errorRatePercent: number | null
   averageLatencyMs: number | null
 }
@@ -86,11 +89,11 @@ export type IngressDerivedValuesV4 = {
 /**
  * Derived values for one `managed.ingress` entity's value map (bare field
  * names — `requests`, `responses4xx`, etc., matching
- * `EntitySeriesQueryV4`'s field-name convention for per-entity families).
+ * `EntitySeriesQueryV5`'s field-name convention for per-entity families).
  */
 export function computeIngressDerivedValues(
   values: Partial<Record<string, number | null>>
-): IngressDerivedValuesV4 {
+): IngressDerivedValuesV5 {
   const requests = values.requests ?? null
   const responses4xx = values.responses4xx ?? null
   const responses5xx = values.responses5xx ?? null

@@ -30,10 +30,10 @@ import { parseCommandEnvelope } from './lib/commands/envelope.ts'
 import {
   type AnalyticsEngineDatasetLike,
   resolveCloudflareAnalyticsSqlConfig,
-  resolveServerMetricsStoreV4,
+  resolveServerMetricsStoreV5,
 } from './daemon/metrics/store-selection-workers.ts'
 import { setServerStatusEventSink } from './daemon/metrics/status-events.ts'
-import type { ServerMetricsStoreV4 } from './daemon/metrics/types-v4.ts'
+import type { ServerMetricsStoreV5 } from './daemon/metrics/types-v5.ts'
 import {
   parseExecutionLogRetentionDays,
   type R2BucketLike,
@@ -71,7 +71,7 @@ let cachedChallengeSigningSecrets: DerivedSecretsConfig | null = null
 let cachedDataEncryptionSecrets: DerivedSecretsConfig | null = null
 let cachedSecretsConfig: SecretsConfig | null = null
 let cachedCommandQueue: CommandQueue | null = null
-let cachedServerMetricsStoreV4: ServerMetricsStoreV4 | null = null
+let cachedServerMetricsStoreV5: ServerMetricsStoreV5 | null = null
 let cachedExecutionLogStore: ExecutionLogStore | null = null
 let cachedAuthRateLimiter: AuthRateLimiter | null = null
 let cachedDaemonCellRegistryFactory:
@@ -92,7 +92,7 @@ export function resetWorkerAppCachesForTests(): void {
   cachedDataEncryptionSecrets = null
   cachedSecretsConfig = null
   cachedCommandQueue = null
-  cachedServerMetricsStoreV4 = null
+  cachedServerMetricsStoreV5 = null
   cachedExecutionLogStore = null
   cachedAuthRateLimiter = null
   cachedDaemonCellRegistryFactory = null
@@ -181,22 +181,22 @@ async function initWorkerApp(env: CloudflareBindings) {
     ? createWorkersCommandQueue(env.TURBOPANEL_COMMAND_QUEUE)
     : createNoopCommandQueue()
   const analyticsEngineSql = resolveCloudflareAnalyticsSqlConfig(env)
-  // Real v4 backend (writes to SERVER_METRICS_V4 — the v4 envelope, per
-  // field-map-v4.ts). `CloudflareAnalyticsEngineServerMetricsStoreV4`
-  // implements the full `ServerMetricsStoreV4` surface (writes and reads
+  // Real v5 backend (writes to SERVER_METRICS_V5 — the v5 envelope, per
+  // field-map-v5.ts). `CloudflareAnalyticsEngineServerMetricsStoreV5`
+  // implements the full `ServerMetricsStoreV5` surface (writes and reads
   // alike) directly, including the paged entity families and `sample.events`
-  // — the request-resolved `slotMapping` (`buildMetricsDataPointsV4`'s
+  // — the request-resolved `slotMapping` (`buildMetricsDataPointsV5`'s
   // parameter) is threaded straight through by the ingest route's
-  // `writeSample` call, with no v3 bridging in between. `resolveServerMetricsStoreV4`
-  // already degrades to `DisabledServerMetricsStoreV4` when the
-  // `SERVER_METRICS_V4` binding is unconfigured, so this is always the
+  // `writeSample` call, with no v3 bridging in between. `resolveServerMetricsStoreV5`
+  // already degrades to `DisabledServerMetricsStoreV5` when the
+  // `SERVER_METRICS_V5` binding is unconfigured, so this is always the
   // correct store to use here regardless of binding state.
-  cachedServerMetricsStoreV4 = resolveServerMetricsStoreV4({
+  cachedServerMetricsStoreV5 = resolveServerMetricsStoreV5({
     runtime: 'workers',
-    analyticsEngine: (env as { SERVER_METRICS_V4?: AnalyticsEngineDatasetLike }).SERVER_METRICS_V4,
+    analyticsEngine: (env as { SERVER_METRICS_V5?: AnalyticsEngineDatasetLike }).SERVER_METRICS_V5,
     analyticsEngineSql,
   })
-  setServerStatusEventSink(cachedServerMetricsStoreV4)
+  setServerStatusEventSink(cachedServerMetricsStoreV5)
   cachedExecutionLogStore = resolveExecutionLogStore({
     runtime: 'workers',
     r2: (env as { EXECUTION_LOGS?: R2BucketLike }).EXECUTION_LOGS,
@@ -215,7 +215,7 @@ async function initWorkerApp(env: CloudflareBindings) {
     runtime: 'workers',
     corsOrigins: env.TURBOPANEL_UI_CORS_ORIGINS,
     signupEnvOverride: env.TURBOPANEL_IS_SIGNUP_ENABLED,
-    serverMetricsStoreV4: cachedServerMetricsStoreV4,
+    serverMetricsStoreV5: cachedServerMetricsStoreV5,
     executionLogStore: cachedExecutionLogStore,
     dataEncryptionSecrets: cachedDataEncryptionSecrets ?? undefined,
     secretsConfig: cachedSecretsConfig ?? undefined,
@@ -329,8 +329,8 @@ export default {
           const registry = cachedDaemonCellRegistryFactory(env, db)
           c.set('daemonCellRegistry', registry)
         }
-        if (cachedServerMetricsStoreV4) {
-          c.set('serverMetricsStoreV4', cachedServerMetricsStoreV4)
+        if (cachedServerMetricsStoreV5) {
+          c.set('serverMetricsStoreV5', cachedServerMetricsStoreV5)
         }
         if (cachedExecutionLogStore) {
           c.set('executionLogStore', cachedExecutionLogStore)

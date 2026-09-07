@@ -9,11 +9,11 @@ import type { Db } from './db.ts'
 import { registerDaemonApiRoutes } from './daemon/api-routes.ts'
 import { deriveDaemonJwtKeyring } from './daemon/authn/daemon-jwt-keyring.ts'
 import { issueDaemonJwt } from './daemon/authn/daemon-jwt.ts'
-import { METRICS_SCHEMA_VERSION_V4 } from './daemon/metrics/contract-v4.ts'
+import { METRICS_SCHEMA_VERSION_V5 } from './daemon/metrics/contract-v5.ts'
 import type {
-  AuthenticatedMetricsSampleV4,
-  ServerMetricsStoreV4,
-} from './daemon/metrics/types-v4.ts'
+  AuthenticatedMetricsSampleV5,
+  ServerMetricsStoreV5,
+} from './daemon/metrics/types-v5.ts'
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -122,7 +122,7 @@ test('createApp health reports TURBOPANEL_REVISION from platformEnv', async () =
   assertEquals(body.revision.sourceUrl, `https://github.com/TurboPanel/turbopanel/tree/${commit}`)
 })
 
-test('createApp wires serverMetricsStoreV4 through to POST /api/daemon/v1/metrics', async () => {
+test('createApp wires serverMetricsStoreV5 through to POST /api/daemon/v1/metrics', async () => {
   const daemonJwtKeyring = await deriveDaemonJwtKeyring({
     versioned: [
       {
@@ -131,8 +131,8 @@ test('createApp wires serverMetricsStoreV4 through to POST /api/daemon/v1/metric
       },
     ],
   })
-  const writes: AuthenticatedMetricsSampleV4[] = []
-  const serverMetricsStoreV4: ServerMetricsStoreV4 = {
+  const writes: AuthenticatedMetricsSampleV5[] = []
+  const serverMetricsStoreV5: ServerMetricsStoreV5 = {
     writeSample(sample) {
       writes.push(sample)
     },
@@ -141,14 +141,14 @@ test('createApp wires serverMetricsStoreV4 through to POST /api/daemon/v1/metric
     },
   }
 
-  // Real bootstrap wiring: createApp() sets `serverMetricsStoreV4` on the
+  // Real bootstrap wiring: createApp() sets `serverMetricsStoreV5` on the
   // Hono context the same way `deno-server.ts` / `workers.ts` do, then
   // `registerDaemonApiRoutes` (also mounted by both entrypoints) is layered
-  // on top — no `c.set("serverMetricsStoreV4", ...)` in this test itself.
+  // on top — no `c.set("serverMetricsStoreV5", ...)` in this test itself.
   const app = createApp({
     signupEnvOverride: undefined,
     runtime: 'deno',
-    serverMetricsStoreV4,
+    serverMetricsStoreV5,
   })
   registerDaemonApiRoutes(app, { secrets: daemonJwtKeyring })
 
@@ -167,7 +167,7 @@ test('createApp wires serverMetricsStoreV4 through to POST /api/daemon/v1/metric
     body: JSON.stringify({
       type: 'metrics',
       metadata: {
-        version: METRICS_SCHEMA_VERSION_V4,
+        version: METRICS_SCHEMA_VERSION_V5,
         sampledAt: new Date().toISOString(),
         intervalSeconds: 60,
         sequence: 1,

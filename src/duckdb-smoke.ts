@@ -4,10 +4,10 @@
  * (scripts/duckdb-compile-smoke.ts). Running it through the real compiled
  * artifact (`deno task compile` → `dist/turbopanel-instance`) proves the
  * `@duckdb/node-api` native addon survives TurboPanel's actual build and
- * permission shape, against the real v4 metrics schema (not a throwaway
+ * permission shape, against the real v5 metrics schema (not a throwaway
  * `smoke` table) before the metrics-store write path is wired up. Modes:
  *
- *   write   — create/open `<metricsDir>/smoke.duckdb`, run the real v4 DDL,
+ *   write   — create/open `<metricsDir>/smoke.duckdb`, run the real v5 DDL,
  *             insert one `server_host_samples` row and one
  *             `server_network_samples` row
  *   verify  — fresh process: assert both rows persisted (restart durability)

@@ -1,4 +1,4 @@
-import type { MetricsBackendKind } from '../types-v4.ts'
+import type { MetricsBackendKind } from '../types-v5.ts'
 
 export const METRICS_CHART_CACHE_PREFIX = 'tp:metrics:chart:'
 
@@ -22,11 +22,11 @@ export function metricsChartCacheKey(input: {
   serverId: string
   fromBucketMs: number
   toBucketMs: number
-  /** Canonical v4 metric names. */
+  /** Canonical v5 metric names. */
   metrics: readonly string[]
   resolutionSeconds: number
   backend: MetricsBackendKind
-  /** v4 callers must pass `4` explicitly. */
+  /** v5 callers must pass `4` explicitly. */
   schemaVersion: number
   kind?: 'series' | 'summary' | 'connection' | 'fleet-latest' | 'events' | 'entity-series'
   /**

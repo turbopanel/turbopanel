@@ -1065,11 +1065,11 @@ test("loadFabricReconcileSnapshot derives gateway IPv4 subnets into peer allowed
       scope: "datacenter",
       createdAt: "2020-01-01T00:00:00.000Z",
       datacenterId: "dc-a",
-      networkId: "net-v4-a",
+      networkId: "net-v5-a",
     }],
     networks: [
       {
-        id: "net-v4-a",
+        id: "net-v5-a",
         organizationId: ORG,
         environmentId: ENV,
         kind: "datacenter",
@@ -1079,7 +1079,7 @@ test("loadFabricReconcileSnapshot derives gateway IPv4 subnets into peer allowed
         options: {},
       },
       {
-        id: "net-v4-b",
+        id: "net-v5-b",
         organizationId: ORG,
         environmentId: ENV,
         kind: "datacenter",
@@ -1118,7 +1118,7 @@ test("loadFabricReconcileSnapshot derives gateway IPv4 subnets into peer allowed
   assertEquals(allowedIPs.includes("2001:db8::/32"), false);
 
   db.networks.push({
-    id: "net-v4-c",
+    id: "net-v5-c",
     organizationId: ORG,
     environmentId: ENV,
     kind: "datacenter",
@@ -1197,7 +1197,7 @@ test("loadFabricReconcileSnapshot assigns a shared subnet to the public-keyed ga
         scope: "datacenter",
         createdAt: "2020-01-01T00:00:00.000Z",
         datacenterId: "dc-a",
-        networkId: "net-v4",
+        networkId: "net-v5",
       },
       {
         ipId: "ip-zzz",
@@ -1206,11 +1206,11 @@ test("loadFabricReconcileSnapshot assigns a shared subnet to the public-keyed ga
         scope: "datacenter",
         createdAt: "2020-01-01T00:00:00.000Z",
         datacenterId: "dc-a",
-        networkId: "net-v4",
+        networkId: "net-v5",
       },
     ],
     networks: [{
-      id: "net-v4",
+      id: "net-v5",
       organizationId: ORG,
       environmentId: ENV,
       kind: "datacenter",

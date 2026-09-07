@@ -1,6 +1,6 @@
 /**
- * Exact AE v4 row-count regression matrix — the "fails loudly" test for the
- * v4 packing layer. Runs every representative-machine fixture
+ * Exact AE v5 row-count regression matrix — the "fails loudly" test for the
+ * v5 packing layer. Runs every representative-machine fixture
  * (`testing/representative-machines.ts`) through the real capability-plan
  * truncation + field-map packing pipeline (the same two steps ingest
  * performs) and asserts the literal row count and ordered family list per
@@ -14,29 +14,29 @@
  */
 import { assertEquals } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { buildMetricsSampleV4 } from '../../contract-v4.ts'
-import { truncateSampleToCapabilityPlanV4 } from '../../capability-plan.ts'
-import type { AuthenticatedMetricsSampleV4 } from '../../types-v4.ts'
+import { buildMetricsSampleV5 } from '../../contract-v5.ts'
+import { truncateSampleToCapabilityPlanV5 } from '../../capability-plan.ts'
+import type { AuthenticatedMetricsSampleV5 } from '../../types-v5.ts'
 import { representativeMachineFixtures } from '../../testing/representative-machines.ts'
 import {
-  AE_V4_BLOB_COUNT,
-  AE_V4_BLOB_FAMILY_INDEX,
-  AE_V4_DOUBLE_COUNT,
-  AE_V4_DOUBLE_INTERVAL_INDEX,
-  buildMetricsDataPointsV4,
-} from './field-map-v4.ts'
+  AE_V5_BLOB_COUNT,
+  AE_V5_BLOB_FAMILY_INDEX,
+  AE_V5_DOUBLE_COUNT,
+  AE_V5_DOUBLE_INTERVAL_INDEX,
+  buildMetricsDataPointsV5,
+} from './field-map-v5.ts'
 
 for (const fixture of representativeMachineFixtures()) {
   it(`representative machine "${fixture.name}": exact row count + family order`, () => {
-    const built = buildMetricsSampleV4(fixture.input)
-    const truncated = truncateSampleToCapabilityPlanV4(built, fixture.plan)
-    const sample: AuthenticatedMetricsSampleV4 = {
+    const built = buildMetricsSampleV5(fixture.input)
+    const truncated = truncateSampleToCapabilityPlanV5(built, fixture.plan)
+    const sample: AuthenticatedMetricsSampleV5 = {
       ...truncated,
       serverId: '11111111-2222-4333-8444-555555555555',
       receivedAt: fixture.input.metadata.sampledAt,
     }
 
-    const points = buildMetricsDataPointsV4(sample, fixture.slotMapping)
+    const points = buildMetricsDataPointsV5(sample, fixture.slotMapping)
 
     assertEquals(
       points.length,
@@ -44,16 +44,16 @@ for (const fixture of representativeMachineFixtures()) {
       `${fixture.name}: expected ${fixture.expectedRowCount} rows, got ${points.length}`
     )
     assertEquals(
-      points.map((point) => point.blobs[AE_V4_BLOB_FAMILY_INDEX]),
+      points.map((point) => point.blobs[AE_V5_BLOB_FAMILY_INDEX]),
       fixture.expectedFamilies,
       `${fixture.name}: family order/multiset mismatch`
     )
 
     for (const point of points) {
-      assertEquals(point.doubles.length, AE_V4_DOUBLE_COUNT, `${fixture.name}: doubles length`)
-      assertEquals(point.blobs.length, AE_V4_BLOB_COUNT, `${fixture.name}: blobs length`)
+      assertEquals(point.doubles.length, AE_V5_DOUBLE_COUNT, `${fixture.name}: doubles length`)
+      assertEquals(point.blobs.length, AE_V5_BLOB_COUNT, `${fixture.name}: blobs length`)
       assertEquals(
-        point.doubles[AE_V4_DOUBLE_INTERVAL_INDEX],
+        point.doubles[AE_V5_DOUBLE_INTERVAL_INDEX],
         sample.metadata.intervalSeconds,
         `${fixture.name}: double20 must equal intervalSeconds`
       )
@@ -62,5 +62,5 @@ for (const fixture of representativeMachineFixtures()) {
 }
 
 it('representative machine fixtures: exactly 16 machine shapes covered', () => {
-  assertEquals(representativeMachineFixtures().length, 16)
+  assertEquals(representativeMachineFixtures().length, 17)
 })

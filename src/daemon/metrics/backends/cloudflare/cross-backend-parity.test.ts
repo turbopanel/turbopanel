@@ -1,17 +1,17 @@
 /**
- * Cross-backend parity — DuckDB vs. Cloudflare Analytics Engine — for the v4
- * contract. Supersedes `write-path-parity.test.ts`'s role for v4 (that file
+ * Cross-backend parity — DuckDB vs. Cloudflare Analytics Engine — for the v5
+ * contract. Supersedes `write-path-parity.test.ts`'s role for v5 (that file
  * stays as the v3 record; it is deleted in the v3-removal phase, not here).
  *
  * This exercises the actual read path on both backends, not just the
  * write-path packer: identical logical samples are written through (a)
  * `DuckDbParquetServerMetricsStore.writeSample` and (b)
- * `CloudflareAnalyticsEngineServerMetricsStoreV4.writeSample` backed by
- * `createFakeAnalyticsEngineV4` (`testing/fake-analytics-engine-v4.ts`) — an
+ * `CloudflareAnalyticsEngineServerMetricsStoreV5.writeSample` backed by
+ * `createFakeAnalyticsEngineV5` (`testing/fake-analytics-engine-v5.ts`) — an
  * in-memory DuckDB table shaped like the real AE dataset that the real
- * `queryXViaSqlApiV4` SQL text executes against, so the AE side is a genuine
+ * `queryXViaSqlApiV5` SQL text executes against, so the AE side is a genuine
  * executed read path, not a canned/decoded stand-in. Both stores are then
- * queried back through the exact same `ServerMetricsStoreV4` methods and
+ * queried back through the exact same `ServerMetricsStoreV5` methods and
  * compared: series values, sample counts, gap counts, `latestAt`, uptime,
  * and events.
  *
@@ -22,16 +22,16 @@
  */
 import { assertEquals } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { buildMetricsSampleV4, type MetricsSampleV4Input } from '../../contract-v4.ts'
+import { buildMetricsSampleV5, type MetricsSampleV5Input } from '../../contract-v5.ts'
 import {
   resolveMetricsCapabilityPlan,
-  truncateSampleToCapabilityPlanV4,
+  truncateSampleToCapabilityPlanV5,
 } from '../../capability-plan.ts'
-import type { AuthenticatedMetricsSampleV4, SlotMapping } from '../../types-v4.ts'
-import type { ServerStatusEvent } from '../../types-v4.ts'
+import type { AuthenticatedMetricsSampleV5, SlotMapping } from '../../types-v5.ts'
+import type { ServerStatusEvent } from '../../types-v5.ts'
 import { DuckDbParquetServerMetricsStore } from '../duckdb/store.ts'
-import { CloudflareAnalyticsEngineServerMetricsStoreV4 } from './store-v4.ts'
-import { createFakeAnalyticsEngineV4 } from '../../testing/fake-analytics-engine-v4.ts'
+import { CloudflareAnalyticsEngineServerMetricsStoreV5 } from './store-v5.ts'
+import { createFakeAnalyticsEngineV5 } from '../../testing/fake-analytics-engine-v5.ts'
 
 const SERVER_ID = '11111111-2222-4333-8444-555555555555'
 const BASE_MS = Date.UTC(2026, 5, 2)
@@ -83,11 +83,11 @@ function inputForTick(opts: {
   topologyGeneration: number
   cpuBusy: number
   gpus: ReturnType<typeof gpu>[]
-  events?: MetricsSampleV4Input['events']
-}): MetricsSampleV4Input {
+  events?: MetricsSampleV5Input['events']
+}): MetricsSampleV5Input {
   return {
     metadata: {
-      version: 4,
+      version: 5,
       sampledAt: new Date(opts.atMs).toISOString(),
       intervalSeconds: INTERVAL_SECONDS,
       sequence: opts.sequence,
@@ -104,14 +104,15 @@ function inputForTick(opts: {
         stealPercent: null,
         softirqPercent: null,
         pressureSomePercent: null,
-        maxCoreBusyPercent: null,
+        saturatedCoreCount: null,
         procsRunning: null,
         procsBlocked: null,
         processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {
-        availableBytes: null,
+        usedBytes: null,
+        cachedFilesBytes: null,
         swapUsedBytes: null,
         pressureSomePercent: null,
         pressureFullPercent: null,
@@ -124,9 +125,7 @@ function inputForTick(opts: {
         ioPressureFullPercent: null,
         diskReadBytesPerSecond: null,
         diskWriteBytesPerSecond: null,
-        diskReadLatencyMs: null,
-        diskWriteLatencyMs: null,
-        maxBlockDeviceUtilPercent: null,
+        diskLatencyMs: null,
         rootFilesystemAvailableBytes: null,
         rootFilesystemFreeInodes: null,
       },
@@ -147,9 +146,14 @@ it('cross-backend parity: DuckDB and Cloudflare AE agree on host series, entity 
   const metricsDir = await Deno.makeTempDir({
     prefix: 'tp-cross-backend-parity-',
   })
-  const duckStore = new DuckDbParquetServerMetricsStore({ metricsDir }, { writeBatchMaxRows: 1 })
-  const fakeAe = await createFakeAnalyticsEngineV4()
-  const aeStore = new CloudflareAnalyticsEngineServerMetricsStoreV4(fakeAe.dataset, {
+  const duckStore = new DuckDbParquetServerMetricsStore(
+    { metricsDir },
+    {
+      writeBatchMaxRows: 1,
+    }
+  )
+  const fakeAe = await createFakeAnalyticsEngineV5()
+  const aeStore = new CloudflareAnalyticsEngineServerMetricsStoreV5(fakeAe.dataset, {
     sql: fakeAe.sqlConfig,
   })
   const plan = resolveMetricsCapabilityPlan(
@@ -178,8 +182,8 @@ it('cross-backend parity: DuckDB and Cloudflare AE agree on host series, entity 
         },
       ],
     })
-    const tick1Built = truncateSampleToCapabilityPlanV4(buildMetricsSampleV4(tick1Input), plan)
-    const tick1Sample: AuthenticatedMetricsSampleV4 = {
+    const tick1Built = truncateSampleToCapabilityPlanV5(buildMetricsSampleV5(tick1Input), plan)
+    const tick1Sample: AuthenticatedMetricsSampleV5 = {
       ...tick1Built,
       serverId: SERVER_ID,
       receivedAt: tick1Input.metadata.sampledAt,
@@ -203,8 +207,8 @@ it('cross-backend parity: DuckDB and Cloudflare AE agree on host series, entity 
       cpuBusy: 34,
       gpus: [gpu('gpu0', 7), gpu('gpu1', 9)],
     })
-    const tick2Built = truncateSampleToCapabilityPlanV4(buildMetricsSampleV4(tick2Input), plan)
-    const tick2Sample: AuthenticatedMetricsSampleV4 = {
+    const tick2Built = truncateSampleToCapabilityPlanV5(buildMetricsSampleV5(tick2Input), plan)
+    const tick2Sample: AuthenticatedMetricsSampleV5 = {
       ...tick2Built,
       serverId: SERVER_ID,
       receivedAt: tick2Input.metadata.sampledAt,

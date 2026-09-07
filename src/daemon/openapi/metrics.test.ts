@@ -1,9 +1,9 @@
 import { assertEquals, assertStringIncludes } from '@std/assert'
-import { METRIC_EVENT_KINDS_V4, METRICS_SCHEMA_VERSION_V4 } from '../metrics/contract-v4.ts'
+import { METRIC_EVENT_KINDS_V5, METRICS_SCHEMA_VERSION_V5 } from '../metrics/contract-v5.ts'
 import {
-  HOST_METRICS_METRIC_DESCRIPTORS_V4,
-  type MetricEntityScopeV4,
-} from '../metrics/metric-descriptors-v4.ts'
+  HOST_METRICS_METRIC_DESCRIPTORS_V5,
+  type MetricEntityScopeV5,
+} from '../metrics/metric-descriptors-v5.ts'
 import { metricsPaths, metricsSchemas } from './metrics.ts'
 
 /**
@@ -44,20 +44,20 @@ type SampleSchema = {
   }
 }
 
-const sample = metricsSchemas.DaemonMetricsSampleV4 as unknown as SampleSchema
-const event = metricsSchemas.DaemonMetricEventV4 as unknown as PropertySchema
+const sample = metricsSchemas.DaemonMetricsSampleV5 as unknown as SampleSchema
+const event = metricsSchemas.DaemonMetricEventV5 as unknown as PropertySchema
 
-function fieldNamesForScope(scope: MetricEntityScopeV4): string[] {
-  return Object.values(HOST_METRICS_METRIC_DESCRIPTORS_V4)
+function fieldNamesForScope(scope: MetricEntityScopeV5): string[] {
+  return Object.values(HOST_METRICS_METRIC_DESCRIPTORS_V5)
     .filter((descriptor) => descriptor.entityScope === scope)
     .map((descriptor) => descriptor.fieldName)
     .sort()
 }
 
-test('DaemonMetricsSampleV4 documents the v4 wire version and required top-level fields', () => {
-  assertEquals(METRICS_SCHEMA_VERSION_V4, 4)
+test('DaemonMetricsSampleV5 documents the v5 wire version and required top-level fields', () => {
+  assertEquals(METRICS_SCHEMA_VERSION_V5, 5)
   assertEquals(sample.properties.type.const, 'metrics')
-  assertEquals(sample.properties.metadata.properties.version!.const, METRICS_SCHEMA_VERSION_V4)
+  assertEquals(sample.properties.metadata.properties.version!.const, METRICS_SCHEMA_VERSION_V5)
   assertEquals(sample.required.includes('metadata'), true)
   assertEquals(sample.required.includes('host'), true)
   assertEquals(
@@ -78,8 +78,8 @@ test('DaemonMetricsSampleV4 documents the v4 wire version and required top-level
   assertEquals('dimensions' in sample.properties, false)
 })
 
-test('DaemonMetricsSampleV4 host groups match the v4 entity-scope descriptor set exactly', () => {
-  const groups: Record<string, MetricEntityScopeV4> = {
+test('DaemonMetricsSampleV5 host groups match the v5 entity-scope descriptor set exactly', () => {
+  const groups: Record<string, MetricEntityScopeV5> = {
     cpu: 'host.cpu',
     kernel: 'host.kernel',
     memory: 'host.memory',
@@ -107,8 +107,8 @@ test('ingressSources / databaseProxies entities are keyed by sourceId, not sourc
   )
 })
 
-test('per-entity array items match their v4 entity-scope descriptor set exactly', () => {
-  const cases: [keyof SampleSchema['properties'], string[], MetricEntityScopeV4][] = [
+test('per-entity array items match their v5 entity-scope descriptor set exactly', () => {
+  const cases: [keyof SampleSchema['properties'], string[], MetricEntityScopeV5][] = [
     ['networks', ['deviceId'], 'network'],
     ['filesystems', ['filesystemId'], 'filesystem'],
     ['blockDevices', ['deviceId'], 'block'],
@@ -125,46 +125,16 @@ test('per-entity array items match their v4 entity-scope descriptor set exactly'
   }
 })
 
-test('events reference DaemonMetricEventV4, which documents every MetricEventKindV4', () => {
-  assertEquals(sample.properties.events.items.$ref, '#/components/schemas/DaemonMetricEventV4')
+test('events reference DaemonMetricEventV5, which documents every MetricEventKindV5', () => {
+  assertEquals(sample.properties.events.items.$ref, '#/components/schemas/DaemonMetricEventV5')
   assertEquals(event.required, ['eventId', 'at', 'kind', 'severity'])
-  assertEquals([...event.properties.kind!.enum!].sort(), [...METRIC_EVENT_KINDS_V4].sort())
+  assertEquals([...event.properties.kind!.enum!].sort(), [...METRIC_EVENT_KINDS_V5].sort())
   assertEquals(event.properties.severity!.enum, ['info', 'warning', 'critical'])
 })
 
-test('cpuDetail documents its scalar fields plus a required hotspots array scoped to cpuHotspot', () => {
-  assertEquals(sample.properties.cpuDetail.required, ['hotspots'])
-  assertEquals(
-    Object.keys(sample.properties.cpuDetail.properties).sort(),
-    ['hotspots', ...fieldNamesForScope('cpuDetail')].sort()
-  )
-  const hotspotItems = sample.properties.cpuDetail.properties.hotspots.items
-  assertEquals(hotspotItems.required, ['coreId'])
-  assertEquals(
-    Object.keys(hotspotItems.properties).sort(),
-    ['coreId', ...fieldNamesForScope('cpuHotspot')].sort()
-  )
-})
-
-test('memoryDetail documents exactly its flat scalar field set (no entity id — host-singleton)', () => {
-  assertEquals(
-    Object.keys(sample.properties.memoryDetail.properties).sort(),
-    fieldNamesForScope('memoryDetail')
-  )
-})
-
-test('cpuCoreLive documents one entry per online logical core, scoped to cpuCore', () => {
-  const items = sample.properties.cpuCoreLive.items
-  assertEquals(items.required, ['coreId'])
-  assertEquals(
-    Object.keys(items.properties).sort(),
-    ['coreId', ...fieldNamesForScope('cpuCore')].sort()
-  )
-})
-
-test('metrics path describes the v4 entity-scoped ingest sample', () => {
+test('metrics path describes the v5 entity-scoped ingest sample', () => {
   const path = metricsPaths['/api/daemon/v1/metrics'] as {
     post: { description: string }
   }
-  assertStringIncludes(path.post.description, 'v4 entity-scoped metrics sample')
+  assertStringIncludes(path.post.description, 'v5 entity-scoped metrics sample')
 })

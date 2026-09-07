@@ -401,6 +401,16 @@ export const server = pgTable(
     osPrettyName: varchar('os_pretty_name', { length: 255 }),
     osArchitecture: varchar('os_architecture', { length: 64 }),
     /**
+     * Machine class for metrics capability-plan resolution (`physical` |
+     * `virtual`). NULL means undeclared: ingest infers it from the recorded
+     * topology each sample and writes back `physical` once the host proves
+     * it by discovering hardware sensors — never `virtual`, which is only
+     * absence of proof and would stop a sensor found by a later topology
+     * generation from promoting the host. `PATCH /servers/:id` pins either
+     * value (or clears the pin with null).
+     */
+    machineClass: text('machine_class'),
+    /**
      * Daemon-reported host timezone (IANA). Operator override lives on
      * `server.options.timezone`.
      */
@@ -450,6 +460,7 @@ export const server = pgTable(
       foreignColumns: [organization.id],
       name: 'server_organization_id_organization_id_fk',
     }).onDelete('restrict'),
+    check('server_machine_class_check', sql`${table.machineClass} IN ('physical', 'virtual')`),
   ]
 )
 /**
@@ -3901,14 +3912,14 @@ export const topologyGeneration = pgTable(
 )
 
 /**
- * Append-only history of resolved v4 metrics-capability-plan generations
+ * Append-only history of resolved v5 metrics-capability-plan generations
  * (see `../../daemon/metrics/capability-plan.ts`) — one row per
  * `(server, generation)`, written only when the *resolved* plan for a server
  * actually changes (`plan_hash` differs from the last recorded row), never
  * on every sample. Mirrors `topologyGeneration`'s shape/spirit, scoped to
  * capability-plan config instead of daemon-reported topology.
  *
- * `plan` is the full resolved `MetricsCapabilityPlanV4` snapshot, stored for
+ * `plan` is the full resolved `MetricsCapabilityPlanV5` snapshot, stored for
  * audit/debugging; `plan_hash` is the cheap "did it change" comparison key.
  * jsonb, so no migration for the plan shape.
  *

@@ -37,7 +37,7 @@ import {
 } from './control-plane-monitor.ts'
 import {
   type AnalyticsEngineDatasetLike,
-  resolveServerMetricsStoreV4,
+  resolveServerMetricsStoreV5,
 } from '../metrics/store-selection-workers.ts'
 import { setServerStatusEventSink } from '../metrics/status-events.ts'
 import type {
@@ -378,10 +378,10 @@ export class DaemonCellObject {
     // Write-only status sink for connect/disconnect projection — pure
     // construction, zero I/O, zero SQLite, no alarm (hibernation-safe).
     setServerStatusEventSink(
-      resolveServerMetricsStoreV4({
+      resolveServerMetricsStoreV5({
         runtime: 'workers',
-        analyticsEngine: (env as { SERVER_METRICS_V4?: AnalyticsEngineDatasetLike })
-          .SERVER_METRICS_V4,
+        analyticsEngine: (env as { SERVER_METRICS_V5?: AnalyticsEngineDatasetLike })
+          .SERVER_METRICS_V5,
       })
     )
     this.#ctx.setWebSocketAutoResponse(

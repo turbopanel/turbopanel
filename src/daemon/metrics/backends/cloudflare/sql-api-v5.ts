@@ -1,13 +1,13 @@
 /**
- * Query-side SQL primitives for the v4 Analytics Engine dataset
- * (`turbopanel_server_metrics_v4` — see `field-map-v4.ts`).
+ * Query-side SQL primitives for the v5 Analytics Engine dataset
+ * (`turbopanel_server_metrics_v5` — see `field-map-v5.ts`).
  *
  * Host-level aggregates (`host.system` / `host.io`) are simple: every sample
  * writes exactly one `host.system` row and one `host.io` row — unlike v3's
  * `core`/`extended`/`sensors`/`traffic` split, there is no physical-row
  * recombination needed to read a host metric.
  *
- * Per-entity series (`queryEntitySeriesViaSqlApiV4`) for the paged
+ * Per-entity series (`queryEntitySeriesViaSqlApiV5`) for the paged
  * `gpu`/`network`/`filesystem`/`block`/`hardware.physical` families are
  * harder, because a page's blob10 identity list (which entities occupy which
  * double-slot "position") can differ across time within the same queried
@@ -18,7 +18,7 @@
  * that position's raw (not-yet-divided) aggregate pieces, grouped by
  * `(bucket, blob10)` — one row per distinct page composition seen in a
  * bucket. The result rows are then walked in TypeScript
- * (`parsePagedEntitySeriesRowsV4`): each row's `blob10` is split to learn
+ * (`parsePagedEntitySeriesRowsV5`): each row's `blob10` is split to learn
  * which requested entity sits at which position in *that* row, and the raw
  * pieces for that position are accumulated per `(bucket, entityId, field)`
  * across every contributing row before the final ratio/max/last is resolved
@@ -27,101 +27,98 @@
  * `managed.ingress` / `managed.database_proxy` need none of this: they write
  * one unpaged row per entity with blob10 already equal to the entity's own
  * identity (`sourceId`, distinct per source instance even when two sources
- * share the same `sourceKind`), so `queryEntitySeriesViaSqlApiV4` groups
+ * share the same `sourceKind`), so `queryEntitySeriesViaSqlApiV5` groups
  * those two families directly by `(bucket, blob10)` with no position math at
  * all.
  */
 
 import {
-  HOST_METRICS_METRIC_DESCRIPTORS_V4,
-  type HostedFamilyV4,
-  type HostMetricsMetricDescriptorV4,
-  type MetricEntityScopeV4,
-} from '../../metric-descriptors-v4.ts'
+  HOST_METRICS_METRIC_DESCRIPTORS_V5,
+  type HostedFamilyV5,
+  type HostMetricsMetricDescriptorV5,
+  type MetricEntityScopeV5,
+} from '../../metric-descriptors-v5.ts'
 import type {
-  CpuHotspotPointV4,
-  EntityIdsSeenQueryV4,
-  EntityIdsSeenResultV4,
-  EntitySeriesEntityResultV4,
-  EntitySeriesPointV4,
-  EntitySeriesQueryV4,
-  EntitySeriesResultV4,
-  FleetHostSnapshotQueryV4,
-  FleetHostSnapshotResultV4,
-  FleetHostSnapshotServerV4,
-  HostSeriesQueryV4,
-  HostSeriesResultV4,
-  HostSummaryQueryV4,
-  HostSummaryResultV4,
-  MetricEventsQueryV4,
-  MetricEventsResultV4,
-  PerEntityHostedFamilyV4,
+  EntityIdsSeenQueryV5,
+  EntityIdsSeenResultV5,
+  EntitySeriesEntityResultV5,
+  EntitySeriesPointV5,
+  EntitySeriesQueryV5,
+  EntitySeriesResultV5,
+  FleetHostSnapshotQueryV5,
+  FleetHostSnapshotResultV5,
+  FleetHostSnapshotServerV5,
+  HostSeriesQueryV5,
+  HostSeriesResultV5,
+  HostSummaryQueryV5,
+  HostSummaryResultV5,
+  MetricEventsQueryV5,
+  MetricEventsResultV5,
+  PerEntityHostedFamilyV5,
   ServerStatusTransitionReason,
   SlotMapping,
   StatusHistoryEvent,
   StatusHistoryQuery,
   StatusHistoryResult,
-} from '../../types-v4.ts'
-import type { MetricEventKindV4, MetricEventSeverityV4, MetricEventV4 } from '../../contract-v4.ts'
+} from '../../types-v5.ts'
+import type { MetricEventKindV5, MetricEventSeverityV5, MetricEventV5 } from '../../contract-v5.ts'
 import { computeStatusUptime } from '../../query/uptime.ts'
 import {
   computeSeriesGapCount,
   defaultExpectedSamplesPerBucket,
-  finalizeHostSeriesResultV4,
-} from '../../query/series-response-v4.ts'
+  finalizeHostSeriesResultV5,
+} from '../../query/series-response-v5.ts'
 import {
-  AE_V4_BLOB_EVENT_ENTITY_ID_INDEX,
-  AE_V4_BLOB_EVENT_ID_INDEX,
-  AE_V4_BLOB_EVENT_PAYLOAD_INDEX,
-  AE_V4_BLOB_FAMILY_INDEX,
-  AE_V4_BLOB_KIND_INDEX,
-  AE_V4_BLOB_SCHEMA_VERSION_INDEX,
-  AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX,
-  AE_V4_BLOB_TOPOLOGY_GENERATION_INDEX,
-  AE_V4_DATASET_NAME,
-  AE_V4_FAMILY_CPU_DETAIL,
-  AE_V4_FAMILY_HOST_IO,
-  AE_V4_FAMILY_HOST_SYSTEM,
-  AE_V4_FAMILY_MEMORY_DETAIL,
-  AE_V4_INDEX_SERVER_ID_COLUMN,
-  AE_V4_KIND_EVENT,
-  AE_V4_KIND_METRICS,
-  AE_V4_KIND_STATUS,
-  AE_V4_TIMESTAMP_COLUMN,
-  blobColumnV4,
-  CPU_DETAIL_HOTSPOT_FIELD_ORDER,
-  CPU_DETAIL_HOTSPOT_SLOT_COUNT,
-  doubleColumnV4,
+  AE_V5_BLOB_EVENT_ENTITY_ID_INDEX,
+  AE_V5_BLOB_EVENT_ID_INDEX,
+  AE_V5_BLOB_EVENT_PAYLOAD_INDEX,
+  AE_V5_BLOB_FAMILY_INDEX,
+  AE_V5_BLOB_KIND_INDEX,
+  AE_V5_BLOB_SCHEMA_VERSION_INDEX,
+  AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX,
+  AE_V5_BLOB_TOPOLOGY_GENERATION_INDEX,
+  AE_V5_DATASET_NAME,
+  AE_V5_FAMILY_CPU_DETAIL,
+  AE_V5_FAMILY_HOST_IO,
+  AE_V5_FAMILY_HOST_SYSTEM,
+  AE_V5_FAMILY_MEMORY_DETAIL,
+  AE_V5_INDEX_SERVER_ID_COLUMN,
+  AE_V5_KIND_EVENT,
+  AE_V5_KIND_METRICS,
+  AE_V5_KIND_STATUS,
+  AE_V5_TIMESTAMP_COLUMN,
+  blobColumnV5,
+  doubleColumnV5,
   doubleIndexForHostField,
   entitiesPerPage,
   HOST_IO_EMBEDDED_NIC_FIELDS,
   hostIoEmbeddedNicDoubleIndex,
-  intervalSecondsColumnV4,
-  PER_ENTITY_FIELD_ORDER_V4,
-  SINGLE_ROW_FIELD_ORDER_V4,
+  intervalSecondsColumnV5,
+  PER_ENTITY_FIELD_ORDER_V5,
+  SINGLE_ROW_FIELD_ORDER_V5,
   slotDoubleIndex,
-  statusConnectedColumnV4,
-  statusReasonColumnV4,
-} from './field-map-v4.ts'
+  statusConnectedColumnV5,
+  statusReasonColumnV5,
+} from './field-map-v5.ts'
 
-export { AE_V4_DATASET_NAME }
+export { AE_V5_DATASET_NAME }
 
 /** Schema versions this read path understands (positional semantics must match). */
-export const AE_V4_SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [4]
+export const AE_V5_SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [5]
 
 /** Escape a string literal for AE SQL (single-quote doubling). Same idiom as v3's `quoteSqlString`. */
-export function quoteSqlStringV4(value: string): string {
+export function quoteSqlStringV5(value: string): string {
   return `'${value.replaceAll("'", "''")}'`
 }
 
-function assertSafeDatasetNameV4(dataset: string): string {
-  if (dataset !== AE_V4_DATASET_NAME && !/^[a-zA-Z_]\w*$/.test(dataset)) {
-    throw new TypeError(`invalid AE v4 dataset name: ${dataset}`)
+function assertSafeDatasetNameV5(dataset: string): string {
+  if (dataset !== AE_V5_DATASET_NAME && !/^[a-zA-Z_]\w*$/.test(dataset)) {
+    throw new TypeError(`invalid AE v5 dataset name: ${dataset}`)
   }
   return dataset
 }
 
-function assertPositiveIntV4(label: string, value: number): number {
+function assertPositiveIntV5(label: string, value: number): number {
   if (!Number.isInteger(value) || value <= 0) {
     throw new TypeError(`${label} must be a positive integer, got: ${value}`)
   }
@@ -129,7 +126,7 @@ function assertPositiveIntV4(label: string, value: number): number {
 }
 
 /** Accept only string serverIds from AE rows — never stringify objects. Local to this module (not exported by `sql-api.ts`). */
-function parseAeServerIdV4(raw: unknown): string | null {
+function parseAeServerIdV5(raw: unknown): string | null {
   if (typeof raw !== 'string') return null
   const id = raw.trim()
   return id.length > 0 ? id : null
@@ -141,7 +138,7 @@ function parseAeServerIdV4(raw: unknown): string | null {
 // These are backend/version-agnostic (raw HTTP client over the Cloudflare
 // Analytics Engine SQL API, generic `{ timestamp, connected, reason }` status
 // rows shared with the DuckDB backend's own status query) — this module is
-// their sole surviving home after the v3 cutover; nothing here is v4-shaped.
+// their sole surviving home after the v3 cutover; nothing here is v5-shaped.
 // ---------------------------------------------------------------------------
 
 /**
@@ -183,7 +180,7 @@ export function assertRange(from: Date, to: Date, maxRangeSeconds: number): void
 export type CloudflareAnalyticsSqlConfig = {
   accountId: string
   apiToken: string
-  /** Dataset / table name (defaults to `AE_V4_DATASET_NAME`). */
+  /** Dataset / table name (defaults to `AE_V5_DATASET_NAME`). */
   dataset?: string
   /**
    * Max allowed `to - from` span in seconds.
@@ -196,23 +193,23 @@ export type CloudflareAnalyticsSqlConfig = {
   signal?: AbortSignal
 }
 
-/** SQL payload nested under the Cloudflare v4 `result` field. */
+/** SQL payload nested under the Cloudflare v5 `result` field. */
 export type AnalyticsEngineSqlResult = {
   meta?: Array<{ name: string; type: string }>
   data: Array<Record<string, unknown>>
   rows?: number
 }
 
-type CloudflareV4Error =
+type CloudflareV5Error =
   | {
       code?: number
       message?: string
     }
   | string
 
-type CloudflareV4SqlEnvelope = {
+type CloudflareV5SqlEnvelope = {
   success: boolean
-  errors?: CloudflareV4Error[]
+  errors?: CloudflareV5Error[]
   messages?: unknown[]
   result?: {
     meta?: Array<{ name: string; type: string }>
@@ -226,7 +223,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function formatCloudflareV4Error(err: CloudflareV4Error): string {
+function formatCloudflareV5Error(err: CloudflareV5Error): string {
   if (typeof err === 'string') return err.trim()
   const msg = err.message?.trim()
   if (msg) return msg
@@ -235,10 +232,10 @@ function formatCloudflareV4Error(err: CloudflareV4Error): string {
 }
 
 function collectAeSqlFailureDetail(
-  envelope: CloudflareV4SqlEnvelope & Record<string, unknown>
+  envelope: CloudflareV5SqlEnvelope & Record<string, unknown>
 ): string {
   const messages = (envelope.errors ?? [])
-    .map(formatCloudflareV4Error)
+    .map(formatCloudflareV5Error)
     .filter((msg) => msg.length > 0)
   const result = envelope.result
   if (isPlainObject(result) && typeof result.error === 'string' && result.error.trim()) {
@@ -251,7 +248,7 @@ function collectAeSqlFailureDetail(
 }
 
 function unwrapAeSqlSuccessResult(
-  result: NonNullable<CloudflareV4SqlEnvelope['result']>
+  result: NonNullable<CloudflareV5SqlEnvelope['result']>
 ): AnalyticsEngineSqlResult {
   if (typeof result.error === 'string' && result.error.length > 0) {
     throw new Error(`AE SQL query error: ${result.error}`)
@@ -274,17 +271,17 @@ function unwrapAeSqlSuccessResult(
   }
 }
 
-export function parseCloudflareV4SqlResponse(body: unknown): AnalyticsEngineSqlResult {
+export function parseCloudflareV5SqlResponse(body: unknown): AnalyticsEngineSqlResult {
   if (!isPlainObject(body)) {
     throw new TypeError('AE SQL response is not a JSON object')
   }
-  const envelope = body as CloudflareV4SqlEnvelope & {
+  const envelope = body as CloudflareV5SqlEnvelope & {
     data?: Array<Record<string, unknown>>
     meta?: Array<{ name: string; type: string }>
     rows?: number
   }
 
-  // ClickHouse FORMAT JSON / bare SQL result — no v4 `success` field.
+  // ClickHouse FORMAT JSON / bare SQL result — no v5 `success` field.
   if (envelope.success === undefined && Array.isArray(envelope.data)) {
     return {
       meta: envelope.meta,
@@ -318,7 +315,7 @@ async function executeSql(
   if (!token) {
     throw new TypeError('TURBOPANEL_ANALYTICS_ENGINE_API_TOKEN is required for AE SQL')
   }
-  const url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(
+  const url = `https://api.cloudflare.com/client/v5/accounts/${encodeURIComponent(
     accountId
   )}/analytics_engine/sql`
   const fetchFn = config.fetch ?? fetch
@@ -335,7 +332,7 @@ async function executeSql(
     const body = await response.text()
     throw new Error(`AE SQL HTTP ${response.status}: ${body.slice(0, 500)}`)
   }
-  return parseCloudflareV4SqlResponse(await response.json())
+  return parseCloudflareV5SqlResponse(await response.json())
 }
 
 /**
@@ -394,7 +391,7 @@ export function quoteServerIdInList(serverIds: readonly string[]): string {
     const id = assertSafeServerId(raw)
     if (seen.has(id)) continue
     seen.add(id)
-    quoted.push(quoteSqlStringV4(id))
+    quoted.push(quoteSqlStringV5(id))
   }
   if (quoted.length === 0) {
     throw new TypeError('serverIds must be non-empty for fleet snapshot SQL')
@@ -486,7 +483,7 @@ export const AE_LIVENESS_WINDOW_SECONDS = 180
 export const AE_LIVENESS_QUERY_TIMEOUT_MS = 5_000
 
 /**
- * Fleet-wide v4 AE SQL: serverIds that emitted a `host.system` row within
+ * Fleet-wide v5 AE SQL: serverIds that emitted a `host.system` row within
  * `sinceSeconds`. Scoped to `host.system` (the universal-baseline family
  * every sample writes exactly once) so each logical sample is one row — no
  * v3-style physical-part recombination needed. No per-server filter — one
@@ -494,25 +491,25 @@ export const AE_LIVENESS_QUERY_TIMEOUT_MS = 5_000
  * overflow servers are simply treated as "suspect" by the offline sweep
  * (probed via `checkLiveness` as today) — correctness is preserved.
  */
-export function buildRecentlyActiveServerIdsSqlV4(opts: {
+export function buildRecentlyActiveServerIdsSqlV5(opts: {
   sinceSeconds: number
   nowMs?: number
   dataset?: string
 }): string {
-  const sinceSeconds = assertPositiveIntV4('sinceSeconds', opts.sinceSeconds)
-  const dataset = assertSafeDatasetNameV4(opts.dataset ?? AE_V4_DATASET_NAME)
+  const sinceSeconds = assertPositiveIntV5('sinceSeconds', opts.sinceSeconds)
+  const dataset = assertSafeDatasetNameV5(opts.dataset ?? AE_V5_DATASET_NAME)
   const fromUnix = Math.floor((opts.nowMs ?? Date.now()) / 1000) - sinceSeconds
-  const discriminators = hostMetricsV4DiscriminatorPredicates()
+  const discriminators = hostMetricsV5DiscriminatorPredicates()
 
   return [
     'SELECT',
-    `  ${AE_V4_INDEX_SERVER_ID_COLUMN} AS server_id,`,
-    `  max(${AE_V4_TIMESTAMP_COLUMN}) AS latest_at`,
+    `  ${AE_V5_INDEX_SERVER_ID_COLUMN} AS server_id,`,
+    `  max(${AE_V5_TIMESTAMP_COLUMN}) AS latest_at`,
     `FROM ${dataset}`,
     `WHERE ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${familyPredicateV4(AE_V4_FAMILY_HOST_SYSTEM)}`,
-    `  AND ${AE_V4_TIMESTAMP_COLUMN} >= toDateTime(${fromUnix})`,
+    `  AND ${familyPredicateV5(AE_V5_FAMILY_HOST_SYSTEM)}`,
+    `  AND ${AE_V5_TIMESTAMP_COLUMN} >= toDateTime(${fromUnix})`,
     `GROUP BY server_id`,
   ].join('\n')
 }
@@ -522,19 +519,19 @@ export function buildRecentlyActiveServerIdsSqlV4(opts: {
  * serverId → latest sample timestamp (epoch ms). Empty / unparseable rows are
  * skipped. Callers treat a thrown error as "AE unavailable".
  */
-export async function queryRecentlyActiveServerIdsV4(
+export async function queryRecentlyActiveServerIdsV5(
   config: CloudflareAnalyticsSqlConfig,
   opts: { sinceSeconds: number; signal?: AbortSignal }
 ): Promise<Map<string, number>> {
-  const dataset = config.dataset ?? AE_V4_DATASET_NAME
-  const sql = buildRecentlyActiveServerIdsSqlV4({
+  const dataset = config.dataset ?? AE_V5_DATASET_NAME
+  const sql = buildRecentlyActiveServerIdsSqlV5({
     sinceSeconds: opts.sinceSeconds,
     dataset,
   })
   const result = await executeSql({ ...config, signal: opts.signal }, sql)
   const out = new Map<string, number>()
   for (const row of result.data) {
-    const serverId = parseAeServerIdV4(row.server_id)
+    const serverId = parseAeServerIdV5(row.server_id)
     if (serverId === null) continue
     const latestAtMs = parseAeLatestAtMs(row.latest_at)
     if (latestAtMs === null) continue
@@ -544,49 +541,49 @@ export async function queryRecentlyActiveServerIdsV4(
 }
 
 /**
- * Row-kind + schema-version discriminators for the shared v4 dataset
- * (`kind` is `"metrics"` / `"event"` / `"status"` — see `field-map-v4.ts`'s
- * `AE_V4_BLOB_KIND_INDEX`).
+ * Row-kind + schema-version discriminators for the shared v5 dataset
+ * (`kind` is `"metrics"` / `"event"` / `"status"` — see `field-map-v5.ts`'s
+ * `AE_V5_BLOB_KIND_INDEX`).
  */
-export function v4EventDiscriminatorPredicates(kind: string): string[] {
-  const kindCol = blobColumnV4(AE_V4_BLOB_KIND_INDEX)
-  const schemaVersionCol = blobColumnV4(AE_V4_BLOB_SCHEMA_VERSION_INDEX)
-  const schemaVersions = AE_V4_SUPPORTED_SCHEMA_VERSIONS.map((version) =>
-    quoteSqlStringV4(String(version))
+export function v5EventDiscriminatorPredicates(kind: string): string[] {
+  const kindCol = blobColumnV5(AE_V5_BLOB_KIND_INDEX)
+  const schemaVersionCol = blobColumnV5(AE_V5_BLOB_SCHEMA_VERSION_INDEX)
+  const schemaVersions = AE_V5_SUPPORTED_SCHEMA_VERSIONS.map((version) =>
+    quoteSqlStringV5(String(version))
   )
   const schemaPredicate =
     schemaVersions.length === 1
       ? `${schemaVersionCol} = ${schemaVersions[0]}`
       : `${schemaVersionCol} IN (${schemaVersions.join(', ')})`
-  return [`${kindCol} = ${quoteSqlStringV4(kind)}`, schemaPredicate]
+  return [`${kindCol} = ${quoteSqlStringV5(kind)}`, schemaPredicate]
 }
 
 /** `"metrics"`-kind row discriminators (`blob1 = 'metrics'` + schema version). */
-export function hostMetricsV4DiscriminatorPredicates(): string[] {
-  return v4EventDiscriminatorPredicates(AE_V4_KIND_METRICS)
+export function hostMetricsV5DiscriminatorPredicates(): string[] {
+  return v5EventDiscriminatorPredicates(AE_V5_KIND_METRICS)
 }
 
 /** `"event"`-kind row discriminators. */
-export function eventV4DiscriminatorPredicates(): string[] {
-  return v4EventDiscriminatorPredicates(AE_V4_KIND_EVENT)
+export function eventV5DiscriminatorPredicates(): string[] {
+  return v5EventDiscriminatorPredicates(AE_V5_KIND_EVENT)
 }
 
 /** `"status"`-kind row discriminators. */
-export function statusV4DiscriminatorPredicates(): string[] {
-  return v4EventDiscriminatorPredicates(AE_V4_KIND_STATUS)
+export function statusV5DiscriminatorPredicates(): string[] {
+  return v5EventDiscriminatorPredicates(AE_V5_KIND_STATUS)
 }
 
 /** `blob2 = '<family>'` predicate scoping an aggregate to one hosted family. */
-export function familyPredicateV4(family: HostedFamilyV4): string {
-  return `${blobColumnV4(AE_V4_BLOB_FAMILY_INDEX)} = ${quoteSqlStringV4(family)}`
+export function familyPredicateV5(family: HostedFamilyV5): string {
+  return `${blobColumnV5(AE_V5_BLOB_FAMILY_INDEX)} = ${quoteSqlStringV5(family)}`
 }
 
 /**
- * AE SQL literal matching write-path `AE_V4_MISSING_METRIC_SENTINEL`
+ * AE SQL literal matching write-path `AE_V5_MISSING_METRIC_SENTINEL`
  * (`-1e308`). AE SQL docs only list plain decimal literals — not scientific
  * notation — so `pow(10, 308)` stands in, same idiom as v3.
  */
-export function aeV4MissingMetricSentinelSql(): string {
+export function aeV5MissingMetricSentinelSql(): string {
   return '-pow(10, 308)'
 }
 
@@ -595,11 +592,11 @@ export function aeV4MissingMetricSentinelSql(): string {
  * Threshold, not equality: the SQL-side sentinel is `-pow(10, 308)` and must
  * match after float round-trips. Same threshold as v3.
  */
-const AE_V4_SENTINEL_STRIP_THRESHOLD = -1e307
+const AE_V5_SENTINEL_STRIP_THRESHOLD = -1e307
 
 /** Report a still-sentinel result as missing, never a number. */
-export function stripAeV4Sentinel(value: number): number | null {
-  return value <= AE_V4_SENTINEL_STRIP_THRESHOLD ? null : value
+export function stripAeV5Sentinel(value: number): number | null {
+  return value <= AE_V5_SENTINEL_STRIP_THRESHOLD ? null : value
 }
 
 /**
@@ -611,14 +608,14 @@ export function stripAeV4Sentinel(value: number): number | null {
  * Unlike v3, no cross-row recombination is needed first — `family` already
  * identifies the one row per sample that carries this column.
  */
-export function weightedAvgExpressionForColumnV4(
-  family: HostedFamilyV4,
+export function weightedAvgExpressionForColumnV5(
+  family: HostedFamilyV5,
   doubleIndex: number
 ): string {
-  const col = doubleColumnV4(doubleIndex)
-  const familyPred = familyPredicateV4(family)
-  const sentinel = aeV4MissingMetricSentinelSql()
-  const weight = `${intervalSecondsColumnV4()} * _sample_interval`
+  const col = doubleColumnV5(doubleIndex)
+  const familyPred = familyPredicateV5(family)
+  const sentinel = aeV5MissingMetricSentinelSql()
+  const weight = `${intervalSecondsColumnV5()} * _sample_interval`
   const numerator = `SUM(if(${familyPred}, if(${col} = ${sentinel}, 0.0, ${col} * ${weight}), 0.0))`
   const denominator = `SUM(if(${familyPred}, if(${col} = ${sentinel}, 0.0, ${weight} * 1.0), 0.0))`
   return `${numerator} / ${denominator}`
@@ -630,18 +627,18 @@ export function weightedAvgExpressionForColumnV4(
  * `intervalSeconds` (double20), since the delta already totals its own
  * collection interval. Same rationale as v3's `sum` aggregation.
  */
-export function deltaSumExpressionForColumnV4(family: HostedFamilyV4, doubleIndex: number): string {
-  const col = doubleColumnV4(doubleIndex)
-  const familyPred = familyPredicateV4(family)
-  const sentinel = aeV4MissingMetricSentinelSql()
+export function deltaSumExpressionForColumnV5(family: HostedFamilyV5, doubleIndex: number): string {
+  const col = doubleColumnV5(doubleIndex)
+  const familyPred = familyPredicateV5(family)
+  const sentinel = aeV5MissingMetricSentinelSql()
   return `SUM(if(${familyPred}, if(${col} = ${sentinel}, 0.0, ${col} * _sample_interval), 0.0))`
 }
 
 /** `max` aggregate for one host.system/host.io column, scoped to its family. */
-export function maxValueExpressionForColumnV4(family: HostedFamilyV4, doubleIndex: number): string {
-  const col = doubleColumnV4(doubleIndex)
-  const familyPred = familyPredicateV4(family)
-  const sentinel = aeV4MissingMetricSentinelSql()
+export function maxValueExpressionForColumnV5(family: HostedFamilyV5, doubleIndex: number): string {
+  const col = doubleColumnV5(doubleIndex)
+  const familyPred = familyPredicateV5(family)
+  const sentinel = aeV5MissingMetricSentinelSql()
   return `MAX(if(${familyPred}, ${col}, ${sentinel}))`
 }
 
@@ -650,15 +647,15 @@ export function maxValueExpressionForColumnV4(family: HostedFamilyV4, doubleInde
  * row's own ingestion timestamp, with sentinel/other-family rows demoted to
  * ordering key `0` so any real observation always outranks them.
  */
-export function lastValueExpressionForColumnV4(
-  family: HostedFamilyV4,
+export function lastValueExpressionForColumnV5(
+  family: HostedFamilyV5,
   doubleIndex: number
 ): string {
-  const col = doubleColumnV4(doubleIndex)
-  const familyPred = familyPredicateV4(family)
-  const sentinel = aeV4MissingMetricSentinelSql()
+  const col = doubleColumnV5(doubleIndex)
+  const familyPred = familyPredicateV5(family)
+  const sentinel = aeV5MissingMetricSentinelSql()
   const rawValue = `if(${familyPred}, ${col}, ${sentinel})`
-  const tsExpr = `toUnixTimestamp(${AE_V4_TIMESTAMP_COLUMN})`
+  const tsExpr = `toUnixTimestamp(${AE_V5_TIMESTAMP_COLUMN})`
   return `argMax(${rawValue}, if(${rawValue} = ${sentinel}, ${tsExpr} * 0, ${tsExpr}))`
 }
 
@@ -667,53 +664,53 @@ export function lastValueExpressionForColumnV4(
  * every sample always writes exactly one `host.system` row, so this can
  * never double-count the way counting more than one v3 part would.
  */
-export function sampleCountExpressionV4(): string {
-  return `SUM(if(${familyPredicateV4(AE_V4_FAMILY_HOST_SYSTEM)}, _sample_interval * 1.0, 0.0))`
+export function sampleCountExpressionV5(): string {
+  return `SUM(if(${familyPredicateV5(AE_V5_FAMILY_HOST_SYSTEM)}, _sample_interval * 1.0, 0.0))`
 }
 
 /** Latest observed sample timestamp (unix seconds) for a bucket/group, anchored on `host.system`. */
-export function latestAtExpressionV4(): string {
-  return `MAX(if(${familyPredicateV4(
-    AE_V4_FAMILY_HOST_SYSTEM
-  )}, toUnixTimestamp(${AE_V4_TIMESTAMP_COLUMN}), 0))`
+export function latestAtExpressionV5(): string {
+  return `MAX(if(${familyPredicateV5(
+    AE_V5_FAMILY_HOST_SYSTEM
+  )}, toUnixTimestamp(${AE_V5_TIMESTAMP_COLUMN}), 0))`
 }
 
 /** Canonical half-open `[fromUnix, toUnix)` time-range predicate — matches v3 and `computeSeriesGapCount`'s coverage grid. */
-export function timeRangePredicateV4(fromUnix: number, toUnix: number): string {
-  return `${AE_V4_TIMESTAMP_COLUMN} >= toDateTime(${fromUnix}) AND ${AE_V4_TIMESTAMP_COLUMN} < toDateTime(${toUnix})`
+export function timeRangePredicateV5(fromUnix: number, toUnix: number): string {
+  return `${AE_V5_TIMESTAMP_COLUMN} >= toDateTime(${fromUnix}) AND ${AE_V5_TIMESTAMP_COLUMN} < toDateTime(${toUnix})`
 }
 
-/** `index1 = '<serverId>'` predicate for the AE v4 dataset. */
-export function serverIdPredicateV4(serverId: string): string {
-  return `${AE_V4_INDEX_SERVER_ID_COLUMN} = ${quoteSqlStringV4(serverId)}`
+/** `index1 = '<serverId>'` predicate for the AE v5 dataset. */
+export function serverIdPredicateV5(serverId: string): string {
+  return `${AE_V5_INDEX_SERVER_ID_COLUMN} = ${quoteSqlStringV5(serverId)}`
 }
 
 /**
  * Predicate matching a paged row whose blob10 identity list (comma-joined
- * entity ids, same order as the page's doubles — see `field-map-v4.ts`'s
+ * entity ids, same order as the page's doubles — see `field-map-v5.ts`'s
  * module doc comment) contains `entityId`, whether that id is the row's only
  * entity or one of several sharing the page. AE SQL has no documented array
  * function to lean on here, so this matches the CSV list positionally
  * (exact single-id match, or a comma-delimited substring match at either
  * edge or in the middle) rather than parsing it.
  */
-export function entityIdInPageIdentityPredicateV4(entityId: string): string {
-  const col = blobColumnV4(AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX)
-  const id = quoteSqlStringV4(entityId)
-  const prefix = quoteSqlStringV4(`${entityId},`)
-  const suffix = quoteSqlStringV4(`,${entityId}`)
-  const middle = quoteSqlStringV4(`,${entityId},`)
+export function entityIdInPageIdentityPredicateV5(entityId: string): string {
+  const col = blobColumnV5(AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX)
+  const id = quoteSqlStringV5(entityId)
+  const prefix = quoteSqlStringV5(`${entityId},`)
+  const suffix = quoteSqlStringV5(`,${entityId}`)
+  const middle = quoteSqlStringV5(`,${entityId},`)
   return `(${col} = ${id} OR ${col} LIKE CONCAT(${prefix}, '%') OR ${col} LIKE CONCAT('%', ${suffix}) OR ${col} LIKE CONCAT('%', ${middle}, '%'))`
 }
 
-export { assertSafeDatasetNameV4 }
+export { assertSafeDatasetNameV5 }
 
 // ---------------------------------------------------------------------------
 // Status history — see the module doc comment for why this query is in
 // scope while the paged-family series/summary queries are not.
 // ---------------------------------------------------------------------------
 
-function buildStatusEventsSqlV4(
+function buildStatusEventsSqlV5(
   input: StatusHistoryQuery,
   opts: { dataset: string; maxRangeSeconds: number }
 ): string {
@@ -721,27 +718,27 @@ function buildStatusEventsSqlV4(
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = statusV4DiscriminatorPredicates()
-  const connectedCol = statusConnectedColumnV4()
-  const reasonCol = statusReasonColumnV4()
+  const discriminators = statusV5DiscriminatorPredicates()
+  const connectedCol = statusConnectedColumnV5()
+  const reasonCol = statusReasonColumnV5()
   const limit = MAX_STATUS_EVENTS + 1
 
   return [
     'SELECT',
-    `  ${AE_V4_TIMESTAMP_COLUMN} AS timestamp,`,
+    `  ${AE_V5_TIMESTAMP_COLUMN} AS timestamp,`,
     `  ${connectedCol} AS connected,`,
     `  ${reasonCol} AS reason`,
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${AE_V4_TIMESTAMP_COLUMN} >= toDateTime(${fromUnix})`,
-    `  AND ${AE_V4_TIMESTAMP_COLUMN} < toDateTime(${toUnix})`,
-    `ORDER BY ${AE_V4_TIMESTAMP_COLUMN} ASC`,
+    `  AND ${AE_V5_TIMESTAMP_COLUMN} >= toDateTime(${fromUnix})`,
+    `  AND ${AE_V5_TIMESTAMP_COLUMN} < toDateTime(${toUnix})`,
+    `ORDER BY ${AE_V5_TIMESTAMP_COLUMN} ASC`,
     `LIMIT ${limit}`,
   ].join('\n')
 }
@@ -750,7 +747,7 @@ function buildStatusEventsSqlV4(
  * State just before `from` — `ORDER BY … DESC LIMIT 1` rather than `argMax`,
  * same rationale as v3's `buildStatusPriorStateSql`.
  */
-function buildStatusPriorStateSqlV4(
+function buildStatusPriorStateSqlV5(
   input: StatusHistoryQuery,
   opts: { dataset: string; maxRangeSeconds: number }
 ): string {
@@ -758,45 +755,45 @@ function buildStatusPriorStateSqlV4(
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
-  const discriminators = statusV4DiscriminatorPredicates()
-  const connectedCol = statusConnectedColumnV4()
-  const reasonCol = statusReasonColumnV4()
+  const discriminators = statusV5DiscriminatorPredicates()
+  const connectedCol = statusConnectedColumnV5()
+  const reasonCol = statusReasonColumnV5()
 
   return [
     'SELECT',
-    `  ${AE_V4_TIMESTAMP_COLUMN} AS timestamp,`,
+    `  ${AE_V5_TIMESTAMP_COLUMN} AS timestamp,`,
     `  ${connectedCol} AS connected,`,
     `  ${reasonCol} AS reason`,
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${AE_V4_TIMESTAMP_COLUMN} < toDateTime(${fromUnix})`,
-    `ORDER BY ${AE_V4_TIMESTAMP_COLUMN} DESC`,
+    `  AND ${AE_V5_TIMESTAMP_COLUMN} < toDateTime(${fromUnix})`,
+    `ORDER BY ${AE_V5_TIMESTAMP_COLUMN} DESC`,
     `LIMIT 1`,
   ].join('\n')
 }
 
 /**
- * Real v4 status-history query — mirrors v3's `queryStatusHistoryViaSqlApi`
+ * Real v5 status-history query — mirrors v3's `queryStatusHistoryViaSqlApi`
  * exactly (same uptime math via the shared `computeStatusUptime`), scoped to
- * the v4 dataset's `"status"`-kind rows.
+ * the v5 dataset's `"status"`-kind rows.
  */
-export async function queryStatusHistoryViaSqlApiV4(
+export async function queryStatusHistoryViaSqlApiV5(
   config: CloudflareAnalyticsSqlConfig,
   input: StatusHistoryQuery
 ): Promise<StatusHistoryResult> {
-  const dataset = config.dataset ?? AE_V4_DATASET_NAME
+  const dataset = config.dataset ?? AE_V5_DATASET_NAME
   const maxRangeSeconds = config.maxRangeSeconds ?? AE_DEFAULT_MAX_RANGE_SECONDS
   const client = new CloudflareAnalyticsSqlClient(config)
-  const priorSql = buildStatusPriorStateSqlV4(input, {
+  const priorSql = buildStatusPriorStateSqlV5(input, {
     dataset,
     maxRangeSeconds,
   })
-  const eventsSql = buildStatusEventsSqlV4(input, { dataset, maxRangeSeconds })
+  const eventsSql = buildStatusEventsSqlV5(input, { dataset, maxRangeSeconds })
 
   const [priorResult, eventsResult] = await Promise.all([
     client.executeSql(priorSql),
@@ -843,34 +840,34 @@ export async function queryStatusHistoryViaSqlApiV4(
  * expression builder — the single place a query builder needs to know which
  * of the four aggregation kinds a requested metric uses.
  */
-export function aggregateExpressionForDescriptorV4(
-  descriptor: HostMetricsMetricDescriptorV4,
-  family: HostedFamilyV4,
+export function aggregateExpressionForDescriptorV5(
+  descriptor: HostMetricsMetricDescriptorV5,
+  family: HostedFamilyV5,
   doubleIndex: number
 ): string {
   switch (descriptor.aggregation) {
     case 'weighted-average':
-      return weightedAvgExpressionForColumnV4(family, doubleIndex)
+      return weightedAvgExpressionForColumnV5(family, doubleIndex)
     case 'delta-sum':
-      return deltaSumExpressionForColumnV4(family, doubleIndex)
+      return deltaSumExpressionForColumnV5(family, doubleIndex)
     case 'max':
-      return maxValueExpressionForColumnV4(family, doubleIndex)
+      return maxValueExpressionForColumnV5(family, doubleIndex)
     case 'last':
-      return lastValueExpressionForColumnV4(family, doubleIndex)
+      return lastValueExpressionForColumnV5(family, doubleIndex)
     default: {
       const exhaustive: never = descriptor.aggregation
-      throw new TypeError(`unhandled v4 metric aggregation: ${exhaustive}`)
+      throw new TypeError(`unhandled v5 metric aggregation: ${exhaustive}`)
     }
   }
 }
 
 /** Positional column alias — canonical names contain dots, so requested metrics are aliased `m0`, `m1`, ... rather than by name. */
-function metricAliasV4(index: number): string {
+function metricAliasV5(index: number): string {
   return `m${index}`
 }
 
 /** Host-singleton entity scopes queryable via `queryHostSeries` — `host.*` plus the capability-gated `cpuDetail`/`memoryDetail` scalar scopes. */
-const HOST_SERIES_QUERYABLE_SCOPES_V4: ReadonlySet<MetricEntityScopeV4> = new Set([
+const HOST_SERIES_QUERYABLE_SCOPES_V5: ReadonlySet<MetricEntityScopeV5> = new Set([
   'host.cpu',
   'host.kernel',
   'host.memory',
@@ -881,16 +878,16 @@ const HOST_SERIES_QUERYABLE_SCOPES_V4: ReadonlySet<MetricEntityScopeV4> = new Se
 ])
 
 /** Validate `metrics` are known canonical names scoped to a queryable host-singleton entity, de-duplicated, in request order. */
-function assertHostMetricsV4(metrics: readonly string[]): string[] {
+function assertHostMetricsV5(metrics: readonly string[]): string[] {
   if (metrics.length === 0) {
     throw new TypeError('metrics must be non-empty')
   }
   const seen = new Set<string>()
   const result: string[] = []
   for (const name of metrics) {
-    const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[name]
-    if (!descriptor || !HOST_SERIES_QUERYABLE_SCOPES_V4.has(descriptor.entityScope)) {
-      throw new TypeError(`unknown or non-host v4 metric canonicalName: ${name}`)
+    const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[name]
+    if (!descriptor || !HOST_SERIES_QUERYABLE_SCOPES_V5.has(descriptor.entityScope)) {
+      throw new TypeError(`unknown or non-host v5 metric canonicalName: ${name}`)
     }
     if (seen.has(name)) continue
     seen.add(name)
@@ -900,9 +897,9 @@ function assertHostMetricsV4(metrics: readonly string[]): string[] {
 }
 
 /** `true` when any of `metrics` resolves to a `cpu.detail`/`memory.detail` field, requiring those families' rows in the scan. */
-function requiresDetailFamilyV4(metrics: readonly string[], family: HostedFamilyV4): boolean {
+function requiresDetailFamilyV5(metrics: readonly string[], family: HostedFamilyV5): boolean {
   return metrics.some((name) => {
-    const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[name]
+    const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[name]
     if (!descriptor) return false
     if (descriptor.entityScope !== 'cpuDetail' && descriptor.entityScope !== 'memoryDetail') {
       return false
@@ -911,13 +908,13 @@ function requiresDetailFamilyV4(metrics: readonly string[], family: HostedFamily
   })
 }
 
-function hostMetricSelectExpressionV4(canonicalName: string, alias: string): string {
-  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[canonicalName]
+function hostMetricSelectExpressionV5(canonicalName: string, alias: string): string {
+  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[canonicalName]
   const { family, doubleIndex } = doubleIndexForHostField(
     descriptor.entityScope,
     descriptor.fieldName
   )
-  return `${aggregateExpressionForDescriptorV4(descriptor, family, doubleIndex)} AS ${alias}`
+  return `${aggregateExpressionForDescriptorV5(descriptor, family, doubleIndex)} AS ${alias}`
 }
 
 /**
@@ -929,18 +926,18 @@ function hostMetricSelectExpressionV4(canonicalName: string, alias: string): str
  * `metrics` actually references one of their fields, so a request that never
  * touches those capability-gated families doesn't pay to scan their rows.
  */
-function hostFamilyScopePredicateV4(metrics: readonly string[]): string {
-  const families: HostedFamilyV4[] = [AE_V4_FAMILY_HOST_SYSTEM, AE_V4_FAMILY_HOST_IO]
-  if (requiresDetailFamilyV4(metrics, AE_V4_FAMILY_CPU_DETAIL)) {
-    families.push(AE_V4_FAMILY_CPU_DETAIL)
+function hostFamilyScopePredicateV5(metrics: readonly string[]): string {
+  const families: HostedFamilyV5[] = [AE_V5_FAMILY_HOST_SYSTEM, AE_V5_FAMILY_HOST_IO]
+  if (requiresDetailFamilyV5(metrics, AE_V5_FAMILY_CPU_DETAIL)) {
+    families.push(AE_V5_FAMILY_CPU_DETAIL)
   }
-  if (requiresDetailFamilyV4(metrics, AE_V4_FAMILY_MEMORY_DETAIL)) {
-    families.push(AE_V4_FAMILY_MEMORY_DETAIL)
+  if (requiresDetailFamilyV5(metrics, AE_V5_FAMILY_MEMORY_DETAIL)) {
+    families.push(AE_V5_FAMILY_MEMORY_DETAIL)
   }
-  return `(${families.map(familyPredicateV4).join(' OR ')})`
+  return `(${families.map(familyPredicateV5).join(' OR ')})`
 }
 
-function parseHostMetricValuesV4(
+function parseHostMetricValuesV5(
   metrics: readonly string[],
   aliases: readonly string[],
   row: Record<string, unknown>
@@ -953,7 +950,7 @@ function parseHostMetricValuesV4(
       return
     }
     const num = typeof raw === 'number' ? raw : Number(raw)
-    values[name] = Number.isFinite(num) ? stripAeV4Sentinel(num) : null
+    values[name] = Number.isFinite(num) ? stripAeV5Sentinel(num) : null
   })
   return values
 }
@@ -965,7 +962,7 @@ function parseHostMetricValuesV4(
  * string blob are compared for equality only, never numeric order — same
  * discipline as v3's `parseBucketHardwareProfileGeneration`.
  */
-function parseTopologyGenerationV4(row: Record<string, unknown>): number | null {
+function parseTopologyGenerationV5(row: Record<string, unknown>): number | null {
   const min = row.topology_gen_min
   const max = row.topology_gen_max
   if (min === null || min === undefined || max === null || max === undefined) {
@@ -978,14 +975,14 @@ function parseTopologyGenerationV4(row: Record<string, unknown>): number | null 
   return Number.isFinite(num) ? num : null
 }
 
-function parseBucketEpochSecondsV4(bucket: unknown): number {
+function parseBucketEpochSecondsV5(bucket: unknown): number {
   if (typeof bucket === 'number') return bucket
   if (typeof bucket === 'string') return Number(bucket)
   return Number.NaN
 }
 
-function buildHostSeriesSqlV4(
-  input: HostSeriesQueryV4,
+function buildHostSeriesSqlV5(
+  input: HostSeriesQueryV5,
   opts: { dataset: string; maxRangeSeconds: number }
 ): {
   sql: string
@@ -994,44 +991,43 @@ function buildHostSeriesSqlV4(
   bucketSeconds: number
 } {
   const serverId = assertSafeServerId(input.serverId)
-  const metrics = assertHostMetricsV4(input.metrics)
+  const metrics = assertHostMetricsV5(input.metrics)
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  const bucketSeconds = assertPositiveIntV4(
+  const bucketSeconds = assertPositiveIntV5(
     'resolutionSeconds',
     input.resolutionSeconds ?? AE_DEFAULT_BUCKET_SECONDS
   )
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = hostMetricsV4DiscriminatorPredicates()
-  const aliases = metrics.map((_, i) => metricAliasV4(i))
-  const metricSelects = metrics.map((name, i) => hostMetricSelectExpressionV4(name, aliases[i]))
-  const generationCol = blobColumnV4(AE_V4_BLOB_TOPOLOGY_GENERATION_INDEX)
-  const hostSystemPred = familyPredicateV4(AE_V4_FAMILY_HOST_SYSTEM)
-  const hotspotSelects = cpuDetailHotspotSelectExpressionsV4(metrics)
-  const allSelects = [...metricSelects, ...hotspotSelects]
+  const discriminators = hostMetricsV5DiscriminatorPredicates()
+  const aliases = metrics.map((_, i) => metricAliasV5(i))
+  const metricSelects = metrics.map((name, i) => hostMetricSelectExpressionV5(name, aliases[i]))
+  const generationCol = blobColumnV5(AE_V5_BLOB_TOPOLOGY_GENERATION_INDEX)
+  const hostSystemPred = familyPredicateV5(AE_V5_FAMILY_HOST_SYSTEM)
+  const allSelects = metricSelects
 
   const sql = [
     'SELECT',
-    `  intDiv(toUnixTimestamp(${AE_V4_TIMESTAMP_COLUMN}), ${bucketSeconds}) * ${bucketSeconds} AS bucket,`,
-    `  ${sampleCountExpressionV4()} AS sample_count,`,
-    `  SUM(if(${hostSystemPred}, ${intervalSecondsColumnV4()} * _sample_interval, 0.0)) / ${sampleCountExpressionV4()} AS avg_interval_seconds,`,
+    `  intDiv(toUnixTimestamp(${AE_V5_TIMESTAMP_COLUMN}), ${bucketSeconds}) * ${bucketSeconds} AS bucket,`,
+    `  ${sampleCountExpressionV5()} AS sample_count,`,
+    `  SUM(if(${hostSystemPred}, ${intervalSecondsColumnV5()} * _sample_interval, 0.0)) / ${sampleCountExpressionV5()} AS avg_interval_seconds,`,
     // Plain MIN/MAX, no if()-guard needed: WHERE already scopes every row to
     // host.system/host.io, and both of one sample's rows carry the identical
-    // blob7 (topology generation) value — see field-map-v4.ts's
-    // buildV4MetricsBlobs, which stamps it on every metrics-kind row.
+    // blob7 (topology generation) value — see field-map-v5.ts's
+    // buildV5MetricsBlobs, which stamps it on every metrics-kind row.
     `  MIN(${generationCol}) AS topology_gen_min,`,
     `  MAX(${generationCol}) AS topology_gen_max,`,
     `  ${allSelects.join(',\n  ')}`,
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${hostFamilyScopePredicateV4(metrics)}`,
-    `  AND ${timeRangePredicateV4(fromUnix, toUnix)}`,
+    `  AND ${hostFamilyScopePredicateV5(metrics)}`,
+    `  AND ${timeRangePredicateV5(fromUnix, toUnix)}`,
     `GROUP BY bucket`,
     `ORDER BY bucket ASC`,
   ].join('\n')
@@ -1039,106 +1035,41 @@ function buildHostSeriesSqlV4(
   return { sql, metrics, aliases, bucketSeconds }
 }
 
-/** Positional alias for one embedded `cpu.detail` hotspot slot's field (`h{slot}_{fieldIndex}`). */
-function hotspotFieldAliasV4(slot: number, fieldIndex: number): string {
-  return `h${slot}_${fieldIndex}`
-}
-
-/** Alias for the last-observed hotspot-slot `coreId` label (blob10 of the `cpu.detail` row). */
-function hotspotCoreIdsAliasV4(): string {
-  return 'cpu_hotspot_core_ids'
-}
-
-/**
- * `last`-aggregate select expressions for `cpu.detail`'s 4 embedded hotspot
- * slots plus their shared `coreId` label list — only emitted when `metrics`
- * requests a `cpuDetail.*` field, since these columns exist only on
- * `cpu.detail` rows. See `CPU_DETAIL_HOTSPOT_FIELD_ORDER`'s doc comment for
- * the embed layout.
- */
-function cpuDetailHotspotSelectExpressionsV4(metrics: readonly string[]): string[] {
-  if (!requiresDetailFamilyV4(metrics, AE_V4_FAMILY_CPU_DETAIL)) return []
-  const selects: string[] = []
-  for (let slot = 0; slot < CPU_DETAIL_HOTSPOT_SLOT_COUNT; slot++) {
-    for (let fieldIndex = 0; fieldIndex < CPU_DETAIL_HOTSPOT_FIELD_ORDER.length; fieldIndex++) {
-      const doubleIndex = slotDoubleIndex(CPU_DETAIL_HOTSPOT_FIELD_ORDER.length, slot, fieldIndex)
-      selects.push(
-        `${lastValueExpressionForColumnV4(
-          AE_V4_FAMILY_CPU_DETAIL,
-          doubleIndex
-        )} AS ${hotspotFieldAliasV4(slot, fieldIndex)}`
-      )
-    }
-  }
-  const idsCol = blobColumnV4(AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX)
-  const familyPred = familyPredicateV4(AE_V4_FAMILY_CPU_DETAIL)
-  const tsExpr = `toUnixTimestamp(${AE_V4_TIMESTAMP_COLUMN})`
-  selects.push(
-    `argMax(if(${familyPred}, ${idsCol}, NULL), if(${familyPred}, ${tsExpr}, 0)) AS ${hotspotCoreIdsAliasV4()}`
-  )
-  return selects
-}
-
-/** Parses a bucket row's hotspot select-expression columns (see {@link cpuDetailHotspotSelectExpressionsV4}) back into `CpuHotspotPointV4[]`, or `undefined` when hotspots weren't requested/present. */
-function parseCpuHotspotsV4(
-  metrics: readonly string[],
-  row: Record<string, unknown>
-): CpuHotspotPointV4[] | undefined {
-  if (!requiresDetailFamilyV4(metrics, AE_V4_FAMILY_CPU_DETAIL)) {
-    return undefined
-  }
-  const rawIds = row[hotspotCoreIdsAliasV4()]
-  const coreIds = typeof rawIds === 'string' && rawIds.length > 0 ? rawIds.split(',') : []
-  const hotspots: CpuHotspotPointV4[] = []
-  for (let slot = 0; slot < CPU_DETAIL_HOTSPOT_SLOT_COUNT; slot++) {
-    const values: Partial<Record<string, number | null>> = {}
-    for (let fieldIndex = 0; fieldIndex < CPU_DETAIL_HOTSPOT_FIELD_ORDER.length; fieldIndex++) {
-      const raw = row[hotspotFieldAliasV4(slot, fieldIndex)]
-      const num = typeof raw === 'number' ? raw : Number(raw)
-      values[CPU_DETAIL_HOTSPOT_FIELD_ORDER[fieldIndex]] = Number.isFinite(num)
-        ? stripAeV4Sentinel(num)
-        : null
-    }
-    hotspots.push({ coreId: coreIds[slot] ?? null, values })
-  }
-  return hotspots
-}
-
 /**
  * Distinct topology generations observed anywhere in a server's queried
  * range, scoped to `host.system` (every sample writes exactly one). Paired
- * with {@link buildHostSeriesSqlV4} by {@link queryHostSeriesViaSqlApiV4} to
- * populate `HostSeriesResultV4.topologyGenerations`.
+ * with {@link buildHostSeriesSqlV5} by {@link queryHostSeriesViaSqlApiV5} to
+ * populate `HostSeriesResultV5.topologyGenerations`.
  */
-function buildTopologyGenerationsSqlV4(
-  input: HostSeriesQueryV4,
+function buildTopologyGenerationsSqlV5(
+  input: HostSeriesQueryV5,
   opts: { dataset: string; maxRangeSeconds: number }
 ): string {
   const serverId = assertSafeServerId(input.serverId)
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = hostMetricsV4DiscriminatorPredicates()
-  const generationCol = blobColumnV4(AE_V4_BLOB_TOPOLOGY_GENERATION_INDEX)
+  const discriminators = hostMetricsV5DiscriminatorPredicates()
+  const generationCol = blobColumnV5(AE_V5_BLOB_TOPOLOGY_GENERATION_INDEX)
 
   return [
     'SELECT',
     `  ${generationCol} AS generation`,
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${familyPredicateV4(AE_V4_FAMILY_HOST_SYSTEM)}`,
-    `  AND ${timeRangePredicateV4(fromUnix, toUnix)}`,
+    `  AND ${familyPredicateV5(AE_V5_FAMILY_HOST_SYSTEM)}`,
+    `  AND ${timeRangePredicateV5(fromUnix, toUnix)}`,
     `GROUP BY generation`,
   ].join('\n')
 }
 
-function parseTopologyGenerationsRowsV4(data: Array<Record<string, unknown>>): number[] {
+function parseTopologyGenerationsRowsV5(data: Array<Record<string, unknown>>): number[] {
   const generations = new Set<number>()
   for (const row of data) {
     const raw = row.generation
@@ -1148,23 +1079,23 @@ function parseTopologyGenerationsRowsV4(data: Array<Record<string, unknown>>): n
   return [...generations].sort((a, b) => a - b)
 }
 
-function parseHostSeriesRowsV4(
+function parseHostSeriesRowsV5(
   metrics: readonly string[],
   aliases: readonly string[],
   data: Array<Record<string, unknown>>,
   resolutionSeconds: number
-): { points: HostSeriesResultV4['points']; sampleCount: number } {
-  const points: HostSeriesResultV4['points'] = []
+): { points: HostSeriesResultV5['points']; sampleCount: number } {
+  const points: HostSeriesResultV5['points'] = []
   let sampleCount = 0
   for (const row of data) {
-    const bucketEpochSeconds = parseBucketEpochSecondsV4(row.bucket)
+    const bucketEpochSeconds = parseBucketEpochSecondsV5(row.bucket)
     if (!Number.isFinite(bucketEpochSeconds)) continue
 
     const rowSamples = Number(row.sample_count ?? 0)
     const hasSamples = Number.isFinite(rowSamples) && rowSamples > 0
-    // No SQL HAVING filter (see buildHostSeriesSqlV4) — a bucket whose only
+    // No SQL HAVING filter (see buildHostSeriesSqlV5) — a bucket whose only
     // rows are an orphaned host.io write with no matching host.system row
-    // (sampleCountExpressionV4 is host.system-anchored) is skipped here
+    // (sampleCountExpressionV5 is host.system-anchored) is skipped here
     // instead, same effect as v3's WHERE-wrapped-subquery idiom.
     if (!hasSamples) continue
     sampleCount += rowSamples
@@ -1174,30 +1105,28 @@ function parseHostSeriesRowsV4(
       ? defaultExpectedSamplesPerBucket(resolutionSeconds, avgIntervalSeconds)
       : defaultExpectedSamplesPerBucket(resolutionSeconds)
 
-    const cpuHotspots = parseCpuHotspotsV4(metrics, row)
     points.push({
       at: new Date(bucketEpochSeconds * 1000).toISOString(),
-      values: parseHostMetricValuesV4(metrics, aliases, row),
+      values: parseHostMetricValuesV5(metrics, aliases, row),
       sampleCount: hasSamples ? rowSamples : undefined,
       expectedSampleCount,
-      topologyGeneration: parseTopologyGenerationV4(row),
-      ...(cpuHotspots !== undefined ? { cpuHotspots } : {}),
+      topologyGeneration: parseTopologyGenerationV5(row),
     })
   }
   return { points, sampleCount }
 }
 
-export async function queryHostSeriesViaSqlApiV4(
+export async function queryHostSeriesViaSqlApiV5(
   config: CloudflareAnalyticsSqlConfig,
-  input: HostSeriesQueryV4
-): Promise<HostSeriesResultV4> {
-  const dataset = config.dataset ?? AE_V4_DATASET_NAME
+  input: HostSeriesQueryV5
+): Promise<HostSeriesResultV5> {
+  const dataset = config.dataset ?? AE_V5_DATASET_NAME
   const maxRangeSeconds = config.maxRangeSeconds ?? AE_DEFAULT_MAX_RANGE_SECONDS
-  const { sql, metrics, aliases, bucketSeconds } = buildHostSeriesSqlV4(input, {
+  const { sql, metrics, aliases, bucketSeconds } = buildHostSeriesSqlV5(input, {
     dataset,
     maxRangeSeconds,
   })
-  const generationsSql = buildTopologyGenerationsSqlV4(input, {
+  const generationsSql = buildTopologyGenerationsSqlV5(input, {
     dataset,
     maxRangeSeconds,
   })
@@ -1206,14 +1135,14 @@ export async function queryHostSeriesViaSqlApiV4(
     client.executeSql(sql),
     client.executeSql(generationsSql),
   ])
-  const { points, sampleCount } = parseHostSeriesRowsV4(
+  const { points, sampleCount } = parseHostSeriesRowsV5(
     metrics,
     aliases,
     seriesResult.data,
     bucketSeconds
   )
-  const topologyGenerations = parseTopologyGenerationsRowsV4(generationsResult.data)
-  return finalizeHostSeriesResultV4(input.from, input.to, {
+  const topologyGenerations = parseTopologyGenerationsRowsV5(generationsResult.data)
+  return finalizeHostSeriesResultV5(input.from, input.to, {
     kind: 'analytics-engine',
     available: true,
     serverId: input.serverId,
@@ -1226,36 +1155,36 @@ export async function queryHostSeriesViaSqlApiV4(
   })
 }
 
-function buildHostSummarySqlV4(
-  input: HostSummaryQueryV4,
+function buildHostSummarySqlV5(
+  input: HostSummaryQueryV5,
   opts: { dataset: string; maxRangeSeconds: number }
 ): string {
   const serverId = assertSafeServerId(input.serverId)
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = hostMetricsV4DiscriminatorPredicates()
+  const discriminators = hostMetricsV5DiscriminatorPredicates()
 
   return [
     'SELECT',
-    `  ${sampleCountExpressionV4()} AS sample_count,`,
-    `  ${latestAtExpressionV4()} AS latest_at`,
+    `  ${sampleCountExpressionV5()} AS sample_count,`,
+    `  ${latestAtExpressionV5()} AS latest_at`,
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
     // Host summary never selects `cpu.detail`/`memory.detail` fields (it only
     // counts/dates samples), so the scan never needs those families.
-    `  AND ${hostFamilyScopePredicateV4([])}`,
-    `  AND ${timeRangePredicateV4(fromUnix, toUnix)}`,
+    `  AND ${hostFamilyScopePredicateV5([])}`,
+    `  AND ${timeRangePredicateV5(fromUnix, toUnix)}`,
   ].join('\n')
 }
 
-function parseHostSummaryRowV4(row: Record<string, unknown> | undefined): {
+function parseHostSummaryRowV5(row: Record<string, unknown> | undefined): {
   sampleCount: number
   latestAt: string | null
 } {
@@ -1271,16 +1200,16 @@ function parseHostSummaryRowV4(row: Record<string, unknown> | undefined): {
   }
 }
 
-export async function queryHostSummaryViaSqlApiV4(
+export async function queryHostSummaryViaSqlApiV5(
   config: CloudflareAnalyticsSqlConfig,
-  input: HostSummaryQueryV4
-): Promise<HostSummaryResultV4> {
-  const dataset = config.dataset ?? AE_V4_DATASET_NAME
+  input: HostSummaryQueryV5
+): Promise<HostSummaryResultV5> {
+  const dataset = config.dataset ?? AE_V5_DATASET_NAME
   const maxRangeSeconds = config.maxRangeSeconds ?? AE_DEFAULT_MAX_RANGE_SECONDS
-  const sql = buildHostSummarySqlV4(input, { dataset, maxRangeSeconds })
+  const sql = buildHostSummarySqlV5(input, { dataset, maxRangeSeconds })
   const client = new CloudflareAnalyticsSqlClient(config)
   const result = await client.executeSql(sql)
-  const { sampleCount, latestAt } = parseHostSummaryRowV4(result.data[0])
+  const { sampleCount, latestAt } = parseHostSummaryRowV5(result.data[0])
   return {
     kind: 'analytics-engine',
     available: true,
@@ -1290,60 +1219,60 @@ export async function queryHostSummaryViaSqlApiV4(
   }
 }
 
-function buildFleetHostSnapshotSqlV4(
-  input: FleetHostSnapshotQueryV4,
+function buildFleetHostSnapshotSqlV5(
+  input: FleetHostSnapshotQueryV5,
   opts: { dataset: string; maxRangeSeconds: number }
 ): { sql: string; metrics: string[]; aliases: string[] } {
-  const metrics = assertHostMetricsV4(input.metrics)
+  const metrics = assertHostMetricsV5(input.metrics)
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
   const inList = quoteServerIdInList(input.serverIds)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = hostMetricsV4DiscriminatorPredicates()
-  const aliases = metrics.map((_, i) => metricAliasV4(i))
-  const metricSelects = metrics.map((name, i) => hostMetricSelectExpressionV4(name, aliases[i]))
-  const generationCol = blobColumnV4(AE_V4_BLOB_TOPOLOGY_GENERATION_INDEX)
+  const discriminators = hostMetricsV5DiscriminatorPredicates()
+  const aliases = metrics.map((_, i) => metricAliasV5(i))
+  const metricSelects = metrics.map((name, i) => hostMetricSelectExpressionV5(name, aliases[i]))
+  const generationCol = blobColumnV5(AE_V5_BLOB_TOPOLOGY_GENERATION_INDEX)
 
   const sql = [
     'SELECT',
-    `  ${AE_V4_INDEX_SERVER_ID_COLUMN} AS server_id,`,
-    `  ${sampleCountExpressionV4()} AS sample_count,`,
-    `  ${latestAtExpressionV4()} AS latest_at,`,
+    `  ${AE_V5_INDEX_SERVER_ID_COLUMN} AS server_id,`,
+    `  ${sampleCountExpressionV5()} AS sample_count,`,
+    `  ${latestAtExpressionV5()} AS latest_at,`,
     // Plain MIN/MAX, no if()-guard needed: WHERE already scopes every row to
     // host.system/host.io, and both of one sample's rows carry the identical
-    // blob7 (topology generation) value — see field-map-v4.ts's
-    // buildV4MetricsBlobs, which stamps it on every metrics-kind row.
+    // blob7 (topology generation) value — see field-map-v5.ts's
+    // buildV5MetricsBlobs, which stamps it on every metrics-kind row.
     `  MIN(${generationCol}) AS topology_gen_min,`,
     `  MAX(${generationCol}) AS topology_gen_max,`,
     `  ${metricSelects.join(',\n  ')}`,
     `FROM ${opts.dataset}`,
-    `WHERE ${AE_V4_INDEX_SERVER_ID_COLUMN} IN (${inList})`,
+    `WHERE ${AE_V5_INDEX_SERVER_ID_COLUMN} IN (${inList})`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${hostFamilyScopePredicateV4(metrics)}`,
-    `  AND ${timeRangePredicateV4(fromUnix, toUnix)}`,
+    `  AND ${hostFamilyScopePredicateV5(metrics)}`,
+    `  AND ${timeRangePredicateV5(fromUnix, toUnix)}`,
     `GROUP BY server_id`,
   ].join('\n')
 
   return { sql, metrics, aliases }
 }
 
-function parseFleetHostSnapshotRowsV4(
+function parseFleetHostSnapshotRowsV5(
   metrics: readonly string[],
   aliases: readonly string[],
   data: Array<Record<string, unknown>>
-): FleetHostSnapshotServerV4[] {
-  const servers: FleetHostSnapshotServerV4[] = []
+): FleetHostSnapshotServerV5[] {
+  const servers: FleetHostSnapshotServerV5[] = []
   for (const row of data) {
-    const serverId = parseAeServerIdV4(row.server_id)
+    const serverId = parseAeServerIdV5(row.server_id)
     if (serverId === null) continue
     const sampleCountRaw = Number(row.sample_count ?? 0)
     const sampleCount = Number.isFinite(sampleCountRaw) ? sampleCountRaw : 0
-    // No SQL HAVING filter (see buildFleetHostSnapshotSqlV4) — a server with
+    // No SQL HAVING filter (see buildFleetHostSnapshotSqlV5) — a server with
     // only an orphaned host.io row (no matching host.system row) is skipped
     // here instead, same effect as v3's WHERE-wrapped-subquery idiom.
     if (sampleCount <= 0) continue
@@ -1352,18 +1281,18 @@ function parseFleetHostSnapshotRowsV4(
       serverId,
       sampleCount,
       latestAt: latestAtMs === null || sampleCount <= 0 ? null : new Date(latestAtMs).toISOString(),
-      values: parseHostMetricValuesV4(metrics, aliases, row),
-      topologyGeneration: parseTopologyGenerationV4(row),
+      values: parseHostMetricValuesV5(metrics, aliases, row),
+      topologyGeneration: parseTopologyGenerationV5(row),
     })
   }
   servers.sort((a, b) => a.serverId.localeCompare(b.serverId))
   return servers
 }
 
-export async function queryFleetHostSnapshotViaSqlApiV4(
+export async function queryFleetHostSnapshotViaSqlApiV5(
   config: CloudflareAnalyticsSqlConfig,
-  input: FleetHostSnapshotQueryV4
-): Promise<FleetHostSnapshotResultV4> {
+  input: FleetHostSnapshotQueryV5
+): Promise<FleetHostSnapshotResultV5> {
   if (input.serverIds.length === 0) {
     return {
       kind: 'analytics-engine',
@@ -1372,9 +1301,9 @@ export async function queryFleetHostSnapshotViaSqlApiV4(
       servers: [],
     }
   }
-  const dataset = config.dataset ?? AE_V4_DATASET_NAME
+  const dataset = config.dataset ?? AE_V5_DATASET_NAME
   const maxRangeSeconds = config.maxRangeSeconds ?? AE_DEFAULT_MAX_RANGE_SECONDS
-  const { sql, metrics, aliases } = buildFleetHostSnapshotSqlV4(input, {
+  const { sql, metrics, aliases } = buildFleetHostSnapshotSqlV5(input, {
     dataset,
     maxRangeSeconds,
   })
@@ -1384,7 +1313,7 @@ export async function queryFleetHostSnapshotViaSqlApiV4(
     kind: 'analytics-engine',
     available: true,
     metrics,
-    servers: parseFleetHostSnapshotRowsV4(metrics, aliases, result.data),
+    servers: parseFleetHostSnapshotRowsV5(metrics, aliases, result.data),
   }
 }
 
@@ -1392,108 +1321,108 @@ export async function queryFleetHostSnapshotViaSqlApiV4(
 // Metric events (`sample.events`) — `"event"`-kind rows, capped like status history.
 // ---------------------------------------------------------------------------
 
-const EVENT_SEVERITIES_V4 = new Set<string>(['info', 'warning', 'critical'])
+const EVENT_SEVERITIES_V5 = new Set<string>(['info', 'warning', 'critical'])
 
-function parseEventSeverityV4(raw: unknown): MetricEventSeverityV4 {
-  return typeof raw === 'string' && EVENT_SEVERITIES_V4.has(raw)
-    ? (raw as MetricEventSeverityV4)
+function parseEventSeverityV5(raw: unknown): MetricEventSeverityV5 {
+  return typeof raw === 'string' && EVENT_SEVERITIES_V5.has(raw)
+    ? (raw as MetricEventSeverityV5)
     : 'info'
 }
 
-function optionalNonEmptyStringV4(raw: unknown): string | undefined {
+function optionalNonEmptyStringV5(raw: unknown): string | undefined {
   if (typeof raw !== 'string' || raw.length === 0) return undefined
   return raw
 }
 
-function parseEventPayloadV4(raw: unknown): MetricEventV4['payload'] {
+function parseEventPayloadV5(raw: unknown): MetricEventV5['payload'] {
   if (typeof raw !== 'string' || raw.length === 0) return undefined
   try {
-    return JSON.parse(raw) as MetricEventV4['payload']
+    return JSON.parse(raw) as MetricEventV5['payload']
   } catch {
     return undefined
   }
 }
 
-function parseMetricEventRowV4(row: Record<string, unknown>): MetricEventV4 | null {
+function parseMetricEventRowV5(row: Record<string, unknown>): MetricEventV5 | null {
   const atMs = parseAeLatestAtMs(row.timestamp)
   if (atMs === null) return null
   const eventId = typeof row.event_id === 'string' ? row.event_id : ''
   const kind = typeof row.kind === 'string' ? row.kind : ''
   if (eventId.length === 0 || kind.length === 0) return null
-  const event: MetricEventV4 = {
+  const event: MetricEventV5 = {
     eventId,
     at: new Date(atMs).toISOString(),
-    kind: kind as MetricEventKindV4,
-    severity: parseEventSeverityV4(row.severity),
+    kind: kind as MetricEventKindV5,
+    severity: parseEventSeverityV5(row.severity),
   }
-  const entityId = optionalNonEmptyStringV4(row.entity_id)
+  const entityId = optionalNonEmptyStringV5(row.entity_id)
   if (entityId !== undefined) event.entityId = entityId
-  const source = optionalNonEmptyStringV4(row.source)
+  const source = optionalNonEmptyStringV5(row.source)
   if (source !== undefined) event.source = source
-  const payload = parseEventPayloadV4(row.payload)
+  const payload = parseEventPayloadV5(row.payload)
   if (payload !== undefined) event.payload = payload
   return event
 }
 
-function parseMetricEventRowsV4(rawRows: Array<Record<string, unknown>>): {
-  events: MetricEventV4[]
+function parseMetricEventRowsV5(rawRows: Array<Record<string, unknown>>): {
+  events: MetricEventV5[]
   truncated: boolean
 } {
   const truncated = rawRows.length > MAX_STATUS_EVENTS
   const rows = truncated ? rawRows.slice(0, MAX_STATUS_EVENTS) : rawRows
-  const events: MetricEventV4[] = []
+  const events: MetricEventV5[] = []
   for (const row of rows) {
-    const event = parseMetricEventRowV4(row)
+    const event = parseMetricEventRowV5(row)
     if (event === null) continue
     events.push(event)
   }
   return { events, truncated }
 }
 
-function buildMetricEventsSqlV4(
-  input: MetricEventsQueryV4,
+function buildMetricEventsSqlV5(
+  input: MetricEventsQueryV5,
   opts: { dataset: string; maxRangeSeconds: number }
 ): string {
   const serverId = assertSafeServerId(input.serverId)
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = eventV4DiscriminatorPredicates()
+  const discriminators = eventV5DiscriminatorPredicates()
   const limit = MAX_STATUS_EVENTS + 1
 
   return [
     'SELECT',
-    `  ${AE_V4_TIMESTAMP_COLUMN} AS timestamp,`,
-    `  ${blobColumnV4(AE_V4_BLOB_EVENT_ID_INDEX)} AS event_id,`,
-    `  ${blobColumnV4(AE_V4_BLOB_FAMILY_INDEX)} AS kind,`,
-    `  ${statusReasonColumnV4()} AS severity,`,
-    `  ${blobColumnV4(AE_V4_BLOB_EVENT_ENTITY_ID_INDEX)} AS entity_id,`,
-    `  ${blobColumnV4(AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX)} AS source,`,
-    `  ${blobColumnV4(AE_V4_BLOB_EVENT_PAYLOAD_INDEX)} AS payload`,
+    `  ${AE_V5_TIMESTAMP_COLUMN} AS timestamp,`,
+    `  ${blobColumnV5(AE_V5_BLOB_EVENT_ID_INDEX)} AS event_id,`,
+    `  ${blobColumnV5(AE_V5_BLOB_FAMILY_INDEX)} AS kind,`,
+    `  ${statusReasonColumnV5()} AS severity,`,
+    `  ${blobColumnV5(AE_V5_BLOB_EVENT_ENTITY_ID_INDEX)} AS entity_id,`,
+    `  ${blobColumnV5(AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX)} AS source,`,
+    `  ${blobColumnV5(AE_V5_BLOB_EVENT_PAYLOAD_INDEX)} AS payload`,
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${timeRangePredicateV4(fromUnix, toUnix)}`,
-    `ORDER BY ${AE_V4_TIMESTAMP_COLUMN} ASC`,
+    `  AND ${timeRangePredicateV5(fromUnix, toUnix)}`,
+    `ORDER BY ${AE_V5_TIMESTAMP_COLUMN} ASC`,
     `LIMIT ${limit}`,
   ].join('\n')
 }
 
-export async function queryMetricEventsViaSqlApiV4(
+export async function queryMetricEventsViaSqlApiV5(
   config: CloudflareAnalyticsSqlConfig,
-  input: MetricEventsQueryV4
-): Promise<MetricEventsResultV4> {
-  const dataset = config.dataset ?? AE_V4_DATASET_NAME
+  input: MetricEventsQueryV5
+): Promise<MetricEventsResultV5> {
+  const dataset = config.dataset ?? AE_V5_DATASET_NAME
   const maxRangeSeconds = config.maxRangeSeconds ?? AE_DEFAULT_MAX_RANGE_SECONDS
-  const sql = buildMetricEventsSqlV4(input, { dataset, maxRangeSeconds })
+  const sql = buildMetricEventsSqlV5(input, { dataset, maxRangeSeconds })
   const client = new CloudflareAnalyticsSqlClient(config)
   const result = await client.executeSql(sql)
-  const { events, truncated } = parseMetricEventRowsV4(result.data)
+  const { events, truncated } = parseMetricEventRowsV5(result.data)
   return {
     kind: 'analytics-engine',
     available: true,
@@ -1510,13 +1439,13 @@ export async function queryMetricEventsViaSqlApiV4(
 // single-row-per-entity managed families don't.
 // ---------------------------------------------------------------------------
 
-const SINGLE_ROW_FAMILIES_V4 = new Set<PerEntityHostedFamilyV4>([
+const SINGLE_ROW_FAMILIES_V5 = new Set<PerEntityHostedFamilyV5>([
   'managed.ingress',
   'managed.database_proxy',
 ])
 
-/** `PerEntityHostedFamilyV4` -> the `MetricEntityScopeV4` its bare field names are qualified under in `HOST_METRICS_METRIC_DESCRIPTORS_V4`. */
-const ENTITY_SCOPE_FOR_FAMILY_V4: Record<PerEntityHostedFamilyV4, MetricEntityScopeV4> = {
+/** `PerEntityHostedFamilyV5` -> the `MetricEntityScopeV5` its bare field names are qualified under in `HOST_METRICS_METRIC_DESCRIPTORS_V5`. */
+const ENTITY_SCOPE_FOR_FAMILY_V5: Record<PerEntityHostedFamilyV5, MetricEntityScopeV5> = {
   gpu: 'gpu',
   network: 'network',
   filesystem: 'filesystem',
@@ -1524,42 +1453,41 @@ const ENTITY_SCOPE_FOR_FAMILY_V4: Record<PerEntityHostedFamilyV4, MetricEntitySc
   'hardware.physical': 'hardwareSignal',
   'managed.ingress': 'ingress',
   'managed.database_proxy': 'databaseProxy',
-  'cpu.core.live': 'cpuCore',
 }
 
-function fieldOrderForFamilyV4(family: PerEntityHostedFamilyV4): readonly string[] {
+function fieldOrderForFamilyV5(family: PerEntityHostedFamilyV5): readonly string[] {
   if (family === 'managed.ingress' || family === 'managed.database_proxy') {
-    return SINGLE_ROW_FIELD_ORDER_V4[family]
+    return SINGLE_ROW_FIELD_ORDER_V5[family]
   }
-  return PER_ENTITY_FIELD_ORDER_V4[family]
+  return PER_ENTITY_FIELD_ORDER_V5[family]
 }
 
-function resolveEntityFieldDescriptorV4(
-  family: PerEntityHostedFamilyV4,
+function resolveEntityFieldDescriptorV5(
+  family: PerEntityHostedFamilyV5,
   field: string
-): HostMetricsMetricDescriptorV4 {
-  const canonicalName = `${ENTITY_SCOPE_FOR_FAMILY_V4[family]}.${field}`
-  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[canonicalName]
+): HostMetricsMetricDescriptorV5 {
+  const canonicalName = `${ENTITY_SCOPE_FOR_FAMILY_V5[family]}.${field}`
+  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[canonicalName]
   if (!descriptor) {
-    throw new TypeError(`unknown v4 metric field "${field}" for family "${family}"`)
+    throw new TypeError(`unknown v5 metric field "${field}" for family "${family}"`)
   }
   return descriptor
 }
 
 /** Validate + de-dupe requested bare field names, in request order. */
-function assertEntityFieldsV4(
-  family: PerEntityHostedFamilyV4,
+function assertEntityFieldsV5(
+  family: PerEntityHostedFamilyV5,
   fields: readonly string[]
 ): string[] {
   if (fields.length === 0) {
     throw new TypeError('metrics must be non-empty')
   }
-  const order = fieldOrderForFamilyV4(family)
+  const order = fieldOrderForFamilyV5(family)
   const seen = new Set<string>()
   const result: string[] = []
   for (const field of fields) {
     if (!order.includes(field)) {
-      throw new TypeError(`unknown v4 metric field "${field}" for family "${family}"`)
+      throw new TypeError(`unknown v5 metric field "${field}" for family "${family}"`)
     }
     if (seen.has(field)) continue
     seen.add(field)
@@ -1569,7 +1497,7 @@ function assertEntityFieldsV4(
 }
 
 /** Validate + de-dupe requested entity ids, in request order. */
-function assertEntityIdsV4(entityIds: readonly string[]): string[] {
+function assertEntityIdsV5(entityIds: readonly string[]): string[] {
   if (entityIds.length === 0) {
     throw new TypeError('entityIds must be non-empty')
   }
@@ -1585,22 +1513,22 @@ function assertEntityIdsV4(entityIds: readonly string[]): string[] {
 }
 
 /** Per-(bucket, entity, field) accumulator across every contributing group row. */
-type EntityFieldAccumulatorV4 =
+type EntityFieldAccumulatorV5 =
   | { aggregation: 'weighted-average'; numerator: number; denominator: number }
   | { aggregation: 'delta-sum'; raw: number }
   | { aggregation: 'max'; raw: number }
   | { aggregation: 'last'; value: number; key: number }
 
-type BucketEntityAccumulatorV4 = {
+type BucketEntityAccumulatorV5 = {
   sampleCount: number
-  /** Reconstructed `SUM(interval * weight)` — see {@link mergeIntervalWeightedSumV4}. */
+  /** Reconstructed `SUM(interval * weight)` — see {@link mergeIntervalWeightedSumV5}. */
   intervalWeightedSum: number
-  fields: Map<string, EntityFieldAccumulatorV4>
+  fields: Map<string, EntityFieldAccumulatorV5>
 }
 
-function mergeFieldAccumulatorV4(
-  existing: EntityFieldAccumulatorV4 | undefined,
-  aggregation: HostMetricsMetricDescriptorV4['aggregation'],
+function mergeFieldAccumulatorV5(
+  existing: EntityFieldAccumulatorV5 | undefined,
+  aggregation: HostMetricsMetricDescriptorV5['aggregation'],
   raw: {
     numerator?: number
     denominator?: number
@@ -1608,7 +1536,7 @@ function mergeFieldAccumulatorV4(
     value?: number
     key?: number
   }
-): EntityFieldAccumulatorV4 {
+): EntityFieldAccumulatorV5 {
   switch (aggregation) {
     case 'weighted-average': {
       const prev = existing?.aggregation === 'weighted-average' ? existing : undefined
@@ -1627,7 +1555,7 @@ function mergeFieldAccumulatorV4(
     }
     case 'max': {
       const prev = existing?.aggregation === 'max' ? existing : undefined
-      const nextRaw = raw.raw ?? aeV4MissingSentinelValue()
+      const nextRaw = raw.raw ?? aeV5MissingSentinelValue()
       return {
         aggregation: 'max',
         raw: prev === undefined ? nextRaw : Math.max(prev.raw, nextRaw),
@@ -1636,7 +1564,7 @@ function mergeFieldAccumulatorV4(
     case 'last': {
       const prev = existing?.aggregation === 'last' ? existing : undefined
       const nextKey = raw.key ?? 0
-      const nextValue = raw.value ?? aeV4MissingSentinelValue()
+      const nextValue = raw.value ?? aeV5MissingSentinelValue()
       if (prev === undefined || nextKey > prev.key) {
         return { aggregation: 'last', value: nextValue, key: nextKey }
       }
@@ -1645,29 +1573,29 @@ function mergeFieldAccumulatorV4(
   }
 }
 
-const AE_V4_MISSING_SENTINEL_JS = -Math.pow(10, 308)
+const AE_V5_MISSING_SENTINEL_JS = -Math.pow(10, 308)
 
 /** The JS-side numeric sentinel matching AE SQL's `-pow(10, 308)` literal. */
-function aeV4MissingSentinelValue(): number {
-  return AE_V4_MISSING_SENTINEL_JS
+function aeV5MissingSentinelValue(): number {
+  return AE_V5_MISSING_SENTINEL_JS
 }
 
-function finalizeFieldAccumulatorV4(acc: EntityFieldAccumulatorV4 | undefined): number | null {
+function finalizeFieldAccumulatorV5(acc: EntityFieldAccumulatorV5 | undefined): number | null {
   if (acc === undefined) return null
   switch (acc.aggregation) {
     case 'weighted-average':
-      return acc.denominator > 0 ? stripAeV4Sentinel(acc.numerator / acc.denominator) : null
+      return acc.denominator > 0 ? stripAeV5Sentinel(acc.numerator / acc.denominator) : null
     case 'delta-sum':
       return acc.raw
     case 'max':
-      return stripAeV4Sentinel(acc.raw)
+      return stripAeV5Sentinel(acc.raw)
     case 'last':
-      return stripAeV4Sentinel(acc.value)
+      return stripAeV5Sentinel(acc.value)
   }
 }
 
 /** `groupAvgIntervalSeconds * groupSampleCount` reconstructs that group's own `SUM(interval * weight)`, summable across groups before a final division. */
-function mergeIntervalWeightedSumV4(
+function mergeIntervalWeightedSumV5(
   groupAvgIntervalSeconds: unknown,
   groupSampleCount: number
 ): number {
@@ -1678,19 +1606,19 @@ function mergeIntervalWeightedSumV4(
   return Number.isFinite(avg) ? avg * groupSampleCount : 0
 }
 
-function toEntitySeriesPointsV4(
-  byBucket: Map<number, BucketEntityAccumulatorV4>,
+function toEntitySeriesPointsV5(
+  byBucket: Map<number, BucketEntityAccumulatorV5>,
   fields: readonly string[],
   resolutionSeconds: number
-): { points: EntitySeriesPointV4[]; sampleCount: number } {
-  const points: EntitySeriesPointV4[] = []
+): { points: EntitySeriesPointV5[]; sampleCount: number } {
+  const points: EntitySeriesPointV5[] = []
   let sampleCount = 0
   const buckets = [...byBucket.entries()].sort((a, b) => a[0] - b[0])
   for (const [bucketEpochSeconds, acc] of buckets) {
     sampleCount += acc.sampleCount
     const values: Partial<Record<string, number | null>> = {}
     for (const field of fields) {
-      values[field] = finalizeFieldAccumulatorV4(acc.fields.get(field))
+      values[field] = finalizeFieldAccumulatorV5(acc.fields.get(field))
     }
     const avgIntervalSeconds =
       acc.sampleCount > 0 ? acc.intervalWeightedSum / acc.sampleCount : undefined
@@ -1711,9 +1639,9 @@ function toEntitySeriesPointsV4(
 // Single-row-per-entity families (managed.ingress / managed.database_proxy)
 // ---------------------------------------------------------------------------
 
-function buildSingleRowEntitySeriesSqlV4(
-  input: EntitySeriesQueryV4,
-  family: Extract<PerEntityHostedFamilyV4, 'managed.ingress' | 'managed.database_proxy'>,
+function buildSingleRowEntitySeriesSqlV5(
+  input: EntitySeriesQueryV5,
+  family: Extract<PerEntityHostedFamilyV5, 'managed.ingress' | 'managed.database_proxy'>,
   fields: readonly string[],
   entityIds: readonly string[],
   opts: { dataset: string; maxRangeSeconds: number }
@@ -1722,39 +1650,39 @@ function buildSingleRowEntitySeriesSqlV4(
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  const bucketSeconds = assertPositiveIntV4(
+  const bucketSeconds = assertPositiveIntV5(
     'resolutionSeconds',
     input.resolutionSeconds ?? AE_DEFAULT_BUCKET_SECONDS
   )
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = hostMetricsV4DiscriminatorPredicates()
-  const order = fieldOrderForFamilyV4(family)
-  const aliases = fields.map((_, i) => metricAliasV4(i))
+  const discriminators = hostMetricsV5DiscriminatorPredicates()
+  const order = fieldOrderForFamilyV5(family)
+  const aliases = fields.map((_, i) => metricAliasV5(i))
   const metricSelects = fields.map((field, i) => {
-    const descriptor = resolveEntityFieldDescriptorV4(family, field)
+    const descriptor = resolveEntityFieldDescriptorV5(family, field)
     const fieldIndex = order.indexOf(field)
-    return `${aggregateExpressionForDescriptorV4(descriptor, family, fieldIndex)} AS ${aliases[i]}`
+    return `${aggregateExpressionForDescriptorV5(descriptor, family, fieldIndex)} AS ${aliases[i]}`
   })
-  const entityIdCol = blobColumnV4(AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX)
-  const inList = entityIds.map((id) => quoteSqlStringV4(id)).join(', ')
+  const entityIdCol = blobColumnV5(AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX)
+  const inList = entityIds.map((id) => quoteSqlStringV5(id)).join(', ')
 
   const sql = [
     'SELECT',
-    `  intDiv(toUnixTimestamp(${AE_V4_TIMESTAMP_COLUMN}), ${bucketSeconds}) * ${bucketSeconds} AS bucket,`,
+    `  intDiv(toUnixTimestamp(${AE_V5_TIMESTAMP_COLUMN}), ${bucketSeconds}) * ${bucketSeconds} AS bucket,`,
     `  ${entityIdCol} AS entity_id,`,
     `  SUM(_sample_interval) AS sample_count,`,
-    `  SUM(${intervalSecondsColumnV4()} * _sample_interval) / SUM(_sample_interval) AS avg_interval_seconds,`,
+    `  SUM(${intervalSecondsColumnV5()} * _sample_interval) / SUM(_sample_interval) AS avg_interval_seconds,`,
     `  ${metricSelects.join(',\n  ')}`,
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${familyPredicateV4(family)}`,
+    `  AND ${familyPredicateV5(family)}`,
     `  AND ${entityIdCol} IN (${inList})`,
-    `  AND ${timeRangePredicateV4(fromUnix, toUnix)}`,
+    `  AND ${timeRangePredicateV5(fromUnix, toUnix)}`,
     `GROUP BY bucket, entity_id`,
     `ORDER BY bucket ASC`,
   ].join('\n')
@@ -1763,26 +1691,26 @@ function buildSingleRowEntitySeriesSqlV4(
 }
 
 /**
- * `GROUP BY bucket, entity_id` in {@link buildSingleRowEntitySeriesSqlV4}
+ * `GROUP BY bucket, entity_id` in {@link buildSingleRowEntitySeriesSqlV5}
  * guarantees AE returns at most one row per `(bucket, entityId)` pair, and
  * each metric select already resolves the FINAL aggregated value via
- * `aggregateExpressionForDescriptorV4` — so unlike the paged path, there is
+ * `aggregateExpressionForDescriptorV5` — so unlike the paged path, there is
  * no cross-row recombination to do here, just a direct row-to-point mapping.
  */
-function parseSingleRowEntitySeriesRowsV4(
+function parseSingleRowEntitySeriesRowsV5(
   fields: readonly string[],
   aliases: readonly string[],
   entityIds: readonly string[],
   data: Array<Record<string, unknown>>,
   resolutionSeconds: number
-): EntitySeriesEntityResultV4[] {
-  const perEntity = new Map<string, EntitySeriesPointV4[]>()
+): EntitySeriesEntityResultV5[] {
+  const perEntity = new Map<string, EntitySeriesPointV5[]>()
   for (const id of entityIds) perEntity.set(id, [])
 
   for (const row of data) {
     const entityId = typeof row.entity_id === 'string' ? row.entity_id : null
     if (entityId === null || !perEntity.has(entityId)) continue
-    const bucketEpochSeconds = parseBucketEpochSecondsV4(row.bucket)
+    const bucketEpochSeconds = parseBucketEpochSecondsV5(row.bucket)
     if (!Number.isFinite(bucketEpochSeconds)) continue
     const sampleCountRaw = Number(row.sample_count ?? 0)
     const sampleCount = Number.isFinite(sampleCountRaw) ? sampleCountRaw : 0
@@ -1799,7 +1727,7 @@ function parseSingleRowEntitySeriesRowsV4(
         return
       }
       const num = typeof raw === 'number' ? raw : Number(raw)
-      values[field] = Number.isFinite(num) ? stripAeV4Sentinel(num) : null
+      values[field] = Number.isFinite(num) ? stripAeV5Sentinel(num) : null
     })
 
     perEntity.get(entityId)!.push({
@@ -1821,7 +1749,7 @@ function parseSingleRowEntitySeriesRowsV4(
 // Paged families (gpu/network/filesystem/block/hardware.physical)
 // ---------------------------------------------------------------------------
 
-type PagedFieldPlanV4 =
+type PagedFieldPlanV5 =
   | {
       field: string
       slot: number
@@ -1839,40 +1767,40 @@ type PagedFieldPlanV4 =
       keyAlias: string
     }
 
-function buildPagedEntitySeriesSqlV4(
-  input: EntitySeriesQueryV4,
-  family: Exclude<PerEntityHostedFamilyV4, 'managed.ingress' | 'managed.database_proxy'>,
+function buildPagedEntitySeriesSqlV5(
+  input: EntitySeriesQueryV5,
+  family: Exclude<PerEntityHostedFamilyV5, 'managed.ingress' | 'managed.database_proxy'>,
   fields: readonly string[],
   entityIds: readonly string[],
   opts: { dataset: string; maxRangeSeconds: number }
-): { sql: string; plans: PagedFieldPlanV4[]; bucketSeconds: number } {
+): { sql: string; plans: PagedFieldPlanV5[]; bucketSeconds: number } {
   const serverId = assertSafeServerId(input.serverId)
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  const bucketSeconds = assertPositiveIntV4(
+  const bucketSeconds = assertPositiveIntV5(
     'resolutionSeconds',
     input.resolutionSeconds ?? AE_DEFAULT_BUCKET_SECONDS
   )
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = hostMetricsV4DiscriminatorPredicates()
-  const order = fieldOrderForFamilyV4(family)
+  const discriminators = hostMetricsV5DiscriminatorPredicates()
+  const order = fieldOrderForFamilyV5(family)
   const width = order.length
   const perPage = entitiesPerPage(width)
-  const sentinel = aeV4MissingMetricSentinelSql()
-  const tsExpr = `toUnixTimestamp(${AE_V4_TIMESTAMP_COLUMN})`
+  const sentinel = aeV5MissingMetricSentinelSql()
+  const tsExpr = `toUnixTimestamp(${AE_V5_TIMESTAMP_COLUMN})`
 
-  const plans: PagedFieldPlanV4[] = []
+  const plans: PagedFieldPlanV5[] = []
   const selects: string[] = []
   for (let slot = 0; slot < perPage; slot++) {
     for (const field of fields) {
-      const descriptor = resolveEntityFieldDescriptorV4(family, field)
+      const descriptor = resolveEntityFieldDescriptorV5(family, field)
       const fieldIndex = order.indexOf(field)
       const doubleIndex = slotDoubleIndex(width, slot, fieldIndex)
-      const col = doubleColumnV4(doubleIndex)
+      const col = doubleColumnV5(doubleIndex)
       const prefix = `f${fieldIndex}_s${slot}`
 
       switch (descriptor.aggregation) {
@@ -1880,8 +1808,8 @@ function buildPagedEntitySeriesSqlV4(
           const numAlias = `${prefix}_n`
           const denAlias = `${prefix}_d`
           selects.push(
-            `SUM(if(${col} = ${sentinel}, 0.0, ${col} * ${intervalSecondsColumnV4()} * _sample_interval)) AS ${numAlias}`,
-            `SUM(if(${col} = ${sentinel}, 0.0, ${intervalSecondsColumnV4()} * _sample_interval)) AS ${denAlias}`
+            `SUM(if(${col} = ${sentinel}, 0.0, ${col} * ${intervalSecondsColumnV5()} * _sample_interval)) AS ${numAlias}`,
+            `SUM(if(${col} = ${sentinel}, 0.0, ${intervalSecondsColumnV5()} * _sample_interval)) AS ${denAlias}`
           )
           plans.push({
             field,
@@ -1927,23 +1855,23 @@ function buildPagedEntitySeriesSqlV4(
     }
   }
 
-  const idsCol = blobColumnV4(AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX)
-  const entityPredicate = entityIds.map((id) => entityIdInPageIdentityPredicateV4(id)).join(' OR ')
+  const idsCol = blobColumnV5(AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX)
+  const entityPredicate = entityIds.map((id) => entityIdInPageIdentityPredicateV5(id)).join(' OR ')
 
   const sql = [
     'SELECT',
-    `  intDiv(toUnixTimestamp(${AE_V4_TIMESTAMP_COLUMN}), ${bucketSeconds}) * ${bucketSeconds} AS bucket,`,
+    `  intDiv(toUnixTimestamp(${AE_V5_TIMESTAMP_COLUMN}), ${bucketSeconds}) * ${bucketSeconds} AS bucket,`,
     `  ${idsCol} AS ids,`,
     `  SUM(_sample_interval) AS sample_count,`,
-    `  SUM(${intervalSecondsColumnV4()} * _sample_interval) / SUM(_sample_interval) AS avg_interval_seconds,`,
+    `  SUM(${intervalSecondsColumnV5()} * _sample_interval) / SUM(_sample_interval) AS avg_interval_seconds,`,
     `  ${selects.join(',\n  ')}`,
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${familyPredicateV4(family)}`,
+    `  AND ${familyPredicateV5(family)}`,
     `  AND (${entityPredicate})`,
-    `  AND ${timeRangePredicateV4(fromUnix, toUnix)}`,
+    `  AND ${timeRangePredicateV5(fromUnix, toUnix)}`,
     `GROUP BY bucket, ids`,
     `ORDER BY bucket ASC`,
   ].join('\n')
@@ -1952,18 +1880,18 @@ function buildPagedEntitySeriesSqlV4(
 }
 
 /** Split a page's blob10 identity list, returning each entity id's 0-based slot position. */
-function splitPageIdentityV4(ids: string): string[] {
+function splitPageIdentityV5(ids: string): string[] {
   return ids.length === 0 ? [] : ids.split(',')
 }
 
-function finiteNumberOrV4(raw: unknown, fallback: number): number {
+function finiteNumberOrV5(raw: unknown, fallback: number): number {
   const num = Number(raw)
   return Number.isFinite(num) ? num : fallback
 }
 
-function applyPagedFieldPlanV4(
-  acc: BucketEntityAccumulatorV4,
-  plan: PagedFieldPlanV4,
+function applyPagedFieldPlanV5(
+  acc: BucketEntityAccumulatorV5,
+  plan: PagedFieldPlanV5,
   row: Record<string, unknown>
 ): void {
   const existing = acc.fields.get(plan.field)
@@ -1971,46 +1899,46 @@ function applyPagedFieldPlanV4(
     case 'weighted-average':
       acc.fields.set(
         plan.field,
-        mergeFieldAccumulatorV4(existing, 'weighted-average', {
-          numerator: finiteNumberOrV4(row[plan.numAlias], 0),
-          denominator: finiteNumberOrV4(row[plan.denAlias], 0),
+        mergeFieldAccumulatorV5(existing, 'weighted-average', {
+          numerator: finiteNumberOrV5(row[plan.numAlias], 0),
+          denominator: finiteNumberOrV5(row[plan.denAlias], 0),
         })
       )
       return
     case 'delta-sum':
       acc.fields.set(
         plan.field,
-        mergeFieldAccumulatorV4(existing, 'delta-sum', {
-          raw: finiteNumberOrV4(row[plan.rawAlias], 0),
+        mergeFieldAccumulatorV5(existing, 'delta-sum', {
+          raw: finiteNumberOrV5(row[plan.rawAlias], 0),
         })
       )
       return
     case 'max':
       acc.fields.set(
         plan.field,
-        mergeFieldAccumulatorV4(existing, 'max', {
-          raw: finiteNumberOrV4(row[plan.rawAlias], aeV4MissingSentinelValue()),
+        mergeFieldAccumulatorV5(existing, 'max', {
+          raw: finiteNumberOrV5(row[plan.rawAlias], aeV5MissingSentinelValue()),
         })
       )
       return
     case 'last':
       acc.fields.set(
         plan.field,
-        mergeFieldAccumulatorV4(existing, 'last', {
-          value: finiteNumberOrV4(row[plan.valueAlias], aeV4MissingSentinelValue()),
-          key: finiteNumberOrV4(row[plan.keyAlias], 0),
+        mergeFieldAccumulatorV5(existing, 'last', {
+          value: finiteNumberOrV5(row[plan.valueAlias], aeV5MissingSentinelValue()),
+          key: finiteNumberOrV5(row[plan.keyAlias], 0),
         })
       )
   }
 }
 
-function accumulatePagedEntitySlotV4(
-  perEntity: Map<string, Map<number, BucketEntityAccumulatorV4>>,
+function accumulatePagedEntitySlotV5(
+  perEntity: Map<string, Map<number, BucketEntityAccumulatorV5>>,
   entityId: string,
   bucketEpochSeconds: number,
   groupSampleCount: number,
   row: Record<string, unknown>,
-  plans: readonly PagedFieldPlanV4[],
+  plans: readonly PagedFieldPlanV5[],
   slot: number
 ): void {
   const byBucket = perEntity.get(entityId)
@@ -2021,34 +1949,34 @@ function accumulatePagedEntitySlotV4(
     fields: new Map(),
   }
   acc.sampleCount += groupSampleCount
-  acc.intervalWeightedSum += mergeIntervalWeightedSumV4(row.avg_interval_seconds, groupSampleCount)
+  acc.intervalWeightedSum += mergeIntervalWeightedSumV5(row.avg_interval_seconds, groupSampleCount)
   for (const plan of plans) {
     if (plan.slot !== slot) continue
-    applyPagedFieldPlanV4(acc, plan, row)
+    applyPagedFieldPlanV5(acc, plan, row)
   }
   byBucket.set(bucketEpochSeconds, acc)
 }
 
-function parsePagedEntitySeriesRowsV4(
+function parsePagedEntitySeriesRowsV5(
   fields: readonly string[],
-  plans: readonly PagedFieldPlanV4[],
+  plans: readonly PagedFieldPlanV5[],
   entityIds: readonly string[],
   data: Array<Record<string, unknown>>,
   bucketSeconds: number
-): EntitySeriesEntityResultV4[] {
-  const perEntity = new Map<string, Map<number, BucketEntityAccumulatorV4>>()
+): EntitySeriesEntityResultV5[] {
+  const perEntity = new Map<string, Map<number, BucketEntityAccumulatorV5>>()
   for (const id of entityIds) perEntity.set(id, new Map())
 
   for (const row of data) {
     const idsRaw = typeof row.ids === 'string' ? row.ids : ''
-    const positions = splitPageIdentityV4(idsRaw)
+    const positions = splitPageIdentityV5(idsRaw)
     if (positions.length === 0) continue
-    const bucketEpochSeconds = parseBucketEpochSecondsV4(row.bucket)
+    const bucketEpochSeconds = parseBucketEpochSecondsV5(row.bucket)
     if (!Number.isFinite(bucketEpochSeconds)) continue
-    const groupSampleCount = finiteNumberOrV4(row.sample_count, 0)
+    const groupSampleCount = finiteNumberOrV5(row.sample_count, 0)
 
     for (let slot = 0; slot < positions.length; slot++) {
-      accumulatePagedEntitySlotV4(
+      accumulatePagedEntitySlotV5(
         perEntity,
         positions[slot] ?? '',
         bucketEpochSeconds,
@@ -2061,7 +1989,7 @@ function parsePagedEntitySeriesRowsV4(
   }
 
   return entityIds.map((entityId) => {
-    const { points, sampleCount } = toEntitySeriesPointsV4(
+    const { points, sampleCount } = toEntitySeriesPointsV5(
       perEntity.get(entityId) ?? new Map(),
       fields,
       bucketSeconds
@@ -2072,8 +2000,8 @@ function parsePagedEntitySeriesRowsV4(
 
 // ---------------------------------------------------------------------------
 // Embedded-NIC reconstruction (`network` family only) — see
-// `types-v4.ts`'s `EntitySeriesQueryV4` doc comment and
-// `field-map-v4.ts`'s `HOST_IO_EMBEDDED_NIC_FIELDS` for what's
+// `types-v5.ts`'s `EntitySeriesQueryV5` doc comment and
+// `field-map-v5.ts`'s `HOST_IO_EMBEDDED_NIC_FIELDS` for what's
 // reconstructable and why. A slot-mapped NIC never pages as a standalone
 // `network` row on this backend, so its series comes from `host.io`'s own
 // rows instead of the paged-family machinery above.
@@ -2081,11 +2009,11 @@ function parsePagedEntitySeriesRowsV4(
 
 /**
  * `slotMapping.normalNicSlots[0]`/`[1]` -> 0/1 (the two `host.io`-embedded
- * slots — see `field-map-v4.ts`'s `HOST_IO_EMBEDDED_NIC_SLOT_COUNT`),
+ * slots — see `field-map-v5.ts`'s `HOST_IO_EMBEDDED_NIC_SLOT_COUNT`),
  * restricted to ids actually present in `entityIds`. Slots 3+ are paged
  * `network` rows and resolve via the paged path like any other entity.
  */
-function embeddedNicSlotForEntityIdV4(
+function embeddedNicSlotForEntityIdV5(
   entityIds: readonly string[],
   slotMapping: SlotMapping | undefined
 ): Map<string, 0 | 1> {
@@ -2098,22 +2026,22 @@ function embeddedNicSlotForEntityIdV4(
   return bySlot
 }
 
-function embeddedNicAliasV4(slot: 0 | 1, field: string): string {
+function embeddedNicAliasV5(slot: 0 | 1, field: string): string {
   return `nic${slot}_${field}`
 }
 
 /**
  * Builds the shared `host.io` reconstruction query for both embedded NIC
  * slots at once (one row set carries both slots' columns per bucket — see
- * `field-map-v4.ts`'s `packHostIoDoubles`). Returns `null` when
+ * `field-map-v5.ts`'s `packHostIoDoubles`). Returns `null` when
  * `input.topologyGeneration` is unresolved: `host.io` rows carry no per-row
  * NIC identity, so without a generation to scope by, reconstruction cannot
  * safely tell today's slot assignment apart from an older one (see
- * `EntitySeriesQueryV4`'s doc comment) — callers report empty-but-present
+ * `EntitySeriesQueryV5`'s doc comment) — callers report empty-but-present
  * results for embedded entities in that case rather than querying.
  */
-function buildEmbeddedNicEntitySeriesSqlV4(
-  input: EntitySeriesQueryV4,
+function buildEmbeddedNicEntitySeriesSqlV5(
+  input: EntitySeriesQueryV5,
   fields: readonly string[],
   opts: { dataset: string; maxRangeSeconds: number }
 ): { sql: string; bucketSeconds: number; embeddableFields: string[] } | null {
@@ -2123,18 +2051,18 @@ function buildEmbeddedNicEntitySeriesSqlV4(
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  const bucketSeconds = assertPositiveIntV4(
+  const bucketSeconds = assertPositiveIntV5(
     'resolutionSeconds',
     input.resolutionSeconds ?? AE_DEFAULT_BUCKET_SECONDS
   )
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = hostMetricsV4DiscriminatorPredicates()
-  const hostIoPred = familyPredicateV4(AE_V4_FAMILY_HOST_IO)
-  const generationCol = blobColumnV4(AE_V4_BLOB_TOPOLOGY_GENERATION_INDEX)
-  const generationPred = `${generationCol} = ${quoteSqlStringV4(String(input.topologyGeneration))}`
+  const discriminators = hostMetricsV5DiscriminatorPredicates()
+  const hostIoPred = familyPredicateV5(AE_V5_FAMILY_HOST_IO)
+  const generationCol = blobColumnV5(AE_V5_BLOB_TOPOLOGY_GENERATION_INDEX)
+  const generationPred = `${generationCol} = ${quoteSqlStringV5(String(input.topologyGeneration))}`
 
   const embeddableFields = fields.filter((field) =>
     (HOST_IO_EMBEDDED_NIC_FIELDS as readonly string[]).includes(field)
@@ -2147,27 +2075,27 @@ function buildEmbeddedNicEntitySeriesSqlV4(
         field as (typeof HOST_IO_EMBEDDED_NIC_FIELDS)[number]
       )
       selects.push(
-        `${weightedAvgExpressionForColumnV4(
-          AE_V4_FAMILY_HOST_IO,
+        `${weightedAvgExpressionForColumnV5(
+          AE_V5_FAMILY_HOST_IO,
           doubleIndex
-        )} AS ${embeddedNicAliasV4(slot, field)}`
+        )} AS ${embeddedNicAliasV5(slot, field)}`
       )
     }
   }
 
   const sql = [
     'SELECT',
-    `  intDiv(toUnixTimestamp(${AE_V4_TIMESTAMP_COLUMN}), ${bucketSeconds}) * ${bucketSeconds} AS bucket,`,
+    `  intDiv(toUnixTimestamp(${AE_V5_TIMESTAMP_COLUMN}), ${bucketSeconds}) * ${bucketSeconds} AS bucket,`,
     `  SUM(if(${hostIoPred}, _sample_interval, 0.0)) AS sample_count,`,
-    `  SUM(if(${hostIoPred}, ${intervalSecondsColumnV4()} * _sample_interval, 0.0)) / SUM(if(${hostIoPred}, _sample_interval, 0.0)) AS avg_interval_seconds` +
+    `  SUM(if(${hostIoPred}, ${intervalSecondsColumnV5()} * _sample_interval, 0.0)) / SUM(if(${hostIoPred}, _sample_interval, 0.0)) AS avg_interval_seconds` +
       (selects.length > 0 ? `,\n  ${selects.join(',\n  ')}` : ''),
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
     `  AND ${hostIoPred}`,
     `  AND ${generationPred}`,
-    `  AND ${timeRangePredicateV4(fromUnix, toUnix)}`,
+    `  AND ${timeRangePredicateV5(fromUnix, toUnix)}`,
     `GROUP BY bucket`,
     `ORDER BY bucket ASC`,
   ].join('\n')
@@ -2175,43 +2103,43 @@ function buildEmbeddedNicEntitySeriesSqlV4(
   return { sql, bucketSeconds, embeddableFields }
 }
 
-function expectedSamplesFromAvgV4(resolutionSeconds: number, avgIntervalSeconds: number): number {
+function expectedSamplesFromAvgV5(resolutionSeconds: number, avgIntervalSeconds: number): number {
   if (!Number.isFinite(avgIntervalSeconds)) {
     return defaultExpectedSamplesPerBucket(resolutionSeconds)
   }
   return defaultExpectedSamplesPerBucket(resolutionSeconds, avgIntervalSeconds)
 }
 
-function embeddedNicFieldValueV4(
+function embeddedNicFieldValueV5(
   field: string,
   embeddableFields: readonly string[],
   row: Record<string, unknown>,
   slot: 0 | 1
 ): number | null {
   if (!embeddableFields.includes(field)) return null
-  const raw = row[embeddedNicAliasV4(slot, field)]
+  const raw = row[embeddedNicAliasV5(slot, field)]
   const num = typeof raw === 'number' ? raw : Number(raw)
-  return Number.isFinite(num) ? stripAeV4Sentinel(num) : null
+  return Number.isFinite(num) ? stripAeV5Sentinel(num) : null
 }
 
 /**
  * Parses one embedded NIC slot's points out of the shared query result (see
- * {@link buildEmbeddedNicEntitySeriesSqlV4}) — every requested field not in
+ * {@link buildEmbeddedNicEntitySeriesSqlV5}) — every requested field not in
  * `embeddableFields` (the 4 error/drop rates, never individually embedded)
  * resolves to `null`, never a fabricated split of the combined
  * problem-packets rate `host.io` actually carries.
  */
-function parseEmbeddedNicEntitySeriesRowsV4(
+function parseEmbeddedNicEntitySeriesRowsV5(
   fields: readonly string[],
   embeddableFields: readonly string[],
   data: Array<Record<string, unknown>>,
   slot: 0 | 1,
   resolutionSeconds: number
-): { points: EntitySeriesPointV4[]; sampleCount: number } {
-  const points: EntitySeriesPointV4[] = []
+): { points: EntitySeriesPointV5[]; sampleCount: number } {
+  const points: EntitySeriesPointV5[] = []
   let sampleCount = 0
   for (const row of data) {
-    const bucketEpochSeconds = parseBucketEpochSecondsV4(row.bucket)
+    const bucketEpochSeconds = parseBucketEpochSecondsV5(row.bucket)
     if (!Number.isFinite(bucketEpochSeconds)) continue
     const sampleCountRaw = Number(row.sample_count ?? 0)
     if (!Number.isFinite(sampleCountRaw)) continue
@@ -2220,14 +2148,14 @@ function parseEmbeddedNicEntitySeriesRowsV4(
 
     const values: Partial<Record<string, number | null>> = {}
     for (const field of fields) {
-      values[field] = embeddedNicFieldValueV4(field, embeddableFields, row, slot)
+      values[field] = embeddedNicFieldValueV5(field, embeddableFields, row, slot)
     }
 
     points.push({
       at: new Date(bucketEpochSeconds * 1000).toISOString(),
       values,
       sampleCount: sampleCountRaw,
-      expectedSampleCount: expectedSamplesFromAvgV4(
+      expectedSampleCount: expectedSamplesFromAvgV5(
         resolutionSeconds,
         Number(row.avg_interval_seconds)
       ),
@@ -2236,12 +2164,12 @@ function parseEmbeddedNicEntitySeriesRowsV4(
   return { points, sampleCount }
 }
 
-function withGapCountsV4(
-  entities: EntitySeriesEntityResultV4[],
+function withGapCountsV5(
+  entities: EntitySeriesEntityResultV5[],
   from: string,
   to: string,
   resolutionSeconds: number
-): EntitySeriesEntityResultV4[] {
+): EntitySeriesEntityResultV5[] {
   const fromMs = Date.parse(from)
   const toMs = Date.parse(to)
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return entities
@@ -2256,35 +2184,35 @@ function withGapCountsV4(
   }))
 }
 
-export async function queryEntitySeriesViaSqlApiV4(
+export async function queryEntitySeriesViaSqlApiV5(
   config: CloudflareAnalyticsSqlConfig,
-  input: EntitySeriesQueryV4
-): Promise<EntitySeriesResultV4> {
-  const fields = assertEntityFieldsV4(input.family, input.metrics)
-  const entityIds = assertEntityIdsV4(input.entityIds)
-  const dataset = config.dataset ?? AE_V4_DATASET_NAME
+  input: EntitySeriesQueryV5
+): Promise<EntitySeriesResultV5> {
+  const fields = assertEntityFieldsV5(input.family, input.metrics)
+  const entityIds = assertEntityIdsV5(input.entityIds)
+  const dataset = config.dataset ?? AE_V5_DATASET_NAME
   const maxRangeSeconds = config.maxRangeSeconds ?? AE_DEFAULT_MAX_RANGE_SECONDS
   const client = new CloudflareAnalyticsSqlClient(config)
 
-  let entities: EntitySeriesEntityResultV4[]
+  let entities: EntitySeriesEntityResultV5[]
   let bucketSeconds: number
 
   if (input.family === 'network') {
-    const embeddedSlotForId = embeddedNicSlotForEntityIdV4(entityIds, input.slotMapping)
+    const embeddedSlotForId = embeddedNicSlotForEntityIdV5(entityIds, input.slotMapping)
     const pagedIds = entityIds.filter((id) => !embeddedSlotForId.has(id))
     const embeddedIds = entityIds.filter((id) => embeddedSlotForId.has(id))
 
     const pagedPromise =
       pagedIds.length > 0
         ? (async () => {
-            const built = buildPagedEntitySeriesSqlV4(input, 'network', fields, pagedIds, {
+            const built = buildPagedEntitySeriesSqlV5(input, 'network', fields, pagedIds, {
               dataset,
               maxRangeSeconds,
             })
             const result = await client.executeSql(built.sql)
             return {
               bucketSeconds: built.bucketSeconds,
-              entities: parsePagedEntitySeriesRowsV4(
+              entities: parsePagedEntitySeriesRowsV5(
                 fields,
                 built.plans,
                 pagedIds,
@@ -2298,20 +2226,20 @@ export async function queryEntitySeriesViaSqlApiV4(
     const embeddedPromise =
       embeddedIds.length > 0
         ? (async () => {
-            const built = buildEmbeddedNicEntitySeriesSqlV4(input, fields, {
+            const built = buildEmbeddedNicEntitySeriesSqlV5(input, fields, {
               dataset,
               maxRangeSeconds,
             })
             if (!built) {
               // No resolved topology generation — see
-              // buildEmbeddedNicEntitySeriesSqlV4's doc comment. Still validate
+              // buildEmbeddedNicEntitySeriesSqlV5's doc comment. Still validate
               // the query shape so a malformed request fails the same way it
               // would on any other path.
               assertSafeServerId(input.serverId)
               const from = assertIsoTimestamp('from', input.from)
               const to = assertIsoTimestamp('to', input.to)
               assertRange(from, to, maxRangeSeconds)
-              const fallbackBucketSeconds = assertPositiveIntV4(
+              const fallbackBucketSeconds = assertPositiveIntV5(
                 'resolutionSeconds',
                 input.resolutionSeconds ?? AE_DEFAULT_BUCKET_SECONDS
               )
@@ -2330,7 +2258,7 @@ export async function queryEntitySeriesViaSqlApiV4(
               bucketSeconds: built.bucketSeconds,
               entities: embeddedIds.map((entityId) => {
                 const slot = embeddedSlotForId.get(entityId)!
-                const { points, sampleCount } = parseEmbeddedNicEntitySeriesRowsV4(
+                const { points, sampleCount } = parseEmbeddedNicEntitySeriesRowsV5(
                   fields,
                   built.embeddableFields,
                   result.data,
@@ -2348,9 +2276,9 @@ export async function queryEntitySeriesViaSqlApiV4(
     bucketSeconds =
       pagedResult?.bucketSeconds ??
       embeddedResult?.bucketSeconds ??
-      assertPositiveIntV4('resolutionSeconds', input.resolutionSeconds ?? AE_DEFAULT_BUCKET_SECONDS)
+      assertPositiveIntV5('resolutionSeconds', input.resolutionSeconds ?? AE_DEFAULT_BUCKET_SECONDS)
 
-    const byEntityId = new Map<string, EntitySeriesEntityResultV4>()
+    const byEntityId = new Map<string, EntitySeriesEntityResultV5>()
     for (const entity of pagedResult?.entities ?? []) {
       byEntityId.set(entity.entityId, entity)
     }
@@ -2358,18 +2286,18 @@ export async function queryEntitySeriesViaSqlApiV4(
       byEntityId.set(entity.entityId, entity)
     }
     entities = entityIds.map((id) => byEntityId.get(id)!)
-  } else if (SINGLE_ROW_FAMILIES_V4.has(input.family)) {
+  } else if (SINGLE_ROW_FAMILIES_V5.has(input.family)) {
     const family = input.family as Extract<
-      PerEntityHostedFamilyV4,
+      PerEntityHostedFamilyV5,
       'managed.ingress' | 'managed.database_proxy'
     >
-    const built = buildSingleRowEntitySeriesSqlV4(input, family, fields, entityIds, {
+    const built = buildSingleRowEntitySeriesSqlV5(input, family, fields, entityIds, {
       dataset,
       maxRangeSeconds,
     })
     bucketSeconds = built.bucketSeconds
     const result = await client.executeSql(built.sql)
-    entities = parseSingleRowEntitySeriesRowsV4(
+    entities = parseSingleRowEntitySeriesRowsV5(
       fields,
       built.aliases,
       entityIds,
@@ -2378,16 +2306,16 @@ export async function queryEntitySeriesViaSqlApiV4(
     )
   } else {
     const family = input.family as Exclude<
-      PerEntityHostedFamilyV4,
+      PerEntityHostedFamilyV5,
       'managed.ingress' | 'managed.database_proxy'
     >
-    const built = buildPagedEntitySeriesSqlV4(input, family, fields, entityIds, {
+    const built = buildPagedEntitySeriesSqlV5(input, family, fields, entityIds, {
       dataset,
       maxRangeSeconds,
     })
     bucketSeconds = built.bucketSeconds
     const result = await client.executeSql(built.sql)
-    entities = parsePagedEntitySeriesRowsV4(
+    entities = parsePagedEntitySeriesRowsV5(
       fields,
       built.plans,
       entityIds,
@@ -2403,7 +2331,7 @@ export async function queryEntitySeriesViaSqlApiV4(
     family: input.family,
     metrics: fields,
     resolutionSeconds: bucketSeconds,
-    entities: withGapCountsV4(entities, input.from, input.to, bucketSeconds),
+    entities: withGapCountsV5(entities, input.from, input.to, bucketSeconds),
   }
 }
 
@@ -2411,30 +2339,30 @@ export async function queryEntitySeriesViaSqlApiV4(
 // Entity ids seen — distinct entity ids of a family observed in a range.
 // ---------------------------------------------------------------------------
 
-function buildEntityIdsSeenSqlV4(
-  input: EntityIdsSeenQueryV4,
+function buildEntityIdsSeenSqlV5(
+  input: EntityIdsSeenQueryV5,
   opts: { dataset: string; maxRangeSeconds: number }
 ): string {
   const serverId = assertSafeServerId(input.serverId)
   const from = assertIsoTimestamp('from', input.from)
   const to = assertIsoTimestamp('to', input.to)
   assertRange(from, to, opts.maxRangeSeconds)
-  assertSafeDatasetNameV4(opts.dataset)
+  assertSafeDatasetNameV5(opts.dataset)
 
   const fromUnix = Math.floor(from.getTime() / 1000)
   const toUnix = Math.floor(to.getTime() / 1000)
-  const discriminators = hostMetricsV4DiscriminatorPredicates()
-  const idsCol = blobColumnV4(AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX)
+  const discriminators = hostMetricsV5DiscriminatorPredicates()
+  const idsCol = blobColumnV5(AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX)
 
   return [
     'SELECT',
     `  ${idsCol} AS ids`,
     `FROM ${opts.dataset}`,
-    `WHERE ${serverIdPredicateV4(serverId)}`,
+    `WHERE ${serverIdPredicateV5(serverId)}`,
     `  AND ${discriminators[0]}`,
     `  AND ${discriminators[1]}`,
-    `  AND ${familyPredicateV4(input.family)}`,
-    `  AND ${timeRangePredicateV4(fromUnix, toUnix)}`,
+    `  AND ${familyPredicateV5(input.family)}`,
+    `  AND ${timeRangePredicateV5(fromUnix, toUnix)}`,
   ].join('\n')
 }
 
@@ -2444,17 +2372,17 @@ function buildEntityIdsSeenSqlV4(
  * to be computed in TypeScript across every row's split list rather than via
  * SQL `SELECT DISTINCT`.
  */
-function parseEntityIdsSeenRowsV4(
-  family: PerEntityHostedFamilyV4,
+function parseEntityIdsSeenRowsV5(
+  family: PerEntityHostedFamilyV5,
   data: Array<Record<string, unknown>>
 ): string[] {
   const seen = new Set<string>()
-  const paged = !SINGLE_ROW_FAMILIES_V4.has(family)
+  const paged = !SINGLE_ROW_FAMILIES_V5.has(family)
   for (const row of data) {
     const raw = typeof row.ids === 'string' ? row.ids : ''
     if (!raw) continue
     if (paged) {
-      for (const id of splitPageIdentityV4(raw)) seen.add(id)
+      for (const id of splitPageIdentityV5(raw)) seen.add(id)
     } else {
       seen.add(raw)
     }
@@ -2462,18 +2390,18 @@ function parseEntityIdsSeenRowsV4(
   return [...seen].sort((a, b) => a.localeCompare(b))
 }
 
-export async function queryEntityIdsSeenViaSqlApiV4(
+export async function queryEntityIdsSeenViaSqlApiV5(
   config: CloudflareAnalyticsSqlConfig,
-  input: EntityIdsSeenQueryV4
-): Promise<EntityIdsSeenResultV4> {
-  const dataset = config.dataset ?? AE_V4_DATASET_NAME
+  input: EntityIdsSeenQueryV5
+): Promise<EntityIdsSeenResultV5> {
+  const dataset = config.dataset ?? AE_V5_DATASET_NAME
   const maxRangeSeconds = config.maxRangeSeconds ?? AE_DEFAULT_MAX_RANGE_SECONDS
-  const sql = buildEntityIdsSeenSqlV4(input, { dataset, maxRangeSeconds })
+  const sql = buildEntityIdsSeenSqlV5(input, { dataset, maxRangeSeconds })
   const client = new CloudflareAnalyticsSqlClient(config)
   const result = await client.executeSql(sql)
   return {
     kind: 'analytics-engine',
     available: true,
-    entityIds: parseEntityIdsSeenRowsV4(input.family, result.data),
+    entityIds: parseEntityIdsSeenRowsV5(input.family, result.data),
   }
 }

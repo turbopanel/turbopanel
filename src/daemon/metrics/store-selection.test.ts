@@ -1,31 +1,31 @@
 import { assertEquals, assertInstanceOf, assertRejects, assertStringIncludes } from '@std/assert'
-import { CloudflareAnalyticsEngineServerMetricsStoreV4 } from './backends/cloudflare/store-v4.ts'
-import { AE_DEFAULT_MAX_RANGE_SECONDS } from './backends/cloudflare/sql-api-v4.ts'
+import { CloudflareAnalyticsEngineServerMetricsStoreV5 } from './backends/cloudflare/store-v5.ts'
+import { AE_DEFAULT_MAX_RANGE_SECONDS } from './backends/cloudflare/sql-api-v5.ts'
 import { DuckDbParquetServerMetricsStore } from './backends/duckdb/store.ts'
-import { buildMetricsSampleV4 } from './contract-v4.ts'
-import type { AuthenticatedMetricsSampleV4 } from './types-v4.ts'
-import { DisabledServerMetricsStoreV4 } from './disabled-store-v4.ts'
+import { buildMetricsSampleV5 } from './contract-v5.ts'
+import type { AuthenticatedMetricsSampleV5 } from './types-v5.ts'
+import { DisabledServerMetricsStoreV5 } from './disabled-store-v5.ts'
 import { it } from '@std/testing/bdd'
 import {
   parseAnalyticsEngineMaxRangeSeconds,
   parseMetricsRetentionDays,
   resetMetricsStoreSelectionWarningsForTests,
   resolveCloudflareAnalyticsSqlConfig,
-  resolveServerMetricsStoreV4,
-  UnavailableServerMetricsStoreV4,
+  resolveServerMetricsStoreV5,
+  UnavailableServerMetricsStoreV5,
 } from './store-selection.ts'
-import { resolveServerMetricsStoreV4 as resolveWorkersServerMetricsStoreV4 } from './store-selection-workers.ts'
+import { resolveServerMetricsStoreV5 as resolveWorkersServerMetricsStoreV5 } from './store-selection-workers.ts'
 
-it('resolveServerMetricsStoreV4 workers + AE → AnalyticsEngine store', () => {
+it('resolveServerMetricsStoreV5 workers + AE → AnalyticsEngine store', () => {
   resetMetricsStoreSelectionWarningsForTests()
-  const store = resolveServerMetricsStoreV4({
+  const store = resolveServerMetricsStoreV5({
     runtime: 'workers',
     analyticsEngine: { writeDataPoint() {} },
   })
-  assertInstanceOf(store, CloudflareAnalyticsEngineServerMetricsStoreV4)
+  assertInstanceOf(store, CloudflareAnalyticsEngineServerMetricsStoreV5)
 })
 
-it('resolveServerMetricsStoreV4 workers without AE → unconfigured store', () => {
+it('resolveServerMetricsStoreV5 workers without AE → unconfigured store', () => {
   resetMetricsStoreSelectionWarningsForTests()
   const warnings: string[] = []
   const originalWarn = console.warn
@@ -33,21 +33,21 @@ it('resolveServerMetricsStoreV4 workers without AE → unconfigured store', () =
     warnings.push(String(msg))
   }
   try {
-    const store = resolveServerMetricsStoreV4({
+    const store = resolveServerMetricsStoreV5({
       runtime: 'workers',
     })
-    assertInstanceOf(store, DisabledServerMetricsStoreV4)
+    assertInstanceOf(store, DisabledServerMetricsStoreV5)
     assertEquals(warnings.length, 1)
   } finally {
     console.warn = originalWarn
   }
 })
 
-it('resolveServerMetricsStoreV4 deno → DuckDB store', () => {
+it('resolveServerMetricsStoreV5 deno → DuckDB store', () => {
   resetMetricsStoreSelectionWarningsForTests()
   const metricsDir = Deno.makeTempDirSync({ prefix: 'tp-metrics-select-' })
   try {
-    const store = resolveServerMetricsStoreV4({
+    const store = resolveServerMetricsStoreV5({
       runtime: 'deno',
       duckdb: { metricsDir },
     })
@@ -57,7 +57,7 @@ it('resolveServerMetricsStoreV4 deno → DuckDB store', () => {
   }
 })
 
-it('resolveServerMetricsStoreV4 deno construction failure → reads reject as unavailable', async () => {
+it('resolveServerMetricsStoreV5 deno construction failure → reads reject as unavailable', async () => {
   resetMetricsStoreSelectionWarningsForTests()
   // A regular file where the metrics directory should be makes mkdir fail.
   const blocker = Deno.makeTempFileSync({ prefix: 'tp-metrics-blocker-' })
@@ -67,13 +67,13 @@ it('resolveServerMetricsStoreV4 deno construction failure → reads reject as un
     warnings.push(String(msg))
   }
   try {
-    const store = resolveServerMetricsStoreV4({
+    const store = resolveServerMetricsStoreV5({
       runtime: 'deno',
       duckdb: { metricsDir: `${blocker}/metrics` },
     })
     // A real DuckDB outage must never degrade to the disabled store — reads
     // reject so metrics routes return 503 metrics_backend_unavailable.
-    assertInstanceOf(store, UnavailableServerMetricsStoreV4)
+    assertInstanceOf(store, UnavailableServerMetricsStoreV5)
     assertEquals(warnings.length, 1)
     assertStringIncludes(warnings[0]!, 'DuckDB store failed to open')
 
@@ -123,14 +123,11 @@ it('resolveServerMetricsStoreV4 deno construction failure → reads reject as un
 it('Workers store selection rejects a non-workers runtime', () => {
   resetMetricsStoreSelectionWarningsForTests()
   try {
-    resolveWorkersServerMetricsStoreV4({ runtime: 'deno' })
+    resolveWorkersServerMetricsStoreV5({ runtime: 'deno' })
     throw new TypeError('expected Workers store selection to reject deno runtime')
   } catch (error) {
     assertInstanceOf(error, TypeError)
-    assertEquals(
-      error.message,
-      'Workers metrics store selection requires runtime: workers',
-    )
+    assertEquals(error.message, 'Workers metrics store selection requires runtime: workers')
   }
 })
 
@@ -187,11 +184,11 @@ it('parseMetricsRetentionDays accepts positive integers only', () => {
   assertEquals(parseMetricsRetentionDays('bad'), undefined)
 })
 
-it('resolveServerMetricsStoreV4 deno DuckDB honors retentionDays override', () => {
+it('resolveServerMetricsStoreV5 deno DuckDB honors retentionDays override', () => {
   resetMetricsStoreSelectionWarningsForTests()
   const metricsDir = Deno.makeTempDirSync({ prefix: 'tp-metrics-retention-' })
   try {
-    const store = resolveServerMetricsStoreV4({
+    const store = resolveServerMetricsStoreV5({
       runtime: 'deno',
       duckdb: { metricsDir, retentionDays: 30 },
     })
@@ -201,7 +198,7 @@ it('resolveServerMetricsStoreV4 deno DuckDB honors retentionDays override', () =
   }
 })
 
-it('resolveServerMetricsStoreV4 warns only once per missing-backend key', () => {
+it('resolveServerMetricsStoreV5 warns only once per missing-backend key', () => {
   resetMetricsStoreSelectionWarningsForTests()
   const warnings: string[] = []
   const originalWarn = console.warn
@@ -209,8 +206,8 @@ it('resolveServerMetricsStoreV4 warns only once per missing-backend key', () => 
     warnings.push(String(msg))
   }
   try {
-    resolveServerMetricsStoreV4({ runtime: 'workers' })
-    resolveServerMetricsStoreV4({ runtime: 'workers' })
+    resolveServerMetricsStoreV5({ runtime: 'workers' })
+    resolveServerMetricsStoreV5({ runtime: 'workers' })
     assertEquals(warnings.length, 1)
   } finally {
     console.warn = originalWarn
@@ -219,15 +216,15 @@ it('resolveServerMetricsStoreV4 warns only once per missing-backend key', () => 
 
 const INTEGRATION_SERVER_ID = '11111111-2222-4333-8444-555555555555'
 
-function buildV4HostSample(overrides: {
+function buildV5HostSample(overrides: {
   atMs: number
   cpuUserPercent: number
   memoryAvailableBytes: number
-}): AuthenticatedMetricsSampleV4 {
+}): AuthenticatedMetricsSampleV5 {
   const at = new Date(overrides.atMs).toISOString()
-  const sample = buildMetricsSampleV4({
+  const sample = buildMetricsSampleV5({
     metadata: {
-      version: 4,
+      version: 5,
       sampledAt: at,
       intervalSeconds: 60,
       sequence: 1,
@@ -244,14 +241,15 @@ function buildV4HostSample(overrides: {
         stealPercent: null,
         softirqPercent: null,
         pressureSomePercent: null,
-        maxCoreBusyPercent: null,
+        saturatedCoreCount: null,
         procsRunning: null,
         procsBlocked: null,
         processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {
-        availableBytes: overrides.memoryAvailableBytes,
+        usedBytes: overrides.memoryAvailableBytes,
+        cachedFilesBytes: null,
         swapUsedBytes: null,
         pressureSomePercent: null,
         pressureFullPercent: null,
@@ -264,9 +262,7 @@ function buildV4HostSample(overrides: {
         ioPressureFullPercent: null,
         diskReadBytesPerSecond: null,
         diskWriteBytesPerSecond: null,
-        diskReadLatencyMs: null,
-        diskWriteLatencyMs: null,
-        maxBlockDeviceUtilPercent: null,
+        diskLatencyMs: null,
         rootFilesystemAvailableBytes: null,
         rootFilesystemFreeInodes: null,
       },
@@ -284,14 +280,14 @@ function buildV4HostSample(overrides: {
   return { ...sample, serverId: INTEGRATION_SERVER_ID, receivedAt: at }
 }
 
-it('resolveServerMetricsStoreV4 deno: real v4 ingest lands data the series/summary/fleet-snapshot routes can read back', async () => {
+it('resolveServerMetricsStoreV5 deno: real v5 ingest lands data the series/summary/fleet-snapshot routes can read back', async () => {
   resetMetricsStoreSelectionWarningsForTests()
   const metricsDir = Deno.makeTempDirSync({
     prefix: 'tp-metrics-integration-',
   })
   let store: DuckDbParquetServerMetricsStore | undefined
   try {
-    const resolved = resolveServerMetricsStoreV4({
+    const resolved = resolveServerMetricsStoreV5({
       runtime: 'deno',
       duckdb: { metricsDir },
     })
@@ -300,9 +296,9 @@ it('resolveServerMetricsStoreV4 deno: real v4 ingest lands data the series/summa
 
     const sampledAtMs = Date.UTC(2026, 5, 2, 12, 0, 0)
     // The real Deno ingest write path (`POST /api/daemon/v1/metrics` calls
-    // this on `serverMetricsStoreV4` directly).
+    // this on `serverMetricsStoreV5` directly).
     await store.writeSample(
-      buildV4HostSample({
+      buildV5HostSample({
         atMs: sampledAtMs,
         cpuUserPercent: 12.5,
         memoryAvailableBytes: 1_000_000,
@@ -335,12 +331,12 @@ it('resolveServerMetricsStoreV4 deno: real v4 ingest lands data the series/summa
     // `/servers/metrics/latest`
     const fleet = await store.queryFleetHostSnapshot!({
       serverIds: [INTEGRATION_SERVER_ID],
-      metrics: ['host.cpu.userPercent', 'host.memory.availableBytes'],
+      metrics: ['host.cpu.userPercent', 'host.memory.usedBytes'],
       ...range,
     })
     assertEquals(fleet.servers.length, 1)
     assertEquals(fleet.servers[0]?.values['host.cpu.userPercent'], 12.5)
-    assertEquals(fleet.servers[0]?.values['host.memory.availableBytes'], 1_000_000)
+    assertEquals(fleet.servers[0]?.values['host.memory.usedBytes'], 1_000_000)
   } finally {
     await store?.close()
     Deno.removeSync(metricsDir, { recursive: true })

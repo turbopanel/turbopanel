@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * v4 metrics boundary check (CI guard).
+ * v5 metrics boundary check (CI guard).
  *
- * Three invariants for the v4 metrics stack (`src/daemon/metrics/`) and the
+ * Three invariants for the v5 metrics stack (`src/daemon/metrics/`) and the
  * metrics-contract-facing surfaces that consume it outside that tree:
  *
- *  1. Physical Cloudflare Analytics Engine v4 positional tokens
+ *  1. Physical Cloudflare Analytics Engine v5 positional tokens
  *     (`double<N>` / `blob<N>` used as an actual column literal, plus the
  *     raw `-1e308` sentinel value) never appear outside
- *     `backends/cloudflare/` — see `field-map-v4.ts`'s doc comment: "never
+ *     `backends/cloudflare/` — see `field-map-v5.ts`'s doc comment: "never
  *     inline positional literals elsewhere; always derive columns and write
  *     payloads through this module." Doc-comment prose that merely mentions
  *     a slot name for context (e.g. "double20-equivalent") is not flagged —
  *     only code lines are scanned. Importing the exported
- *     `AE_V4_MISSING_METRIC_SENTINEL` *constant* (rather than inlining its
+ *     `AE_V5_MISSING_METRIC_SENTINEL` *constant* (rather than inlining its
  *     `-1e308` value) is always fine anywhere — this rule only confines the
  *     raw literal and hardcoded column names, never the symbol. Checked
  *     across all scan surfaces below (none of them are ever legitimately
@@ -27,18 +27,18 @@
  *     `EXTRA_SURFACE_FILES` below) — the v3 contract (`contract.ts`,
  *     `validation.ts`, `metric-descriptors.ts`, `disabled-store.ts`, the
  *     Cloudflare v3 backend) has been fully deleted; nothing left legitimately
- *     uses these symbols. `V3_SYMBOL_IN_V4_FILE_ALLOWLIST` narrowly exempts
+ *     uses these symbols. `V3_SYMBOL_IN_V5_FILE_ALLOWLIST` narrowly exempts
  *     specific fixture files that deliberately construct a retired v3 wire
- *     shape to assert a v4 validator rejects it.
- *     Doc-comment prose contrasting v4 with v3 (e.g. "v4 drops v3's
+ *     shape to assert a v5 validator rejects it.
+ *     Doc-comment prose contrasting v5 with v3 (e.g. "v5 drops v3's
  *     `MetricPart` allowlist") is not flagged.
- *  3. The v4 paged-entity-series "page identity" symbols — blob9's page
+ *  3. The v5 paged-entity-series "page identity" symbols — blob9's page
  *     index and blob10's comma-joined page identity list, backend-private
- *     per `field-map-v4.ts`'s doc comments (`AE_V4_BLOB_PAGE_INDEX`,
- *     `AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX`) and the SQL predicate/parser
- *     built from them (`entityIdInPageIdentityPredicateV4`, exported, and
- *     `splitPageIdentityV4`, module-private — both `sql-api-v4.ts`) — never
- *     appear as real code outside `backends/cloudflare/`. `splitPageIdentityV4`
+ *     per `field-map-v5.ts`'s doc comments (`AE_V5_BLOB_PAGE_INDEX`,
+ *     `AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX`) and the SQL predicate/parser
+ *     built from them (`entityIdInPageIdentityPredicateV5`, exported, and
+ *     `splitPageIdentityV5`, module-private — both `sql-api-v5.ts`) — never
+ *     appear as real code outside `backends/cloudflare/`. `splitPageIdentityV5`
  *     can never actually be imported from outside its own module since it
  *     isn't exported, so that half of the rule only guards against someone
  *     reimplementing a same-named CSV-splitting helper elsewhere rather than
@@ -49,8 +49,8 @@
  *     lives well outside those surfaces.
  *
  * Usage:
- *   node scripts/check-v4-boundaries.mjs
- *   pnpm check:v4-boundaries
+ *   node scripts/check-v5-boundaries.mjs
+ *   pnpm check:v5-boundaries
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -62,7 +62,7 @@ const SELF = path.relative(ROOT, fileURLToPath(import.meta.url))
 const SCAN_ROOT = path.join(ROOT, 'src/daemon/metrics')
 
 // Metrics-contract-facing surfaces outside the metrics backend itself that
-// must stay just as backend-agnostic as v4-suffixed files inside it. Kept as
+// must stay just as backend-agnostic as v5-suffixed files inside it. Kept as
 // an explicit directory list (not "all of src/daemon" or "all of
 // src/client") because `src/daemon/openapi/` is inherently API-contract
 // shaped in full, while `src/client` is not — scanning all of `src/client`
@@ -79,7 +79,7 @@ const EXTRA_SURFACE_FILES = [
   'src/client/servers/metrics-routes.test.ts',
   'src/client/servers/metrics-routes-helpers.ts',
   'src/client/servers/metrics-routes-helpers.hostfree.test.ts',
-  // Topology/SlotMapping records: `field-map-v4.ts` derives its
+  // Topology/SlotMapping records: `field-map-v5.ts` derives its
   // identity-addressed page ordering (`gpuPageOrder` / `blockPageOrder` /
   // `filesystemPageOrder` / `hardwareSignalPageOrder`) from these, so they
   // sit right next to the backend-private paging concept even though they
@@ -104,22 +104,18 @@ const PAGE_TOKEN_ROOT = path.join(ROOT, 'src')
 // symbols outside backends/cloudflare/.
 const PAGE_TOKEN_ALLOWLIST = new Set([
   // Daemon end-to-end ingest-route test: asserts on the actual AE row shape
-  // (`blobs[...]`) written by CloudflareAnalyticsEngineServerMetricsStoreV4,
+  // (`blobs[...]`) written by CloudflareAnalyticsEngineServerMetricsStoreV5,
   // so it necessarily reaches into the backend-private blob layout directly
   // rather than through a query-side abstraction. Narrow, intentional.
   'src/daemon/api-routes.test.ts',
 ])
 
-// Exact repo-relative paths permitted to reference v3 symbols inside a
-// v4-suffixed file.
-const V3_SYMBOL_IN_V4_FILE_ALLOWLIST = new Set([
-  // Both construct a `legacyV3Raw()` fixture (a retired v3 wire shape,
-  // `parts: [...]` included) specifically to assert that the v4 validator
-  // *rejects* it — the v3 shape is the fixture under test, not a real v4
-  // dependency on v3's `parts` model.
-  'src/daemon/metrics/validation-v4.test.ts',
-  'src/daemon/metrics/validation-v4.deno.test.ts',
-])
+// No file may reference v3 symbols any more. The v3 wire shape is fully
+// purged — there are no remaining fixtures that construct one, so the
+// allowlist that used to exempt the validator's rejection tests is empty.
+// The scan itself stays: it is what stops v3's `parts`/`MetricPart` model
+// being reintroduced, which is a different thing from carrying v3 support.
+const V3_SYMBOL_IN_V5_FILE_ALLOWLIST = new Set([])
 
 const SKIP_DIR_NAMES = new Set(['.git', 'node_modules', 'dist', 'coverage', '.wrangler', '.turbo'])
 
@@ -144,7 +140,7 @@ function* walk(dir) {
 const AE_TOKEN_PATTERN = /(["'`])(double|blob)\d{1,2}\1|\.(double|blob)\d{1,2}\b|-1e308/
 const V3_SYMBOL_PATTERN = /\bMetricPart\b|\bHOST_METRIC_KEYS\b|\.parts\b|\bparts\??\s*:/
 const PAGE_TOKEN_PATTERN =
-  /\bAE_V4_BLOB_PAGE_INDEX\b|\bAE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX\b|\bentityIdInPageIdentityPredicateV4\b|\bsplitPageIdentityV4\b/
+  /\bAE_V5_BLOB_PAGE_INDEX\b|\bAE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX\b|\bentityIdInPageIdentityPredicateV5\b|\bsplitPageIdentityV5\b/
 
 function isUnderCloudflareBackend(rel) {
   return rel.includes('backends/cloudflare/')
@@ -170,7 +166,7 @@ for (const file of walk(SCAN_ROOT)) {
   const rel = path.relative(ROOT, file)
   if (rel === SELF) continue
   const scanForAeTokens = !isUnderCloudflareBackend(rel)
-  const scanForV3Symbols = !V3_SYMBOL_IN_V4_FILE_ALLOWLIST.has(rel)
+  const scanForV3Symbols = !V3_SYMBOL_IN_V5_FILE_ALLOWLIST.has(rel)
   if (!scanForAeTokens && !scanForV3Symbols) continue
 
   const lines = fs.readFileSync(file, 'utf8').split('\n')
@@ -178,7 +174,7 @@ for (const file of walk(SCAN_ROOT)) {
   if (scanForAeTokens) {
     checks.push({
       pattern: AE_TOKEN_PATTERN,
-      message: (m) => `references AE v4 physical token "${m}" outside backends/cloudflare/`,
+      message: (m) => `references AE v5 physical token "${m}" outside backends/cloudflare/`,
     })
   }
   if (scanForV3Symbols) {
@@ -203,7 +199,7 @@ for (const file of extraSurfaceFiles) {
   scanLines(rel, lines, [
     {
       pattern: AE_TOKEN_PATTERN,
-      message: (m) => `references AE v4 physical token "${m}" outside backends/cloudflare/`,
+      message: (m) => `references AE v5 physical token "${m}" outside backends/cloudflare/`,
     },
     {
       pattern: V3_SYMBOL_PATTERN,
@@ -225,31 +221,31 @@ for (const file of walk(PAGE_TOKEN_ROOT)) {
     {
       pattern: PAGE_TOKEN_PATTERN,
       message: (m) =>
-        `references backend-private v4 page-identifier symbol "${m}" outside backends/cloudflare/`,
+        `references backend-private v5 page-identifier symbol "${m}" outside backends/cloudflare/`,
     },
   ])
 }
 
 if (failures.length > 0) {
-  console.error('v4 metrics boundary check failed:\n')
+  console.error('v5 metrics boundary check failed:\n')
   for (const failure of failures) {
     console.error(`  ✗ ${failure}`)
   }
   console.error(
-    `\n${failures.length} problem(s) found. AE v4 positional tokens (double<N>/blob<N>/-1e308) ` +
+    `\n${failures.length} problem(s) found. AE v5 positional tokens (double<N>/blob<N>/-1e308) ` +
       'must stay confined to src/daemon/metrics/backends/cloudflare/ — always derive columns ' +
-      'through field-map-v4.ts. The metrics backend and metrics-contract surfaces outside it ' +
+      'through field-map-v5.ts. The metrics backend and metrics-contract surfaces outside it ' +
       'must never reference v3-only symbols (MetricPart, HOST_METRIC_KEYS, ' +
       'the v3 `parts` field) as real code — the v3 contract was fully removed; see ' +
-      'field-map-v4.ts / contract-v4.ts. The v4 page-' +
-      'identifier symbols (AE_V4_BLOB_PAGE_INDEX, AE_V4_BLOB_SOURCE_OR_IDENTITY_INDEX, ' +
-      'entityIdInPageIdentityPredicateV4) are backend-private and must stay confined to ' +
-      'backends/cloudflare/ as well — see sql-api-v4.ts.'
+      'field-map-v5.ts / contract-v5.ts. The v5 page-' +
+      'identifier symbols (AE_V5_BLOB_PAGE_INDEX, AE_V5_BLOB_SOURCE_OR_IDENTITY_INDEX, ' +
+      'entityIdInPageIdentityPredicateV5) are backend-private and must stay confined to ' +
+      'backends/cloudflare/ as well — see sql-api-v5.ts.'
   )
   process.exit(1)
 }
 
 console.log(
-  'check-v4-boundaries: AE v4 physical tokens and page-identifier symbols stay confined, ' +
-    'and v4-only files / metrics-contract surfaces stay v3-free.'
+  'check-v5-boundaries: AE v5 physical tokens and page-identifier symbols stay confined, ' +
+    'and v5-only files / metrics-contract surfaces stay v3-free.'
 )

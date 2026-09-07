@@ -433,3 +433,23 @@ test('runPreparedServerUpdate surfaces enqueue failures', async () => {
   })
   assertEquals(events, ['failed:cell gone'])
 })
+
+test('parseServerPatchCore accepts machineClass pins and rejects unknown classes', () => {
+  const physical = parseServerPatchCore({ machineClass: 'physical' })
+  if (!physical.ok) throw new TypeError('expected physical machineClass patch')
+  assertEquals(physical.patch.machineClass, 'physical')
+  assertEquals(physical.patch.name, undefined)
+  assertEquals(physical.patch.options, undefined)
+
+  const cleared = parseServerPatchCore({ machineClass: null })
+  if (!cleared.ok) throw new TypeError('expected machineClass clear patch')
+  assertEquals(cleared.patch.machineClass, null)
+
+  const unknown = parseServerPatchCore({ machineClass: 'bare-metal' })
+  if (unknown.ok) throw new TypeError('expected unknown machineClass rejection')
+  assertEquals(unknown.error, 'Invalid machineClass')
+  assertEquals(unknown.status, 400)
+
+  const wrongType = parseServerPatchCore({ machineClass: 1 })
+  if (wrongType.ok) throw new TypeError('expected non-string machineClass rejection')
+})

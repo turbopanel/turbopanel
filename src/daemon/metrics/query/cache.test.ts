@@ -16,22 +16,22 @@ it('metricsChartCacheKey: stable metric ordering and schema version', () => {
     serverId: '11111111-1111-4111-8111-111111111111',
     fromBucketMs: 1_000,
     toBucketMs: 2_000,
-    metrics: ['host.memory.availableBytes', 'host.cpu.userPercent'],
+    metrics: ['host.memory.usedBytes', 'host.cpu.userPercent'],
     resolutionSeconds: 300,
     backend: 'duckdb',
-    schemaVersion: 4,
+    schemaVersion: 5,
   })
   const keyB = metricsChartCacheKey({
     serverId: '11111111-1111-4111-8111-111111111111',
     fromBucketMs: 1_000,
     toBucketMs: 2_000,
-    metrics: ['host.cpu.userPercent', 'host.memory.availableBytes'],
+    metrics: ['host.cpu.userPercent', 'host.memory.usedBytes'],
     resolutionSeconds: 300,
     backend: 'duckdb',
-    schemaVersion: 4,
+    schemaVersion: 5,
   })
   assertEquals(keyA, keyB)
-  assertEquals(keyA.includes('v4'), true)
+  assertEquals(keyA.includes('v5'), true)
 })
 
 it('metricsChartCacheKey: topologyGeneration is appended only when provided', () => {
@@ -42,7 +42,7 @@ it('metricsChartCacheKey: topologyGeneration is appended only when provided', ()
     metrics: ['host.cpu.userPercent'],
     resolutionSeconds: 300,
     backend: 'duckdb',
-    schemaVersion: 4,
+    schemaVersion: 5,
   })
   const withGeneration = metricsChartCacheKey({
     serverId: '11111111-1111-4111-8111-111111111111',
@@ -51,7 +51,7 @@ it('metricsChartCacheKey: topologyGeneration is appended only when provided', ()
     metrics: ['host.cpu.userPercent'],
     resolutionSeconds: 300,
     backend: 'duckdb',
-    schemaVersion: 4,
+    schemaVersion: 5,
     topologyGeneration: 2,
   })
   assertEquals(withoutGeneration.includes(':tg'), false)
@@ -104,7 +104,7 @@ it('Deno metrics chart cache: get/set and bounded eviction', async () => {
     metrics: ['host.cpu.userPercent'],
     resolutionSeconds: 60,
     backend: 'disabled',
-    schemaVersion: 4,
+    schemaVersion: 5,
   })
 
   assertEquals(await cache.get(key), null)

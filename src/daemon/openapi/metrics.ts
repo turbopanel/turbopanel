@@ -1,15 +1,15 @@
 import {
-  HOST_METRICS_METRIC_DESCRIPTORS_V4,
-  type MetricEntityScopeV4,
-} from '../metrics/metric-descriptors-v4.ts'
-import { METRIC_EVENT_KINDS_V4, METRICS_SCHEMA_VERSION_V4 } from '../metrics/contract-v4.ts'
+  HOST_METRICS_METRIC_DESCRIPTORS_V5,
+  type MetricEntityScopeV5,
+} from '../metrics/metric-descriptors-v5.ts'
+import { METRIC_EVENT_KINDS_V5, METRICS_SCHEMA_VERSION_V5 } from '../metrics/contract-v5.ts'
 
-/** Every descriptor-backed numeric field for `scope`, keyed by `fieldName` — the same grouping `field-map-v4.ts` uses to pack physical storage. */
+/** Every descriptor-backed numeric field for `scope`, keyed by `fieldName` — the same grouping `field-map-v5.ts` uses to pack physical storage. */
 function numericPropertiesForScope(
-  scope: MetricEntityScopeV4
+  scope: MetricEntityScopeV5
 ): Record<string, { type: readonly ['number', 'null'] }> {
   const properties: Record<string, { type: readonly ['number', 'null'] }> = {}
-  for (const descriptor of Object.values(HOST_METRICS_METRIC_DESCRIPTORS_V4)) {
+  for (const descriptor of Object.values(HOST_METRICS_METRIC_DESCRIPTORS_V5)) {
     if (descriptor.entityScope === scope) {
       properties[descriptor.fieldName] = { type: ['number', 'null'] as const }
     }
@@ -17,7 +17,7 @@ function numericPropertiesForScope(
   return properties
 }
 
-function hostGroupSchema(scope: MetricEntityScopeV4) {
+function hostGroupSchema(scope: MetricEntityScopeV5) {
   return {
     type: 'object',
     properties: numericPropertiesForScope(scope),
@@ -38,18 +38,13 @@ function cpuDetailSchema() {
     required: ['hotspots'],
     properties: {
       ...numericPropertiesForScope('cpuDetail'),
-      hotspots: {
-        type: 'array',
-        description: "The daemon's up-to-4 busiest logical cores this interval.",
-        items: entityArraySchema('cpuHotspot', ['coreId']),
-      },
     },
     additionalProperties: false,
   }
 }
 
 /** A per-entity array item schema: `idFields` (string identity/discriminator columns) plus every descriptor-backed numeric field for `scope`. */
-function entityArraySchema(scope: MetricEntityScopeV4, idFields: readonly string[]) {
+function entityArraySchema(scope: MetricEntityScopeV5, idFields: readonly string[]) {
   const idProperties = Object.fromEntries(
     idFields.map((field) => [field, { type: 'string' as const }])
   )
@@ -62,7 +57,7 @@ function entityArraySchema(scope: MetricEntityScopeV4, idFields: readonly string
 }
 
 export const metricsSchemas = {
-  DaemonMetricsSampleV4: {
+  DaemonMetricsSampleV5: {
     type: 'object',
     required: [
       'type',
@@ -91,7 +86,7 @@ export const metricsSchemas = {
           'bootGeneration',
         ],
         properties: {
-          version: { type: 'integer', const: METRICS_SCHEMA_VERSION_V4 },
+          version: { type: 'integer', const: METRICS_SCHEMA_VERSION_V5 },
           sampledAt: { type: 'string', format: 'date-time' },
           intervalSeconds: { type: 'number' },
           sequence: { type: 'integer' },
@@ -160,16 +155,10 @@ export const metricsSchemas = {
         type: 'array',
         description:
           'Discrete state-change/fault signals distinct from the continuous numeric metrics above.',
-        items: { $ref: '#/components/schemas/DaemonMetricEventV4' },
+        items: { $ref: '#/components/schemas/DaemonMetricEventV5' },
       },
       cpuDetail: cpuDetailSchema(),
       memoryDetail: hostGroupSchema('memoryDetail'),
-      cpuCoreLive: {
-        type: 'array',
-        description:
-          'Per-core live breakdown (live sessions only) — one entry per online logical core.',
-        items: entityArraySchema('cpuCore', ['coreId']),
-      },
       numaNodes: {
         type: 'array',
         description: 'Reserved conceptual family — not yet populated by any collector.',
@@ -189,13 +178,13 @@ export const metricsSchemas = {
     },
     additionalProperties: false,
   },
-  DaemonMetricEventV4: {
+  DaemonMetricEventV5: {
     type: 'object',
     required: ['eventId', 'at', 'kind', 'severity'],
     properties: {
       eventId: { type: 'string' },
       at: { type: 'string', format: 'date-time' },
-      kind: { type: 'string', enum: [...METRIC_EVENT_KINDS_V4] },
+      kind: { type: 'string', enum: [...METRIC_EVENT_KINDS_V5] },
       severity: { type: 'string', enum: ['info', 'warning', 'critical'] },
       entityId: { type: 'string' },
       source: { type: 'string' },
@@ -221,7 +210,7 @@ export const metricsPaths: Record<string, unknown> = {
       tags: ['Daemon'],
       summary: 'Ingest host metrics sample',
       description:
-        'Authenticated daemon posts a v4 entity-scoped metrics sample. ' +
+        'Authenticated daemon posts a v5 entity-scoped metrics sample. ' +
         'serverId is taken from the JWT `sub` — never from the body. ' +
         'Writes are fire-and-forget to Analytics Engine / DuckDB; ' +
         'never wakes the Durable Object.',
@@ -230,7 +219,7 @@ export const metricsPaths: Record<string, unknown> = {
         required: true,
         content: {
           'application/json': {
-            schema: { $ref: '#/components/schemas/DaemonMetricsSampleV4' },
+            schema: { $ref: '#/components/schemas/DaemonMetricsSampleV5' },
           },
         },
       },

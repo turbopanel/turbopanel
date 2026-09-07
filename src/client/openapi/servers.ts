@@ -244,6 +244,12 @@ export const serverSchemas = {
         description:
           'Daemon-reported hostname from the promoted `server.hostname` column (not `metadata.hostname`).',
       },
+      machineClass: {
+        type: ['string', 'null'],
+        enum: ['physical', 'virtual', null],
+        description:
+          'Declared `server.machine_class` for metrics capability-plan resolution. Null until pinned via PATCH or inferred `physical` at ingest (sensors discovered); never inferred `virtual`.',
+      },
       remoteAddress: {
         type: ['string', 'null'],
         description:
@@ -448,6 +454,12 @@ export const serverSchemas = {
     type: 'object',
     properties: {
       name: { type: 'string' },
+      machineClass: {
+        type: ['string', 'null'],
+        enum: ['physical', 'virtual', null],
+        description:
+          'Pins `server.machine_class` for metrics capability-plan resolution: `physical` unlocks hardware-sensor slots, `virtual` suppresses them, null clears the pin so ingest infers the class from topology again.',
+      },
       options: {
         type: 'object',
         description:

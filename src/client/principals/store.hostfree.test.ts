@@ -86,7 +86,7 @@ function thenableRows(rows: unknown[]) {
   }
 }
 
-test('isUuid accepts v4-shaped ids and rejects garbage', () => {
+test('isUuid accepts v5-shaped ids and rejects garbage', () => {
   assertEquals(isUuid('00000000-0000-4000-8000-000000000001'), true)
   assertEquals(isUuid('not-a-uuid'), false)
   assertEquals(isUuid(''), false)

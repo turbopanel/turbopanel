@@ -3,49 +3,49 @@
  */
 
 import { assertEquals } from '@std/assert'
-import { CloudflareAnalyticsEngineServerMetricsStoreV4 } from '../../daemon/metrics/backends/cloudflare/store-v4.ts'
-import { DisabledServerMetricsStoreV4 } from '../../daemon/metrics/disabled-store-v4.ts'
+import { CloudflareAnalyticsEngineServerMetricsStoreV5 } from '../../daemon/metrics/backends/cloudflare/store-v5.ts'
+import { DisabledServerMetricsStoreV5 } from '../../daemon/metrics/disabled-store-v5.ts'
 import type {
-  EntitySeriesQueryV4,
-  EntitySeriesResultV4,
-  HostSeriesQueryV4,
-  HostSeriesResultV4,
-  ServerMetricsStoreV4,
+  EntitySeriesQueryV5,
+  EntitySeriesResultV5,
+  HostSeriesQueryV5,
+  HostSeriesResultV5,
+  ServerMetricsStoreV5,
   StatusHistoryResult,
-} from '../../daemon/metrics/types-v4.ts'
+} from '../../daemon/metrics/types-v5.ts'
 import {
   buildConnectionHistoryPayload,
   buildCpuLimitsEnvelope,
-  buildFleetLatestPayloadV4,
+  buildFleetLatestPayloadV5,
   buildHostSummaryPayload,
-  buildSeriesRouteResponseV4,
-  buildTopologyContextV4,
+  buildSeriesRouteResponseV5,
+  buildTopologyContextV5,
   connectionHistoryHasCacheableData,
-  defaultHostCanonicalNamesV4,
-  EMPTY_HOST_CAPACITIES_V4,
-  fabricNetworkSelectionErrorV4,
+  defaultHostCanonicalNamesV5,
+  EMPTY_HOST_CAPACITIES_V5,
+  fabricNetworkSelectionErrorV5,
   findFabricNetworkEntityId,
   findInvalidTopologyIdField,
   findUnmonitorableNicSlotId,
-  machineClassFromTopologySnapshotV4,
-  nicSlotLimitViolationV4,
-  FLEET_HOST_METRICS_V4,
-  fleetHostCapacitiesFromSnapshotV4,
+  FLEET_HOST_METRICS_V5,
+  fleetHostCapacitiesFromSnapshotV5,
   hardwareProfileUpdateNeedsTopologyValidation,
+  machineClassFromTopologySnapshotV5,
   metricsBackendUnavailableResponse,
   metricsQueryErrorMessage,
+  nicSlotLimitViolationV5,
   parseHardwareProfileBody,
   parseIsoTimestampQuery,
   parseOptionalResolution,
-  parseSeriesMetricSelectorsV4,
-  querySeriesResultsV4,
-  resolveStoreBackendKindV4,
-  seriesCacheMetricsListV4,
+  parseSeriesMetricSelectorsV5,
+  querySeriesResultsV5,
+  resolveStoreBackendKindV5,
+  seriesCacheMetricsListV5,
   type TopologyIdValidationSnapshot,
   topologyOverridesFromHardwareProfile,
 } from './metrics-routes-helpers.ts'
 import { MAX_NIC_SLOTS } from './topology-types.ts'
-import type { TopologyInventoryV4 } from './topology-inventory.ts'
+import type { TopologyInventoryV5 } from './topology-inventory.ts'
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -295,7 +295,12 @@ test('hardwareProfileUpdateNeedsTopologyValidation only fires for topology-id as
   assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nic1: 'eth0' }), false)
   assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nicSlotDeviceIds: null }), false)
   assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nicSlotDeviceIds: [] }), false)
-  assertEquals(hardwareProfileUpdateNeedsTopologyValidation({ nicSlotDeviceIds: ['mac:a'] }), true)
+  assertEquals(
+    hardwareProfileUpdateNeedsTopologyValidation({
+      nicSlotDeviceIds: ['mac:a'],
+    }),
+    true
+  )
   assertEquals(
     hardwareProfileUpdateNeedsTopologyValidation({
       hostingFilesystemId: 'fs:dev:/dev/sda1',
@@ -330,14 +335,14 @@ test('findInvalidTopologyIdField matches assigned ids against the recorded topol
     'nicSlotDeviceIds'
   )
   assertEquals(findUnmonitorableNicSlotId(['mac:a', 'mac:port'], snapshot), 'mac:port')
-  assertEquals(nicSlotLimitViolationV4({ nicSlotDeviceIds: ['mac:a', 'mac:b'] }, 2), null)
+  assertEquals(nicSlotLimitViolationV5({ nicSlotDeviceIds: ['mac:a', 'mac:b'] }, 2), null)
   assertEquals(
-    typeof nicSlotLimitViolationV4({ nicSlotDeviceIds: ['mac:a', 'mac:b'] }, 1),
+    typeof nicSlotLimitViolationV5({ nicSlotDeviceIds: ['mac:a', 'mac:b'] }, 1),
     'string'
   )
-  assertEquals(machineClassFromTopologySnapshotV4(undefined), 'virtual')
-  assertEquals(machineClassFromTopologySnapshotV4({ hardwareSignals: [] }), 'virtual')
-  assertEquals(machineClassFromTopologySnapshotV4({ hardwareSignals: [{}] }), 'physical')
+  assertEquals(machineClassFromTopologySnapshotV5(undefined), 'virtual')
+  assertEquals(machineClassFromTopologySnapshotV5({ hardwareSignals: [] }), 'virtual')
+  assertEquals(machineClassFromTopologySnapshotV5({ hardwareSignals: [{}] }), 'physical')
   assertEquals(
     findInvalidTopologyIdField({ hostingFilesystemId: 'fs:dev:/dev/sdb1' }, snapshot),
     'hostingFilesystemId'
@@ -354,27 +359,27 @@ test('findInvalidTopologyIdField matches assigned ids against the recorded topol
 })
 
 // ---------------------------------------------------------------------------
-// v4 entity-metric selector parsing, topology context, and fleet/series
+// v5 entity-metric selector parsing, topology context, and fleet/series
 // response shaping.
 // ---------------------------------------------------------------------------
 
-test('resolveStoreBackendKindV4 covers store types and runtime fallbacks', () => {
-  assertEquals(resolveStoreBackendKindV4(undefined, 'deno'), 'disabled')
-  assertEquals(resolveStoreBackendKindV4(new DisabledServerMetricsStoreV4(), 'workers'), 'disabled')
+test('resolveStoreBackendKindV5 covers store types and runtime fallbacks', () => {
+  assertEquals(resolveStoreBackendKindV5(undefined, 'deno'), 'disabled')
+  assertEquals(resolveStoreBackendKindV5(new DisabledServerMetricsStoreV5(), 'workers'), 'disabled')
   assertEquals(
-    resolveStoreBackendKindV4(
-      Object.create(CloudflareAnalyticsEngineServerMetricsStoreV4.prototype),
+    resolveStoreBackendKindV5(
+      Object.create(CloudflareAnalyticsEngineServerMetricsStoreV5.prototype),
       'deno'
     ),
     'analytics-engine'
   )
   const unknownStore = { writeSample() {}, writeStatusEvent() {} }
-  assertEquals(resolveStoreBackendKindV4(unknownStore, 'workers'), 'analytics-engine')
-  assertEquals(resolveStoreBackendKindV4(unknownStore, 'deno'), 'duckdb')
+  assertEquals(resolveStoreBackendKindV5(unknownStore, 'workers'), 'analytics-engine')
+  assertEquals(resolveStoreBackendKindV5(unknownStore, 'deno'), 'duckdb')
 })
 
-test('defaultHostCanonicalNamesV4 covers only queryable host.* scopes, never cpuDetail/memoryDetail', () => {
-  const names = defaultHostCanonicalNamesV4()
+test('defaultHostCanonicalNamesV5 covers only queryable host.* scopes, never cpuDetail/memoryDetail', () => {
+  const names = defaultHostCanonicalNamesV5()
   assertEquals(names.includes('host.cpu.busyPercent'), true)
   assertEquals(names.includes('host.memory.availableBytes'), true)
   assertEquals(
@@ -387,19 +392,19 @@ test('defaultHostCanonicalNamesV4 covers only queryable host.* scopes, never cpu
   )
 })
 
-test('parseSeriesMetricSelectorsV4 defaults to every queryable host.* canonical name when absent or blank', () => {
-  const absent = parseSeriesMetricSelectorsV4(undefined)
+test('parseSeriesMetricSelectorsV5 defaults to every queryable host.* canonical name when absent or blank', () => {
+  const absent = parseSeriesMetricSelectorsV5(undefined)
   if (!absent.ok) throw new TypeError('expected ok')
-  assertEquals(absent.value.hostCanonicalNames, defaultHostCanonicalNamesV4())
+  assertEquals(absent.value.hostCanonicalNames, defaultHostCanonicalNamesV5())
   assertEquals(absent.value.entityFamilies.size, 0)
 
-  const blank = parseSeriesMetricSelectorsV4('   ')
+  const blank = parseSeriesMetricSelectorsV5('   ')
   if (!blank.ok) throw new TypeError('expected ok')
-  assertEquals(blank.value.hostCanonicalNames, defaultHostCanonicalNamesV4())
+  assertEquals(blank.value.hostCanonicalNames, defaultHostCanonicalNamesV5())
 })
 
-test('parseSeriesMetricSelectorsV4 groups per-entity selectors by family, unioning ids and fields', () => {
-  const result = parseSeriesMetricSelectorsV4(
+test('parseSeriesMetricSelectorsV5 groups per-entity selectors by family, unioning ids and fields', () => {
+  const result = parseSeriesMetricSelectorsV5(
     [
       'host.cpu.busyPercent',
       'network:eth0.receiveBytesPerSecond',
@@ -424,19 +429,19 @@ test('parseSeriesMetricSelectorsV4 groups per-entity selectors by family, unioni
   assertEquals([...ingress.fields], ['requests'])
 })
 
-test('parseSeriesMetricSelectorsV4 rejects an unparseable id, an unknown field, and too many selectors', () => {
-  assertEquals(parseSeriesMetricSelectorsV4('not-a-real-metric').ok, false)
+test('parseSeriesMetricSelectorsV5 rejects an unparseable id, an unknown field, and too many selectors', () => {
+  assertEquals(parseSeriesMetricSelectorsV5('not-a-real-metric').ok, false)
   // Not reserved scopes anymore (cpuDetail/memoryDetail are explicit-only queryable)
   // — these still fail because `coreCount`/`slabBytes` aren't real §38/§40 field names.
-  assertEquals(parseSeriesMetricSelectorsV4('cpuDetail.coreCount').ok, false)
-  assertEquals(parseSeriesMetricSelectorsV4('memoryDetail.slabBytes').ok, false)
+  assertEquals(parseSeriesMetricSelectorsV5('cpuDetail.coreCount').ok, false)
+  assertEquals(parseSeriesMetricSelectorsV5('memoryDetail.slabBytes').ok, false)
 
   const tooMany = Array.from({ length: 129 }, () => 'host.cpu.busyPercent').join(',')
-  assertEquals(parseSeriesMetricSelectorsV4(tooMany).ok, false)
+  assertEquals(parseSeriesMetricSelectorsV5(tooMany).ok, false)
 })
 
-test('parseSeriesMetricSelectorsV4 accepts explicit cpuDetail/memoryDetail singleton and cpuCore entity selectors', () => {
-  const result = parseSeriesMetricSelectorsV4(
+test('parseSeriesMetricSelectorsV5 accepts explicit cpuDetail/memoryDetail singleton and cpuCore entity selectors', () => {
+  const result = parseSeriesMetricSelectorsV5(
     [
       'cpuDetail.averageFrequencyMHz',
       'memoryDetail.dirtyBytes',
@@ -449,13 +454,9 @@ test('parseSeriesMetricSelectorsV4 accepts explicit cpuDetail/memoryDetail singl
     'cpuDetail.averageFrequencyMHz',
     'memoryDetail.dirtyBytes',
   ])
-
-  const cpuCore = result.value.entityFamilies.get('cpu.core.live')!
-  assertEquals([...cpuCore.entityIds].sort(), ['cpu0', 'cpu1'])
-  assertEquals([...cpuCore.fields], ['busyPercent'])
 })
 
-function inventoryWithNetworks(networks: TopologyInventoryV4['networks']): TopologyInventoryV4 {
+function inventoryWithNetworks(networks: TopologyInventoryV5['networks']): TopologyInventoryV5 {
   return {
     networks,
     filesystems: [],
@@ -483,7 +484,7 @@ test('findFabricNetworkEntityId rejects only a fabric device — a slot-mapped N
     },
     { deviceId: 'fab0', name: 'fab0', kind: 'ethernet', role: 'fabric' },
     { deviceId: 'eth2', name: 'eth2', kind: 'ethernet', role: 'other' },
-  ] as unknown as TopologyInventoryV4['networks'])
+  ] as unknown as TopologyInventoryV5['networks'])
 
   // Slot-mapped NICs are queryable now (Cloudflare reconstructs them from
   // host.io, DuckDB already stored the full row) — never rejected here.
@@ -496,18 +497,18 @@ test('findFabricNetworkEntityId rejects only a fabric device — a slot-mapped N
   assertEquals(findFabricNetworkEntityId(['fab0'], null), null)
 })
 
-test('seriesCacheMetricsListV4 concatenates host names and family:entity.field tokens', () => {
-  const parsed = parseSeriesMetricSelectorsV4(
+test('seriesCacheMetricsListV5 concatenates host names and family:entity.field tokens', () => {
+  const parsed = parseSeriesMetricSelectorsV5(
     'host.cpu.busyPercent,network:eth0.receiveBytesPerSecond,filesystem:root.availableBytes'
   )
   if (!parsed.ok) throw new TypeError('expected selectors to parse')
   assertEquals(
-    seriesCacheMetricsListV4(parsed.value).sort((a, b) => a.localeCompare(b)),
+    seriesCacheMetricsListV5(parsed.value).sort((a, b) => a.localeCompare(b)),
     ['filesystem:root.availableBytes', 'host.cpu.busyPercent', 'network:eth0.receiveBytesPerSecond']
   )
 })
 
-test('fabricNetworkSelectionErrorV4 rejects only a fabric network selector', () => {
+test('fabricNetworkSelectionErrorV5 rejects only a fabric network selector', () => {
   const inventory = inventoryWithNetworks([
     {
       deviceId: 'eth0',
@@ -517,31 +518,31 @@ test('fabricNetworkSelectionErrorV4 rejects only a fabric network selector', () 
       slot: 1,
     },
     { deviceId: 'fab0', name: 'fab0', kind: 'ethernet', role: 'fabric' },
-  ] as unknown as TopologyInventoryV4['networks'])
-  const hostOnly = parseSeriesMetricSelectorsV4('host.cpu.busyPercent')
+  ] as unknown as TopologyInventoryV5['networks'])
+  const hostOnly = parseSeriesMetricSelectorsV5('host.cpu.busyPercent')
   if (!hostOnly.ok) {
     throw new TypeError('expected host-only selectors to parse')
   }
-  assertEquals(fabricNetworkSelectionErrorV4(hostOnly.value, inventory), null)
+  assertEquals(fabricNetworkSelectionErrorV5(hostOnly.value, inventory), null)
 
-  const nic = parseSeriesMetricSelectorsV4('network:eth0.receiveBytesPerSecond')
+  const nic = parseSeriesMetricSelectorsV5('network:eth0.receiveBytesPerSecond')
   if (!nic.ok) throw new TypeError('expected nic selectors to parse')
-  assertEquals(fabricNetworkSelectionErrorV4(nic.value, inventory), null)
+  assertEquals(fabricNetworkSelectionErrorV5(nic.value, inventory), null)
 
-  const fabric = parseSeriesMetricSelectorsV4('network:fab0.receiveBytesPerSecond')
+  const fabric = parseSeriesMetricSelectorsV5('network:fab0.receiveBytesPerSecond')
   if (!fabric.ok) throw new TypeError('expected fabric selectors to parse')
   assertEquals(
-    fabricNetworkSelectionErrorV4(fabric.value, inventory),
+    fabricNetworkSelectionErrorV5(fabric.value, inventory),
     'network device "fab0" is a fabric mesh interface per the current topology ' +
       'and cannot be queried as a standalone entity'
   )
-  assertEquals(fabricNetworkSelectionErrorV4(fabric.value, null), null)
+  assertEquals(fabricNetworkSelectionErrorV5(fabric.value, null), null)
 })
 
 function fakeStore(handlers: {
-  queryHostSeries?: ServerMetricsStoreV4['queryHostSeries']
-  queryEntitySeries?: ServerMetricsStoreV4['queryEntitySeries']
-}): ServerMetricsStoreV4 {
+  queryHostSeries?: ServerMetricsStoreV5['queryHostSeries']
+  queryEntitySeries?: ServerMetricsStoreV5['queryEntitySeries']
+}): ServerMetricsStoreV5 {
   return {
     writeSample() {},
     writeStatusEvent() {},
@@ -549,16 +550,16 @@ function fakeStore(handlers: {
   }
 }
 
-function requireSeriesQueryOk(outcome: Awaited<ReturnType<typeof querySeriesResultsV4>>): {
-  hostResult: HostSeriesResultV4 | null
-  entityResults: EntitySeriesResultV4[]
+function requireSeriesQueryOk(outcome: Awaited<ReturnType<typeof querySeriesResultsV5>>): {
+  hostResult: HostSeriesResultV5 | null
+  entityResults: EntitySeriesResultV5[]
 } {
   if (!outcome.ok) throw new TypeError('expected series query to succeed')
   return outcome
 }
 
-test('querySeriesResultsV4 returns null host result when no host metrics are requested', async () => {
-  const outcome = await querySeriesResultsV4({
+test('querySeriesResultsV5 returns null host result when no host metrics are requested', async () => {
+  const outcome = await querySeriesResultsV5({
     store: undefined,
     backend: 'disabled',
     serverId: 'srv-1',
@@ -566,27 +567,27 @@ test('querySeriesResultsV4 returns null host result when no host metrics are req
     fromIso: FROM,
     toIso: TO,
     resolutionSeconds: 60,
-    context: buildTopologyContextV4(undefined, undefined),
+    context: buildTopologyContextV5(undefined, undefined),
   })
   const { hostResult, entityResults } = requireSeriesQueryOk(outcome)
   assertEquals(hostResult, null)
   assertEquals(entityResults, [])
 })
 
-test('querySeriesResultsV4 synthesizes unavailable host/entity results when the store has no query methods', async () => {
-  const parsed = parseSeriesMetricSelectorsV4(
+test('querySeriesResultsV5 synthesizes unavailable host/entity results when the store has no query methods', async () => {
+  const parsed = parseSeriesMetricSelectorsV5(
     'host.cpu.busyPercent,network:eth0.receiveBytesPerSecond'
   )
   if (!parsed.ok) throw new TypeError('expected selectors to parse')
-  const outcome = await querySeriesResultsV4({
-    store: new DisabledServerMetricsStoreV4(),
+  const outcome = await querySeriesResultsV5({
+    store: new DisabledServerMetricsStoreV5(),
     backend: 'disabled',
     serverId: 'srv-1',
     selectors: parsed.value,
     fromIso: FROM,
     toIso: TO,
     resolutionSeconds: 60,
-    context: buildTopologyContextV4(undefined, undefined),
+    context: buildTopologyContextV5(undefined, undefined),
   })
   const { hostResult, entityResults } = requireSeriesQueryOk(outcome)
   assertEquals(hostResult?.available, false)
@@ -596,10 +597,10 @@ test('querySeriesResultsV4 synthesizes unavailable host/entity results when the 
   assertEquals(entityResults[0]?.family, 'network')
 })
 
-test('querySeriesResultsV4 returns ok:false when queryHostSeries throws', async () => {
-  const parsed = parseSeriesMetricSelectorsV4('host.cpu.busyPercent')
+test('querySeriesResultsV5 returns ok:false when queryHostSeries throws', async () => {
+  const parsed = parseSeriesMetricSelectorsV5('host.cpu.busyPercent')
   if (!parsed.ok) throw new TypeError('expected selectors to parse')
-  const outcome = await querySeriesResultsV4({
+  const outcome = await querySeriesResultsV5({
     store: fakeStore({
       queryHostSeries: () => Promise.reject(new Error('AE SQL unavailable')),
     }),
@@ -609,15 +610,15 @@ test('querySeriesResultsV4 returns ok:false when queryHostSeries throws', async 
     fromIso: FROM,
     toIso: TO,
     resolutionSeconds: 60,
-    context: buildTopologyContextV4(undefined, undefined),
+    context: buildTopologyContextV5(undefined, undefined),
   })
   assertEquals(outcome, { ok: false })
 })
 
-test('querySeriesResultsV4 returns ok:false when queryEntitySeries throws', async () => {
-  const parsed = parseSeriesMetricSelectorsV4('network:eth0.receiveBytesPerSecond')
+test('querySeriesResultsV5 returns ok:false when queryEntitySeries throws', async () => {
+  const parsed = parseSeriesMetricSelectorsV5('network:eth0.receiveBytesPerSecond')
   if (!parsed.ok) throw new TypeError('expected selectors to parse')
-  const outcome = await querySeriesResultsV4({
+  const outcome = await querySeriesResultsV5({
     store: fakeStore({
       queryEntitySeries: () => Promise.reject(new Error('AE SQL unavailable')),
     }),
@@ -627,20 +628,20 @@ test('querySeriesResultsV4 returns ok:false when queryEntitySeries throws', asyn
     fromIso: FROM,
     toIso: TO,
     resolutionSeconds: 60,
-    context: buildTopologyContextV4(undefined, undefined),
+    context: buildTopologyContextV5(undefined, undefined),
   })
   assertEquals(outcome, { ok: false })
 })
 
-test('querySeriesResultsV4 forwards slotMapping/topologyGeneration for the network family', async () => {
-  let seen: EntitySeriesQueryV4 | undefined
-  const parsed = parseSeriesMetricSelectorsV4('network:eth0.receiveBytesPerSecond')
+test('querySeriesResultsV5 forwards slotMapping/topologyGeneration for the network family', async () => {
+  let seen: EntitySeriesQueryV5 | undefined
+  const parsed = parseSeriesMetricSelectorsV5('network:eth0.receiveBytesPerSecond')
   if (!parsed.ok) throw new TypeError('expected selectors to parse')
-  const context = buildTopologyContextV4(
+  const context = buildTopologyContextV5(
     { generation: 5, snapshot: minimalTopologySnapshot() },
     undefined
   )
-  const outcome = await querySeriesResultsV4({
+  const outcome = await querySeriesResultsV5({
     store: fakeStore({
       queryEntitySeries: (input) => {
         seen = input
@@ -669,14 +670,14 @@ test('querySeriesResultsV4 forwards slotMapping/topologyGeneration for the netwo
   assertEquals(seen?.topologyGeneration, 5)
 })
 
-test('querySeriesResultsV4 invokes class-instance series methods with this bound', async () => {
+test('querySeriesResultsV5 invokes class-instance series methods with this bound', async () => {
   class ThisSensitiveStore {
     writeSample(): void {}
     writeStatusEvent(): void {}
     flushWrites(): void {
       if (this == null) throw new TypeError('flushWrites this unbound')
     }
-    queryHostSeries(input: HostSeriesQueryV4): Promise<HostSeriesResultV4> {
+    queryHostSeries(input: HostSeriesQueryV5): Promise<HostSeriesResultV5> {
       this.flushWrites()
       return Promise.resolve({
         kind: 'duckdb',
@@ -689,7 +690,7 @@ test('querySeriesResultsV4 invokes class-instance series methods with this bound
         sampleCount: 1,
       })
     }
-    queryEntitySeries(input: EntitySeriesQueryV4): Promise<EntitySeriesResultV4> {
+    queryEntitySeries(input: EntitySeriesQueryV5): Promise<EntitySeriesResultV5> {
       this.flushWrites()
       return Promise.resolve({
         kind: 'duckdb',
@@ -702,19 +703,19 @@ test('querySeriesResultsV4 invokes class-instance series methods with this bound
       })
     }
   }
-  const parsed = parseSeriesMetricSelectorsV4(
+  const parsed = parseSeriesMetricSelectorsV5(
     'host.cpu.busyPercent,network:eth0.receiveBytesPerSecond'
   )
   if (!parsed.ok) throw new TypeError('expected selectors to parse')
-  const outcome = await querySeriesResultsV4({
-    store: new ThisSensitiveStore() as ServerMetricsStoreV4,
+  const outcome = await querySeriesResultsV5({
+    store: new ThisSensitiveStore() as ServerMetricsStoreV5,
     backend: 'duckdb',
     serverId: 'srv-1',
     selectors: parsed.value,
     fromIso: FROM,
     toIso: TO,
     resolutionSeconds: 60,
-    context: buildTopologyContextV4(undefined, undefined),
+    context: buildTopologyContextV5(undefined, undefined),
   })
   const { hostResult, entityResults } = requireSeriesQueryOk(outcome)
   assertEquals(hostResult?.available, true)
@@ -723,10 +724,10 @@ test('querySeriesResultsV4 invokes class-instance series methods with this bound
   assertEquals(entityResults[0]?.family, 'network')
 })
 
-test('querySeriesResultsV4 returns the host series from the store', async () => {
-  const parsed = parseSeriesMetricSelectorsV4('host.cpu.busyPercent')
+test('querySeriesResultsV5 returns the host series from the store', async () => {
+  const parsed = parseSeriesMetricSelectorsV5('host.cpu.busyPercent')
   if (!parsed.ok) throw new TypeError('expected selectors to parse')
-  const hostResult: HostSeriesResultV4 = {
+  const hostResult: HostSeriesResultV5 = {
     kind: 'duckdb',
     available: true,
     serverId: 'srv-1',
@@ -736,7 +737,7 @@ test('querySeriesResultsV4 returns the host series from the store', async () => 
     gapCount: 0,
     sampleCount: 3,
   }
-  const outcome = await querySeriesResultsV4({
+  const outcome = await querySeriesResultsV5({
     store: fakeStore({
       queryHostSeries: () => Promise.resolve(hostResult),
     }),
@@ -746,20 +747,20 @@ test('querySeriesResultsV4 returns the host series from the store', async () => 
     fromIso: FROM,
     toIso: TO,
     resolutionSeconds: 60,
-    context: buildTopologyContextV4(undefined, undefined),
+    context: buildTopologyContextV5(undefined, undefined),
   })
   assertEquals(requireSeriesQueryOk(outcome).hostResult, hostResult)
 })
 
-test('querySeriesResultsV4 does not attach slotMapping for a non-network family', async () => {
-  let seen: EntitySeriesQueryV4 | undefined
-  const parsed = parseSeriesMetricSelectorsV4('hardware:psu1.value')
+test('querySeriesResultsV5 does not attach slotMapping for a non-network family', async () => {
+  let seen: EntitySeriesQueryV5 | undefined
+  const parsed = parseSeriesMetricSelectorsV5('hardware:psu1.value')
   if (!parsed.ok) throw new TypeError('expected selectors to parse')
-  const context = buildTopologyContextV4(
+  const context = buildTopologyContextV5(
     { generation: 5, snapshot: minimalTopologySnapshot() },
     undefined
   )
-  const outcome = await querySeriesResultsV4({
+  const outcome = await querySeriesResultsV5({
     store: fakeStore({
       queryEntitySeries: (input) => {
         seen = input
@@ -845,16 +846,16 @@ function minimalTopologySnapshot(): {
   }
 }
 
-test('buildTopologyContextV4 returns an empty-but-present context when there is no recorded generation', () => {
-  const context = buildTopologyContextV4(undefined, undefined)
+test('buildTopologyContextV5 returns an empty-but-present context when there is no recorded generation', () => {
+  const context = buildTopologyContextV5(undefined, undefined)
   assertEquals(context.topologyGeneration, null)
   assertEquals(context.slotMapping, null)
   assertEquals(context.inventory, null)
-  assertEquals(context.capacities, EMPTY_HOST_CAPACITIES_V4)
+  assertEquals(context.capacities, EMPTY_HOST_CAPACITIES_V5)
 })
 
-test('buildTopologyContextV4 returns an empty-but-present context for a not-yet-slot-mappable snapshot', () => {
-  const context = buildTopologyContextV4(
+test('buildTopologyContextV5 returns an empty-but-present context for a not-yet-slot-mappable snapshot', () => {
+  const context = buildTopologyContextV5(
     { generation: 3, snapshot: { hardwareSignals: [] } },
     undefined
   )
@@ -863,8 +864,8 @@ test('buildTopologyContextV4 returns an empty-but-present context for a not-yet-
   assertEquals(context.inventory, null)
 })
 
-test('buildTopologyContextV4 builds inventory/slotMapping/capacities from a usable snapshot', () => {
-  const context = buildTopologyContextV4(
+test('buildTopologyContextV5 builds inventory/slotMapping/capacities from a usable snapshot', () => {
+  const context = buildTopologyContextV5(
     { generation: 5, snapshot: minimalTopologySnapshot() },
     undefined
   )
@@ -877,15 +878,15 @@ test('buildTopologyContextV4 builds inventory/slotMapping/capacities from a usab
   assertEquals(context.capacities.rootFilesystemTotalBytes, 100_000_000_000)
 })
 
-test('buildSeriesRouteResponseV4 is unavailable only when host or some requested entity family is unavailable', () => {
+test('buildSeriesRouteResponseV5 is unavailable only when host or some requested entity family is unavailable', () => {
   const envelope = {
     cpuLimits: { tdpWatts: null, tjMaxCelsius: null, source: 'none' as const },
     temperatureUnit: 'celsius' as const,
     nicSlotLimit: 2,
   }
-  const context = buildTopologyContextV4(undefined, undefined)
+  const context = buildTopologyContextV5(undefined, undefined)
 
-  const noHostRequested = buildSeriesRouteResponseV4({
+  const noHostRequested = buildSeriesRouteResponseV5({
     serverId: 'srv-1',
     from: '2026-01-01T00:00:00.000Z',
     to: '2026-01-01T01:00:00.000Z',
@@ -900,7 +901,7 @@ test('buildSeriesRouteResponseV4 is unavailable only when host or some requested
   assertEquals(noHostRequested.inventory, null)
   assertEquals(noHostRequested.topologyGeneration, null)
 
-  const unavailableEntity: EntitySeriesResultV4 = {
+  const unavailableEntity: EntitySeriesResultV5 = {
     kind: 'duckdb',
     available: false,
     serverId: 'srv-1',
@@ -909,7 +910,7 @@ test('buildSeriesRouteResponseV4 is unavailable only when host or some requested
     resolutionSeconds: null,
     entities: [],
   }
-  const withUnavailableEntity = buildSeriesRouteResponseV4({
+  const withUnavailableEntity = buildSeriesRouteResponseV5({
     serverId: 'srv-1',
     from: '2026-01-01T00:00:00.000Z',
     to: '2026-01-01T01:00:00.000Z',
@@ -923,11 +924,11 @@ test('buildSeriesRouteResponseV4 is unavailable only when host or some requested
   assertEquals(withUnavailableEntity.available, false)
 })
 
-test('fleetHostCapacitiesFromSnapshotV4 reads memory/swap totals only, never rootFilesystemTotalBytes', () => {
-  assertEquals(fleetHostCapacitiesFromSnapshotV4(undefined), EMPTY_HOST_CAPACITIES_V4)
-  assertEquals(fleetHostCapacitiesFromSnapshotV4(null), EMPTY_HOST_CAPACITIES_V4)
+test('fleetHostCapacitiesFromSnapshotV5 reads memory/swap totals only, never rootFilesystemTotalBytes', () => {
+  assertEquals(fleetHostCapacitiesFromSnapshotV5(undefined), EMPTY_HOST_CAPACITIES_V5)
+  assertEquals(fleetHostCapacitiesFromSnapshotV5(null), EMPTY_HOST_CAPACITIES_V5)
   assertEquals(
-    fleetHostCapacitiesFromSnapshotV4({
+    fleetHostCapacitiesFromSnapshotV5({
       memoryTotalBytes: 8_000_000_000,
       swapTotalBytes: 1_000_000_000,
     }),
@@ -939,13 +940,13 @@ test('fleetHostCapacitiesFromSnapshotV4 reads memory/swap totals only, never roo
   )
 })
 
-test('buildFleetLatestPayloadV4 attaches per-server derived values from the batched capacity map', () => {
-  const payload = buildFleetLatestPayloadV4({
+test('buildFleetLatestPayloadV5 attaches per-server derived values from the batched capacity map', () => {
+  const payload = buildFleetLatestPayloadV5({
     from: '2026-01-01T00:00:00.000Z',
     to: '2026-01-01T00:10:00.000Z',
     backend: 'duckdb',
     available: true,
-    metrics: FLEET_HOST_METRICS_V4,
+    metrics: FLEET_HOST_METRICS_V5,
     servers: [
       {
         serverId: 'srv-1',

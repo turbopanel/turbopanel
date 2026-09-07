@@ -20,6 +20,10 @@ import {
 import type { OrganizationOptions } from '../../lib/organization-options.ts'
 import type { DatacenterOptions } from '../../lib/datacenter-options.ts'
 import { parseName } from '../shared.ts'
+import {
+  isServerMachineClass,
+  type ServerMachineClass,
+} from '../../daemon/metrics/capability-plan.ts'
 import { colocatedServerUpdateBlockedReason } from './update-status.ts'
 import type { ServerUpdateCommit } from './update-status.ts'
 import {
@@ -93,6 +97,8 @@ export function currentCommitFromDaemonBuild(
 
 export type ServerPatchFields = {
   name?: string | null
+  /** Pins `server.machine_class`; `null` clears the pin so ingest infers again. */
+  machineClass?: ServerMachineClass | null
   options?: Omit<ServerOptions, 'sshPort' | 'ntp'> & {
     sshPort?: number | null
     ntp?: NtpDefaults | null
@@ -206,7 +212,18 @@ export function parseServerPatchCore(
     patch.options = options.options
   }
 
-  if (patch.name === undefined && patch.options === undefined) {
+  if (body.machineClass !== undefined) {
+    if (body.machineClass !== null && !isServerMachineClass(body.machineClass)) {
+      return { ok: false, error: 'Invalid machineClass', status: 400 }
+    }
+    patch.machineClass = body.machineClass
+  }
+
+  if (
+    patch.name === undefined &&
+    patch.options === undefined &&
+    patch.machineClass === undefined
+  ) {
     return invalidServerPatchRequest()
   }
 

@@ -35,7 +35,7 @@ import {
   steadyStateInboundSkipsDbRead,
 } from './postgres-projection.ts'
 import { onDaemonDisconnected } from './control-plane-monitor.ts'
-import type { ServerStatusEvent } from '../metrics/types-v4.ts'
+import type { ServerStatusEvent } from '../metrics/types-v5.ts'
 import { resetServerStatusEventSinkForTests } from '../metrics/status-events.ts'
 
 const serverId = 'srv-projection-test'

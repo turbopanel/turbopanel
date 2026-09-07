@@ -1,8 +1,8 @@
 /**
- * Host metrics v4 per-metric storage/query contract (control-plane only —
- * no daemon-side twin, unlike `contract-v4.ts`). Pairs with
- * `contract-v4.ts` the way v3's `metric-descriptors.ts` pairs with
- * `contract.ts`: `contract-v4.ts` owns the wire shape, this file owns
+ * Host metrics v5 per-metric storage/query contract (control-plane only —
+ * no daemon-side twin, unlike `contract-v5.ts`). Pairs with
+ * `contract-v5.ts` the way v3's `metric-descriptors.ts` pairs with
+ * `contract.ts`: `contract-v5.ts` owns the wire shape, this file owns
  * unit/aggregation/family/reset/availability metadata plus range and
  * sanitize behavior.
  *
@@ -24,29 +24,27 @@
  */
 
 import type {
-  BlockDeviceSampleV4,
-  CpuCoreLiveSampleV4,
-  CpuDetailSampleV4,
-  CpuHotspotSampleV4,
-  DatabaseProxySampleV4,
-  FilesystemSampleV4,
-  GpuSampleV4,
-  HardwareSignalSampleV4,
-  HostCpuMetricsV4,
-  HostKernelMetricsV4,
-  HostMemoryMetricsV4,
-  HostNetworkMetricsV4,
-  HostStorageMetricsV4,
-  IngressSourceSampleV4,
-  MemoryDetailSampleV4,
-  NetworkDeviceSampleV4,
-} from './contract-v4.ts'
+  BlockDeviceSampleV5,
+  CpuDetailSampleV5,
+  DatabaseProxySampleV5,
+  FilesystemSampleV5,
+  GpuSampleV5,
+  HardwareSignalSampleV5,
+  HostCpuMetricsV5,
+  HostKernelMetricsV5,
+  HostMemoryMetricsV5,
+  HostNetworkMetricsV5,
+  HostStorageMetricsV5,
+  IngressSourceSampleV5,
+  MemoryDetailSampleV5,
+  NetworkDeviceSampleV5,
+} from './contract-v5.ts'
 
 /** How out-of-range finite values are corrected before storage. */
-export type MetricSanitizeBehaviorV4 = 'clamp' | 'null'
+export type MetricSanitizeBehaviorV5 = 'clamp' | 'null'
 
 /** Logical unit a metric is expressed in (drives formatting + axis labels). */
-export type MetricUnitV4 =
+export type MetricUnitV5 =
   | 'percent'
   | 'ratio'
   | 'bytes'
@@ -62,23 +60,23 @@ export type MetricUnitV4 =
   | 'mhz'
 
 /** Value-shape semantic — how the raw reading behaves over time. */
-export type MetricSemanticV4 = 'gauge' | 'rate' | 'delta' | 'psi-percent'
+export type MetricSemanticV5 = 'gauge' | 'rate' | 'delta' | 'psi-percent'
 
 /** How samples combine into a time bucket at query time. */
-export type MetricAggregationV4 = 'weighted-average' | 'delta-sum' | 'max' | 'last'
+export type MetricAggregationV5 = 'weighted-average' | 'delta-sum' | 'max' | 'last'
 
 /** Whether a metric is a cumulative counter needing baseline-delta handling, or not. */
-export type MetricResetBehaviorV4 = 'cumulative-counter' | 'none'
+export type MetricResetBehaviorV5 = 'cumulative-counter' | 'none'
 
 /**
  * Whether an absent reading means "this host doesn't support the sensor"
  * (never render a zero) or "zero is a legitimate observed value" (e.g. no
  * swap configured).
  */
-export type MetricAvailabilityBehaviorV4 = 'missing-when-unsupported' | 'legitimate-zero'
+export type MetricAvailabilityBehaviorV5 = 'missing-when-unsupported' | 'legitimate-zero'
 
 /** Conceptual metric grouping — informational only, not a storage partition. */
-export type HostedFamilyV4 =
+export type HostedFamilyV5 =
   | 'host.system'
   | 'host.io'
   | 'gpu'
@@ -90,10 +88,9 @@ export type HostedFamilyV4 =
   | 'managed.database_proxy'
   | 'cpu.detail'
   | 'memory.detail'
-  | 'cpu.core.live'
 
 /** Which contract entity a metric is scoped to. */
-export type MetricEntityScopeV4 =
+export type MetricEntityScopeV5 =
   | 'host.cpu'
   | 'host.kernel'
   | 'host.memory'
@@ -107,40 +104,38 @@ export type MetricEntityScopeV4 =
   | 'ingress'
   | 'databaseProxy'
   | 'cpuDetail'
-  | 'cpuHotspot'
   | 'memoryDetail'
-  | 'cpuCore'
 
-export type HostMetricsMetricDescriptorV4 = {
+export type HostMetricsMetricDescriptorV5 = {
   /** Globally unique across all descriptors — see the file-level doc comment for the naming scheme. */
   canonicalName: string
   /** The contract field name this descriptor describes, scoped within its own entity type. */
   fieldName: string
-  unit: MetricUnitV4
-  semantic: MetricSemanticV4
-  aggregation: MetricAggregationV4
-  entityScope: MetricEntityScopeV4
-  hostedFamily: HostedFamilyV4
-  resetBehavior: MetricResetBehaviorV4
-  availabilityBehavior: MetricAvailabilityBehaviorV4
+  unit: MetricUnitV5
+  semantic: MetricSemanticV5
+  aggregation: MetricAggregationV5
+  entityScope: MetricEntityScopeV5
+  hostedFamily: HostedFamilyV5
+  resetBehavior: MetricResetBehaviorV5
+  availabilityBehavior: MetricAvailabilityBehaviorV5
   min: number
   max: number
-  sanitize: MetricSanitizeBehaviorV4
+  sanitize: MetricSanitizeBehaviorV5
 }
 
 const SAFE_MAX = Number.MAX_SAFE_INTEGER
 
 /** Every canonical name is qualified by its entity scope so field-name reuse across families never collides. */
-function entityCanonicalName(entityScope: MetricEntityScopeV4, fieldName: string): string {
+function entityCanonicalName(entityScope: MetricEntityScopeV5, fieldName: string): string {
   return `${entityScope}.${fieldName}`
 }
 
 function percent(
   fieldName: string,
-  entityScope: MetricEntityScopeV4,
-  hostedFamily: HostedFamilyV4,
-  availabilityBehavior: MetricAvailabilityBehaviorV4 = 'missing-when-unsupported'
-): HostMetricsMetricDescriptorV4 {
+  entityScope: MetricEntityScopeV5,
+  hostedFamily: HostedFamilyV5,
+  availabilityBehavior: MetricAvailabilityBehaviorV5 = 'missing-when-unsupported'
+): HostMetricsMetricDescriptorV5 {
   return {
     canonicalName: entityCanonicalName(entityScope, fieldName),
     fieldName,
@@ -159,9 +154,9 @@ function percent(
 
 function psiPercent(
   fieldName: string,
-  entityScope: MetricEntityScopeV4,
-  hostedFamily: HostedFamilyV4
-): HostMetricsMetricDescriptorV4 {
+  entityScope: MetricEntityScopeV5,
+  hostedFamily: HostedFamilyV5
+): HostMetricsMetricDescriptorV5 {
   return {
     canonicalName: entityCanonicalName(entityScope, fieldName),
     fieldName,
@@ -181,15 +176,15 @@ function psiPercent(
 function nonNegative(
   fieldName: string,
   meta: {
-    unit: MetricUnitV4
-    semantic: MetricSemanticV4
-    aggregation: MetricAggregationV4
-    entityScope: MetricEntityScopeV4
-    hostedFamily: HostedFamilyV4
-    resetBehavior?: MetricResetBehaviorV4
-    availabilityBehavior?: MetricAvailabilityBehaviorV4
+    unit: MetricUnitV5
+    semantic: MetricSemanticV5
+    aggregation: MetricAggregationV5
+    entityScope: MetricEntityScopeV5
+    hostedFamily: HostedFamilyV5
+    resetBehavior?: MetricResetBehaviorV5
+    availabilityBehavior?: MetricAvailabilityBehaviorV5
   }
-): HostMetricsMetricDescriptorV4 {
+): HostMetricsMetricDescriptorV5 {
   return {
     canonicalName: entityCanonicalName(meta.entityScope, fieldName),
     fieldName,
@@ -208,10 +203,10 @@ function nonNegative(
 
 function rate(
   fieldName: string,
-  unit: MetricUnitV4,
-  entityScope: MetricEntityScopeV4,
-  hostedFamily: HostedFamilyV4
-): HostMetricsMetricDescriptorV4 {
+  unit: MetricUnitV5,
+  entityScope: MetricEntityScopeV5,
+  hostedFamily: HostedFamilyV5
+): HostMetricsMetricDescriptorV5 {
   return nonNegative(fieldName, {
     unit,
     semantic: 'rate',
@@ -223,7 +218,7 @@ function rate(
 
 /**
  * A cumulative-counter-derived field carried over the wire as a raw
- * per-interval delta (never divided by `intervalSeconds`) — `deltaSumExpressionForColumnV4`
+ * per-interval delta (never divided by `intervalSeconds`) — `deltaSumExpressionForColumnV5`
  * sums these directly into a window total, unlike `rate()`'s
  * interval-weighted average. Used for managed-service counters
  * (`managed.ingress`/`managed.database_proxy`) where the shipped value must
@@ -231,10 +226,10 @@ function rate(
  */
 function deltaCounter(
   fieldName: string,
-  unit: MetricUnitV4,
-  entityScope: MetricEntityScopeV4,
-  hostedFamily: HostedFamilyV4
-): HostMetricsMetricDescriptorV4 {
+  unit: MetricUnitV5,
+  entityScope: MetricEntityScopeV5,
+  hostedFamily: HostedFamilyV5
+): HostMetricsMetricDescriptorV5 {
   return nonNegative(fieldName, {
     unit,
     semantic: 'delta',
@@ -246,9 +241,9 @@ function deltaCounter(
 
 function milliseconds(
   fieldName: string,
-  entityScope: MetricEntityScopeV4,
-  hostedFamily: HostedFamilyV4
-): HostMetricsMetricDescriptorV4 {
+  entityScope: MetricEntityScopeV5,
+  hostedFamily: HostedFamilyV5
+): HostMetricsMetricDescriptorV5 {
   return nonNegative(fieldName, {
     unit: 'milliseconds',
     semantic: 'gauge',
@@ -260,10 +255,10 @@ function milliseconds(
 
 function bytesGauge(
   fieldName: string,
-  entityScope: MetricEntityScopeV4,
-  hostedFamily: HostedFamilyV4,
-  availabilityBehavior: MetricAvailabilityBehaviorV4 = 'legitimate-zero'
-): HostMetricsMetricDescriptorV4 {
+  entityScope: MetricEntityScopeV5,
+  hostedFamily: HostedFamilyV5,
+  availabilityBehavior: MetricAvailabilityBehaviorV5 = 'legitimate-zero'
+): HostMetricsMetricDescriptorV5 {
   return nonNegative(fieldName, {
     unit: 'bytes',
     semantic: 'gauge',
@@ -276,9 +271,9 @@ function bytesGauge(
 
 function countGauge(
   fieldName: string,
-  entityScope: MetricEntityScopeV4,
-  hostedFamily: HostedFamilyV4
-): HostMetricsMetricDescriptorV4 {
+  entityScope: MetricEntityScopeV5,
+  hostedFamily: HostedFamilyV5
+): HostMetricsMetricDescriptorV5 {
   return nonNegative(fieldName, {
     unit: 'count',
     semantic: 'gauge',
@@ -291,9 +286,9 @@ function countGauge(
 /** Temperatures may legitimately be negative — bounded, never clamped to 0. */
 function temperature(
   fieldName: string,
-  entityScope: MetricEntityScopeV4,
-  hostedFamily: HostedFamilyV4
-): HostMetricsMetricDescriptorV4 {
+  entityScope: MetricEntityScopeV5,
+  hostedFamily: HostedFamilyV5
+): HostMetricsMetricDescriptorV5 {
   return {
     canonicalName: entityCanonicalName(entityScope, fieldName),
     fieldName,
@@ -312,9 +307,9 @@ function temperature(
 
 function watts(
   fieldName: string,
-  entityScope: MetricEntityScopeV4,
-  hostedFamily: HostedFamilyV4
-): HostMetricsMetricDescriptorV4 {
+  entityScope: MetricEntityScopeV5,
+  hostedFamily: HostedFamilyV5
+): HostMetricsMetricDescriptorV5 {
   return nonNegative(fieldName, {
     unit: 'watts',
     semantic: 'gauge',
@@ -326,7 +321,7 @@ function watts(
 }
 
 // ---------------------------------------------------------------------------
-// host.system (§5) — HostCpuMetricsV4 + HostKernelMetricsV4 + HostMemoryMetricsV4
+// host.system (§5) — HostCpuMetricsV5 + HostKernelMetricsV5 + HostMemoryMetricsV5
 //
 // Each host sub-object gets its own descriptor record (rather than one
 // merged `Record<keyof A | keyof B | keyof C, …>`) because field names like
@@ -337,7 +332,7 @@ function watts(
 // the actual `host.cpu`/`host.memory`/etc. nesting in the contract type.
 // ---------------------------------------------------------------------------
 
-const HOST_CPU_DESCRIPTORS: Record<keyof HostCpuMetricsV4, HostMetricsMetricDescriptorV4> = {
+const HOST_CPU_DESCRIPTORS: Record<keyof HostCpuMetricsV5, HostMetricsMetricDescriptorV5> = {
   busyPercent: percent('busyPercent', 'host.cpu', 'host.system'),
   userPercent: percent('userPercent', 'host.cpu', 'host.system'),
   systemPercent: percent('systemPercent', 'host.cpu', 'host.system'),
@@ -345,20 +340,21 @@ const HOST_CPU_DESCRIPTORS: Record<keyof HostCpuMetricsV4, HostMetricsMetricDesc
   stealPercent: percent('stealPercent', 'host.cpu', 'host.system'),
   softirqPercent: percent('softirqPercent', 'host.cpu', 'host.system'),
   pressureSomePercent: psiPercent('pressureSomePercent', 'host.cpu', 'host.system'),
-  maxCoreBusyPercent: percent('maxCoreBusyPercent', 'host.cpu', 'host.system'),
+  saturatedCoreCount: countGauge('saturatedCoreCount', 'host.cpu', 'host.system'),
   procsRunning: countGauge('procsRunning', 'host.cpu', 'host.system'),
   procsBlocked: countGauge('procsBlocked', 'host.cpu', 'host.system'),
   // Packed on the host.io AE row (spare double18) — host.system's 19 slots are full.
   processCount: countGauge('processCount', 'host.cpu', 'host.io'),
 }
 
-const HOST_KERNEL_DESCRIPTORS: Record<keyof HostKernelMetricsV4, HostMetricsMetricDescriptorV4> = {
+const HOST_KERNEL_DESCRIPTORS: Record<keyof HostKernelMetricsV5, HostMetricsMetricDescriptorV5> = {
   fileHandlesUsedPercent: percent('fileHandlesUsedPercent', 'host.kernel', 'host.system'),
   conntrackUsedPercent: percent('conntrackUsedPercent', 'host.kernel', 'host.system'),
 }
 
-const HOST_MEMORY_DESCRIPTORS: Record<keyof HostMemoryMetricsV4, HostMetricsMetricDescriptorV4> = {
-  availableBytes: bytesGauge('availableBytes', 'host.memory', 'host.system'),
+const HOST_MEMORY_DESCRIPTORS: Record<keyof HostMemoryMetricsV5, HostMetricsMetricDescriptorV5> = {
+  usedBytes: bytesGauge('usedBytes', 'host.memory', 'host.system'),
+  cachedFilesBytes: bytesGauge('cachedFilesBytes', 'host.memory', 'host.system'),
   swapUsedBytes: bytesGauge('swapUsedBytes', 'host.memory', 'host.system', 'legitimate-zero'),
   pressureSomePercent: psiPercent('pressureSomePercent', 'host.memory', 'host.system'),
   pressureFullPercent: psiPercent('pressureFullPercent', 'host.memory', 'host.system'),
@@ -374,19 +370,23 @@ const HOST_MEMORY_DESCRIPTORS: Record<keyof HostMemoryMetricsV4, HostMetricsMetr
     'host.memory',
     'host.system'
   ),
+  // Overflowed onto the host.io AE row: host.system's 19 slots are full
+  // once v5's `cachedFilesBytes` joins `usedBytes`. This is the second
+  // scope/family disagreement in the map (see `host.cpu.processCount`) —
+  // `entityScope` is the contract nesting, `hostedFamily` is the AE page.
   majorPageFaultsPerSecond: rate(
     'majorPageFaultsPerSecond',
     'countPerSecond',
     'host.memory',
-    'host.system'
+    'host.io'
   ),
 }
 
 // ---------------------------------------------------------------------------
-// host.io (§7) — HostStorageMetricsV4 + HostNetworkMetricsV4
+// host.io (§7) — HostStorageMetricsV5 + HostNetworkMetricsV5
 // ---------------------------------------------------------------------------
 
-const HOST_STORAGE_DESCRIPTORS: Record<keyof HostStorageMetricsV4, HostMetricsMetricDescriptorV4> =
+const HOST_STORAGE_DESCRIPTORS: Record<keyof HostStorageMetricsV5, HostMetricsMetricDescriptorV5> =
   {
     ioPressureSomePercent: psiPercent('ioPressureSomePercent', 'host.storage', 'host.io'),
     ioPressureFullPercent: psiPercent('ioPressureFullPercent', 'host.storage', 'host.io'),
@@ -402,9 +402,7 @@ const HOST_STORAGE_DESCRIPTORS: Record<keyof HostStorageMetricsV4, HostMetricsMe
       'host.storage',
       'host.io'
     ),
-    diskReadLatencyMs: milliseconds('diskReadLatencyMs', 'host.storage', 'host.io'),
-    diskWriteLatencyMs: milliseconds('diskWriteLatencyMs', 'host.storage', 'host.io'),
-    maxBlockDeviceUtilPercent: percent('maxBlockDeviceUtilPercent', 'host.storage', 'host.io'),
+    diskLatencyMs: milliseconds('diskLatencyMs', 'host.storage', 'host.io'),
     rootFilesystemAvailableBytes: bytesGauge(
       'rootFilesystemAvailableBytes',
       'host.storage',
@@ -413,7 +411,7 @@ const HOST_STORAGE_DESCRIPTORS: Record<keyof HostStorageMetricsV4, HostMetricsMe
     rootFilesystemFreeInodes: countGauge('rootFilesystemFreeInodes', 'host.storage', 'host.io'),
   }
 
-const HOST_NETWORK_DESCRIPTORS: Record<keyof HostNetworkMetricsV4, HostMetricsMetricDescriptorV4> =
+const HOST_NETWORK_DESCRIPTORS: Record<keyof HostNetworkMetricsV5, HostMetricsMetricDescriptorV5> =
   {
     tcpRetransmitPercent: percent(
       'tcpRetransmitPercent',
@@ -437,8 +435,8 @@ const HOST_NETWORK_DESCRIPTORS: Record<keyof HostNetworkMetricsV4, HostMetricsMe
 // ---------------------------------------------------------------------------
 
 const NETWORK_DESCRIPTORS: Record<
-  Exclude<keyof NetworkDeviceSampleV4, 'deviceId'>,
-  HostMetricsMetricDescriptorV4
+  Exclude<keyof NetworkDeviceSampleV5, 'deviceId'>,
+  HostMetricsMetricDescriptorV5
 > = {
   receiveBytesPerSecond: rate('receiveBytesPerSecond', 'bytesPerSecond', 'network', 'network'),
   transmitBytesPerSecond: rate('transmitBytesPerSecond', 'bytesPerSecond', 'network', 'network'),
@@ -449,16 +447,16 @@ const NETWORK_DESCRIPTORS: Record<
 }
 
 const FILESYSTEM_DESCRIPTORS: Record<
-  Exclude<keyof FilesystemSampleV4, 'filesystemId'>,
-  HostMetricsMetricDescriptorV4
+  Exclude<keyof FilesystemSampleV5, 'filesystemId'>,
+  HostMetricsMetricDescriptorV5
 > = {
   availableBytes: bytesGauge('availableBytes', 'filesystem', 'filesystem'),
   freeInodes: countGauge('freeInodes', 'filesystem', 'filesystem'),
 }
 
 const BLOCK_DESCRIPTORS: Record<
-  Exclude<keyof BlockDeviceSampleV4, 'deviceId'>,
-  HostMetricsMetricDescriptorV4
+  Exclude<keyof BlockDeviceSampleV5, 'deviceId'>,
+  HostMetricsMetricDescriptorV5
 > = {
   readBytesPerSecond: rate('readBytesPerSecond', 'bytesPerSecond', 'block', 'block'),
   writeBytesPerSecond: rate('writeBytesPerSecond', 'bytesPerSecond', 'block', 'block'),
@@ -472,8 +470,8 @@ const BLOCK_DESCRIPTORS: Record<
 }
 
 const GPU_DESCRIPTORS: Record<
-  Exclude<keyof GpuSampleV4, 'gpuId'>,
-  HostMetricsMetricDescriptorV4
+  Exclude<keyof GpuSampleV5, 'gpuId'>,
+  HostMetricsMetricDescriptorV5
 > = {
   utilizationPercent: percent('utilizationPercent', 'gpu', 'gpu'),
   memoryUsedBytes: bytesGauge('memoryUsedBytes', 'gpu', 'gpu'),
@@ -493,8 +491,8 @@ const GPU_DESCRIPTORS: Record<
  * independently typed metrics.
  */
 const HARDWARE_SIGNAL_DESCRIPTORS: Record<
-  Exclude<keyof HardwareSignalSampleV4, 'signalId' | 'kind'>,
-  HostMetricsMetricDescriptorV4
+  Exclude<keyof HardwareSignalSampleV5, 'signalId' | 'kind'>,
+  HostMetricsMetricDescriptorV5
 > = {
   value: nonNegative('value', {
     unit: 'count',
@@ -507,8 +505,8 @@ const HARDWARE_SIGNAL_DESCRIPTORS: Record<
 }
 
 const INGRESS_DESCRIPTORS: Record<
-  Exclude<keyof IngressSourceSampleV4, 'sourceId' | 'sourceKind'>,
-  HostMetricsMetricDescriptorV4
+  Exclude<keyof IngressSourceSampleV5, 'sourceId' | 'sourceKind'>,
+  HostMetricsMetricDescriptorV5
 > = {
   requests: deltaCounter('requests', 'count', 'ingress', 'managed.ingress'),
   responses2xx: deltaCounter('responses2xx', 'count', 'ingress', 'managed.ingress'),
@@ -536,8 +534,8 @@ const INGRESS_DESCRIPTORS: Record<
 }
 
 const DATABASE_PROXY_DESCRIPTORS: Record<
-  Exclude<keyof DatabaseProxySampleV4, 'sourceId' | 'sourceKind'>,
-  HostMetricsMetricDescriptorV4
+  Exclude<keyof DatabaseProxySampleV5, 'sourceId' | 'sourceKind'>,
+  HostMetricsMetricDescriptorV5
 > = {
   queries: deltaCounter('queries', 'count', 'databaseProxy', 'managed.database_proxy'),
   slowQueries: deltaCounter('slowQueries', 'count', 'databaseProxy', 'managed.database_proxy'),
@@ -553,26 +551,17 @@ const DATABASE_PROXY_DESCRIPTORS: Record<
 }
 
 // ---------------------------------------------------------------------------
-// cpu.detail (§38) / memory.detail (§40) / cpu.core.live — populated by the
-// cpu-detail/memory-detail/cpu-core-live collectors. `cpu.detail` embeds 4
-// busiest-core hotspots (own entity scope `cpuHotspot`, still packed inside
-// the fixed-shape `cpu.detail` page — see `EMBEDDED_SCOPE_MULTIPLIER_V4`
-// below) alongside 7 host-wide scalar fields. `cpu.core.live` is a
-// per-entity-packed family, live sessions only, one entry per online core.
+// cpu.detail (§38) / memory.detail (§40) — populated by the
+// cpu-detail/memory-detail collectors. Both are host-scoped, fixed-shape
+// pages. v5 removed every per-core family: `cpu.detail`'s 4 embedded
+// busiest-core hotspots and the live per-core `cpu.core.live` family are
+// both gone, so `cpu.detail` is 7 scalar slots rather than 19 and no
+// scope needs an embedded-slot multiplier any more.
 // ---------------------------------------------------------------------------
 
-const CPU_HOTSPOT_DESCRIPTORS: Record<
-  Exclude<keyof CpuHotspotSampleV4, 'coreId'>,
-  HostMetricsMetricDescriptorV4
-> = {
-  busyPercent: percent('busyPercent', 'cpuHotspot', 'cpu.detail'),
-  iowaitPercent: percent('iowaitPercent', 'cpuHotspot', 'cpu.detail'),
-  stealPercent: percent('stealPercent', 'cpuHotspot', 'cpu.detail'),
-}
-
 const CPU_DETAIL_DESCRIPTORS: Record<
-  Exclude<keyof CpuDetailSampleV4, 'hotspots'>,
-  HostMetricsMetricDescriptorV4
+  Exclude<keyof CpuDetailSampleV5, 'hotspots'>,
+  HostMetricsMetricDescriptorV5
 > = {
   averageFrequencyMHz: nonNegative('averageFrequencyMHz', {
     unit: 'mhz',
@@ -609,16 +598,7 @@ const CPU_DETAIL_DESCRIPTORS: Record<
   cpuIrqPercent: percent('cpuIrqPercent', 'cpuDetail', 'cpu.detail'),
 }
 
-const CPU_CORE_LIVE_DESCRIPTORS: Record<
-  Exclude<keyof CpuCoreLiveSampleV4, 'coreId'>,
-  HostMetricsMetricDescriptorV4
-> = {
-  busyPercent: percent('busyPercent', 'cpuCore', 'cpu.core.live'),
-  iowaitPercent: percent('iowaitPercent', 'cpuCore', 'cpu.core.live'),
-  stealPercent: percent('stealPercent', 'cpuCore', 'cpu.core.live'),
-}
-
-const MEMORY_DETAIL_DESCRIPTORS: Record<keyof MemoryDetailSampleV4, HostMetricsMetricDescriptorV4> =
+const MEMORY_DETAIL_DESCRIPTORS: Record<keyof MemoryDetailSampleV5, HostMetricsMetricDescriptorV5> =
   {
     memoryFreeBytes: bytesGauge('memoryFreeBytes', 'memoryDetail', 'memory.detail'),
     cachedBytes: bytesGauge('cachedBytes', 'memoryDetail', 'memory.detail'),
@@ -657,7 +637,7 @@ const MEMORY_DETAIL_DESCRIPTORS: Record<keyof MemoryDetailSampleV4, HostMetricsM
   }
 
 /** Every per-family descriptor record, in the order they contribute to the merged map. */
-const ALL_DESCRIPTOR_RECORDS: Record<string, HostMetricsMetricDescriptorV4>[] = [
+const ALL_DESCRIPTOR_RECORDS: Record<string, HostMetricsMetricDescriptorV5>[] = [
   HOST_CPU_DESCRIPTORS,
   HOST_KERNEL_DESCRIPTORS,
   HOST_MEMORY_DESCRIPTORS,
@@ -670,9 +650,7 @@ const ALL_DESCRIPTOR_RECORDS: Record<string, HostMetricsMetricDescriptorV4>[] = 
   HARDWARE_SIGNAL_DESCRIPTORS,
   INGRESS_DESCRIPTORS,
   DATABASE_PROXY_DESCRIPTORS,
-  CPU_HOTSPOT_DESCRIPTORS,
   CPU_DETAIL_DESCRIPTORS,
-  CPU_CORE_LIVE_DESCRIPTORS,
   MEMORY_DETAIL_DESCRIPTORS,
 ]
 
@@ -685,9 +663,9 @@ const ALL_DESCRIPTOR_RECORDS: Record<string, HostMetricsMetricDescriptorV4>[] = 
  * ever lost its entity-scope qualification.
  */
 function buildDescriptorMap(
-  records: readonly Record<string, HostMetricsMetricDescriptorV4>[]
-): Record<string, HostMetricsMetricDescriptorV4> {
-  const merged: Record<string, HostMetricsMetricDescriptorV4> = {}
+  records: readonly Record<string, HostMetricsMetricDescriptorV5>[]
+): Record<string, HostMetricsMetricDescriptorV5> {
+  const merged: Record<string, HostMetricsMetricDescriptorV5> = {}
   for (const record of records) {
     for (const descriptor of Object.values(record)) {
       if (merged[descriptor.canonicalName]) {
@@ -700,56 +678,54 @@ function buildDescriptorMap(
 }
 
 /**
- * Central metric descriptor map — every allowed v4 metric, keyed by its
+ * Central metric descriptor map — every allowed v5 metric, keyed by its
  * globally unique `canonicalName`.
  */
-export const HOST_METRICS_METRIC_DESCRIPTORS_V4: Record<string, HostMetricsMetricDescriptorV4> =
+export const HOST_METRICS_METRIC_DESCRIPTORS_V5: Record<string, HostMetricsMetricDescriptorV5> =
   buildDescriptorMap(ALL_DESCRIPTOR_RECORDS)
 
 /** AE double-index page budget per fixed-shape family (one row/page per sample, not per entity). */
-const HOSTED_FAMILY_CAPACITY_V4: Partial<Record<HostedFamilyV4, number>> = {
+const HOSTED_FAMILY_CAPACITY_V5: Partial<Record<HostedFamilyV5, number>> = {
   'host.system': 19,
   'host.io': 19,
   'managed.ingress': 17,
   'managed.database_proxy': 6,
-  'cpu.detail': 19,
+  'cpu.detail': 7,
   'memory.detail': 19,
 }
 
 /** AE double-index page budget per entity for the per-entity-packed families. */
-const PER_ENTITY_CAPACITY_V4: Record<
-  Extract<HostedFamilyV4, 'gpu' | 'network' | 'filesystem' | 'block' | 'cpu.core.live'>,
+const PER_ENTITY_CAPACITY_V5: Record<
+  Extract<HostedFamilyV5, 'gpu' | 'network' | 'filesystem' | 'block'>,
   number
 > = {
   gpu: 9,
   network: 6,
   filesystem: 2,
   block: 9,
-  'cpu.core.live': 3,
 }
 
 /**
- * `cpuHotspot` descriptors describe one embedded hotspot slot's fields, but
- * `cpu.detail`'s fixed-shape page embeds 4 hotspots (the daemon's 4 busiest
- * cores) — so each `cpuHotspot` descriptor actually consumes 4 AE double
- * slots in that page, not 1. Every other scope consumes exactly the slot
- * count its descriptors declare.
+ * Per-scope AE double-slot multiplier. v4 needed this because `cpu.detail`
+ * embedded 4 busiest-core hotspot slots, so one `cpuHotspot` descriptor
+ * consumed 4 doubles. v5 has no embedded repeated scope at all, so every
+ * scope consumes exactly the slot count its descriptors declare — the map
+ * is kept (empty) so re-introducing an embedded family stays a one-line
+ * change rather than a re-derivation.
  */
-const EMBEDDED_SCOPE_MULTIPLIER_V4: Partial<Record<MetricEntityScopeV4, number>> = {
-  cpuHotspot: 4,
-}
+const EMBEDDED_SCOPE_MULTIPLIER_V5: Partial<Record<MetricEntityScopeV5, number>> = {}
 
-const FIXED_SHAPE_FAMILIES_V4 = Object.keys(HOSTED_FAMILY_CAPACITY_V4) as HostedFamilyV4[]
-const PER_ENTITY_FAMILIES_V4 = Object.keys(
-  PER_ENTITY_CAPACITY_V4
-) as (keyof typeof PER_ENTITY_CAPACITY_V4)[]
+const FIXED_SHAPE_FAMILIES_V5 = Object.keys(HOSTED_FAMILY_CAPACITY_V5) as HostedFamilyV5[]
+const PER_ENTITY_FAMILIES_V5 = Object.keys(
+  PER_ENTITY_CAPACITY_V5
+) as (keyof typeof PER_ENTITY_CAPACITY_V5)[]
 
 function descriptorsByFamily(
-  descriptors: Record<string, HostMetricsMetricDescriptorV4>
-): Map<HostedFamilyV4, number> {
-  const counts = new Map<HostedFamilyV4, number>()
+  descriptors: Record<string, HostMetricsMetricDescriptorV5>
+): Map<HostedFamilyV5, number> {
+  const counts = new Map<HostedFamilyV5, number>()
   for (const descriptor of Object.values(descriptors)) {
-    const multiplier = EMBEDDED_SCOPE_MULTIPLIER_V4[descriptor.entityScope] ?? 1
+    const multiplier = EMBEDDED_SCOPE_MULTIPLIER_V5[descriptor.entityScope] ?? 1
     counts.set(descriptor.hostedFamily, (counts.get(descriptor.hostedFamily) ?? 0) + multiplier)
   }
   return counts
@@ -760,11 +736,11 @@ function descriptorsByFamily(
  * unique. `buildDescriptorMap` already throws on construction if two
  * descriptors collide, so this re-derives the same check from the finished
  * map — a safety net against any future code that assigns into
- * `HOST_METRICS_METRIC_DESCRIPTORS_V4` directly instead of going through the
+ * `HOST_METRICS_METRIC_DESCRIPTORS_V5` directly instead of going through the
  * builder.
  */
 function assertNoDuplicateCanonicalNames(
-  descriptors: Record<string, HostMetricsMetricDescriptorV4>
+  descriptors: Record<string, HostMetricsMetricDescriptorV5>
 ): void {
   const seen = new Set<string>()
   for (const [key, descriptor] of Object.entries(descriptors)) {
@@ -783,16 +759,16 @@ function assertNoDuplicateCanonicalNames(
 /**
  * Module-load invariant: fixed-shape families (one row/page per sample) stay
  * within their AE double-index page budget, and per-entity-packed families
- * stay within their per-entity slot budget — v4's replacement for v3's flat
+ * stay within their per-entity slot budget — v5's replacement for v3's flat
  * `MAX_METRICS_PER_PART` ceiling, now scoped per conceptual family instead of
  * a shared partition.
  */
 function assertHostedFamilyCapacity(
-  descriptors: Record<string, HostMetricsMetricDescriptorV4> = HOST_METRICS_METRIC_DESCRIPTORS_V4
+  descriptors: Record<string, HostMetricsMetricDescriptorV5> = HOST_METRICS_METRIC_DESCRIPTORS_V5
 ): void {
   const counts = descriptorsByFamily(descriptors)
-  for (const family of FIXED_SHAPE_FAMILIES_V4) {
-    const cap = HOSTED_FAMILY_CAPACITY_V4[family]!
+  for (const family of FIXED_SHAPE_FAMILIES_V5) {
+    const cap = HOSTED_FAMILY_CAPACITY_V5[family]!
     const count = counts.get(family) ?? 0
     if (count > cap) {
       throw new TypeError(
@@ -800,8 +776,8 @@ function assertHostedFamilyCapacity(
       )
     }
   }
-  for (const family of PER_ENTITY_FAMILIES_V4) {
-    const cap = PER_ENTITY_CAPACITY_V4[family]
+  for (const family of PER_ENTITY_FAMILIES_V5) {
+    const cap = PER_ENTITY_CAPACITY_V5[family]
     const count = counts.get(family) ?? 0
     if (count > cap) {
       throw new TypeError(
@@ -811,27 +787,27 @@ function assertHostedFamilyCapacity(
   }
 }
 
-assertNoDuplicateCanonicalNames(HOST_METRICS_METRIC_DESCRIPTORS_V4)
+assertNoDuplicateCanonicalNames(HOST_METRICS_METRIC_DESCRIPTORS_V5)
 assertHostedFamilyCapacity()
 
 /** Exposed for tests that need to assert the throw behavior without waiting on module-load side effects. */
-export const _internalV4 = {
+export const _internalV5 = {
   assertNoDuplicateCanonicalNames,
   assertHostedFamilyCapacity,
   buildDescriptorMap,
-  HOSTED_FAMILY_CAPACITY_V4,
-  PER_ENTITY_CAPACITY_V4,
-  EMBEDDED_SCOPE_MULTIPLIER_V4,
+  HOSTED_FAMILY_CAPACITY_V5,
+  PER_ENTITY_CAPACITY_V5,
+  EMBEDDED_SCOPE_MULTIPLIER_V5,
 }
 
 /** Apply descriptor min/max + sanitize behavior to a finite metric value. */
-export function sanitizeMetricValueV4(canonicalName: string, value: number | null): number | null {
+export function sanitizeMetricValueV5(canonicalName: string, value: number | null): number | null {
   if (value === null) return null
   if (!Number.isFinite(value)) return null
 
-  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[canonicalName]
+  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[canonicalName]
   if (!descriptor) {
-    throw new TypeError(`unknown v4 metric canonicalName: ${canonicalName}`)
+    throw new TypeError(`unknown v5 metric canonicalName: ${canonicalName}`)
   }
   if (value < descriptor.min || value > descriptor.max) {
     if (descriptor.sanitize === 'clamp') {

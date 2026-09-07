@@ -112,7 +112,7 @@ export const metricsSchemas = {
   HostSeriesChartPointDerived: {
     type: 'object',
     description:
-      'Server-computed presentation values so the UI never reimplements v4’s used-from-available/used-percent math. A value is `null` whenever an input it needs is missing — in particular, `memoryUsedPercent`/`swapUsedPercent`/`rootFilesystemUsedPercent` are `null` until the server’s topology has reported the matching total (memory/swap totals, or the root filesystem’s `totalBytes`).',
+      'Server-computed presentation values so the UI never reimplements v5’s used-from-available/used-percent math. A value is `null` whenever an input it needs is missing — in particular, `memoryUsedPercent`/`swapUsedPercent`/`rootFilesystemUsedPercent` are `null` until the server’s topology has reported the matching total (memory/swap totals, or the root filesystem’s `totalBytes`).',
     required: [
       'cpuUsagePercent',
       'memoryUsedBytes',
@@ -125,7 +125,7 @@ export const metricsSchemas = {
       cpuUsagePercent: {
         type: ['number', 'null'],
         description:
-          'Direct passthrough of `host.cpu.busyPercent` — unlike v3’s `cpuIdlePercent`, v4 already reports the "used" semantic, no `100 − idle` inversion.',
+          'Direct passthrough of `host.cpu.busyPercent` — unlike v3’s `cpuIdlePercent`, v5 already reports the "used" semantic, no `100 − idle` inversion.',
       },
       memoryUsedBytes: { type: ['number', 'null'] },
       memoryUsedPercent: { type: ['number', 'null'] },
@@ -200,7 +200,7 @@ export const metricsSchemas = {
         type: 'array',
         items: { type: 'integer' },
         description:
-          'Point indices where `topologyGeneration` differs from the previous known generation — a chart-continuity boundary marker (v4 analogue of v3’s `generationBreaks`).',
+          'Point indices where `topologyGeneration` differs from the previous known generation — a chart-continuity boundary marker (v5 analogue of v3’s `generationBreaks`).',
       },
       topologyGenerations: {
         type: 'array',
@@ -413,7 +413,7 @@ export const metricsSchemas = {
         type: 'array',
         items: { type: 'string' },
         description:
-          'The fixed v4 fleet host metric set (CPU stack + memory/swap) — never per-request. v3’s load-average fields (`load1`/`load5`/`load15`) have no v4 analogue and are not present.',
+          'The fixed v5 fleet host metric set (CPU stack + memory/swap) — never per-request. v3’s load-average fields (`load1`/`load5`/`load15`) have no v5 analogue and are not present.',
       },
       servers: {
         type: 'array',
@@ -642,7 +642,7 @@ export const metricsPaths: Record<string, unknown> = {
       tags: ['Servers'],
       summary: 'Get one fleet-wide host usage snapshot for the org servers overview',
       description:
-        'CPU stack + memory/swap for every server visible to the caller, in one query — never N per-server calls. Authorization is server-side via listVisible; no serverIds are ever accepted from the client. Carries no per-server cpuLimits (unlike /series and /summary) — see FLEET_HOST_METRICS_V4’s doc comment.',
+        'CPU stack + memory/swap for every server visible to the caller, in one query — never N per-server calls. Authorization is server-side via listVisible; no serverIds are ever accepted from the client. Carries no per-server cpuLimits (unlike /series and /summary) — see FLEET_HOST_METRICS_V5’s doc comment.',
       security: [{ cookieAuth: [] }],
       parameters: [
         {

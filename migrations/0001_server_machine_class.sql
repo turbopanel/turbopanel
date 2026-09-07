@@ -1,0 +1,2 @@
+ALTER TABLE "server" ADD COLUMN "machine_class" text;--> statement-breakpoint
+ALTER TABLE "server" ADD CONSTRAINT "server_machine_class_check" CHECK ("server"."machine_class" IN ('physical', 'virtual'));

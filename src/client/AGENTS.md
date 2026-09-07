@@ -172,7 +172,7 @@ behavior changes.
   per `(server, datacenter)`, deduped by address (`uniq_ip_org_address`;
   `ip_datacenter_member_network_check`). A server may hold pins in many
   datacenters. A datacenter owns **many** `network(kind='datacenter')` subnets
-  (v4 and/or v6), unique per `(datacenter_id, cidr)` via
+  (v5 and/or v6), unique per `(datacenter_id, cidr)` via
   **`uniq_network_datacenter_cidr`**; **all subnets in a datacenter are assumed
   mutually routable** — the datacenter *is* the routing domain, there are no
   per-pair adjacency records. `POST /datacenters` body is

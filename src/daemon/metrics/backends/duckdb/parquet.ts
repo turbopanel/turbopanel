@@ -1,5 +1,5 @@
 /**
- * Daily Parquet archive for the DuckDB server-metrics store — v4 seals every
+ * Daily Parquet archive for the DuckDB server-metrics store — v5 seals every
  * family table (`PARQUET_FAMILIES`) independently, each into its own
  * partition subtree:
  *
@@ -23,8 +23,6 @@ import type { DuckDbConnectionLike } from './database.ts'
 import { escapeSqlString } from './database.ts'
 import {
   BLOCK_SAMPLES_TABLE,
-  CPU_CORE_SAMPLES_TABLE,
-  CPU_HOTSPOT_SAMPLES_TABLE,
   DATABASE_PROXY_SAMPLES_TABLE,
   FILESYSTEM_SAMPLES_TABLE,
   GPU_SAMPLES_TABLE,
@@ -48,8 +46,6 @@ export type ParquetFamilyKey =
   | 'filesystem'
   | 'block'
   | 'gpu'
-  | 'cpu-hotspot'
-  | 'cpu-core-live'
   | 'memory-detail'
   | 'hardware'
   | 'ingress'
@@ -96,18 +92,6 @@ export const PARQUET_FAMILIES: readonly ParquetFamily[] = [
     key: 'gpu',
     table: GPU_SAMPLES_TABLE,
     subdir: 'gpu',
-    timestampColumn: 'sampled_at',
-  },
-  {
-    key: 'cpu-hotspot',
-    table: CPU_HOTSPOT_SAMPLES_TABLE,
-    subdir: 'cpu-hotspot',
-    timestampColumn: 'sampled_at',
-  },
-  {
-    key: 'cpu-core-live',
-    table: CPU_CORE_SAMPLES_TABLE,
-    subdir: 'cpu-core-live',
     timestampColumn: 'sampled_at',
   },
   {

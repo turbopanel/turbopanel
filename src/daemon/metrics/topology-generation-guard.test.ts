@@ -1,10 +1,10 @@
 /**
- * Topology-reinterpretation guard for the v4 metrics write path.
+ * Topology-reinterpretation guard for the v5 metrics write path.
  *
- * `host.io`'s embedded NIC slots (double12..17 — see `field-map-v4.ts`'s
+ * `host.io`'s embedded NIC slots (double12..17 — see `field-map-v5.ts`'s
  * module doc comment) carry no per-slot identity of their own: which
  * `networks[]` entry a slot represents is resolved only through the
- * `SlotMapping` passed to `buildMetricsDataPointsV4` at write time. Every
+ * `SlotMapping` passed to `buildMetricsDataPointsV5` at write time. Every
  * other paged family (gpu/network/filesystem/block/hardware.physical) stamps
  * blob10 with the contributing entities' real ids, so a stored row is
  * self-describing regardless of which topology generation produced it; NICs
@@ -12,15 +12,15 @@
  * silently reinterpret a slot if the wrong generation's mapping were ever
  * used to decode it. DuckDB has no equivalent risk — it writes every network
  * device to its per-family table keyed by real `deviceId` regardless of slot
- * embedding (`types-v4.ts`'s `EntitySeriesQueryV4` doc comment) — so this
+ * embedding (`types-v5.ts`'s `EntitySeriesQueryV5` doc comment) — so this
  * guard is scoped to the Cloudflare AE write path only.
  *
  * The write-path packing tests below prove the packer itself is
  * identity-addressed (not positional) once a `SlotMapping` is available, and
  * that every row carries its own sample's `topologyGeneration` so a
  * downstream reader can regroup rows by generation. Further down,
- * `createFakeAnalyticsEngineV4` (`testing/fake-analytics-engine-v4.ts`) — an
- * in-memory DuckDB-backed AE dataset the real `queryXViaSqlApiV4` SQL text
+ * `createFakeAnalyticsEngineV5` (`testing/fake-analytics-engine-v5.ts`) — an
+ * in-memory DuckDB-backed AE dataset the real `queryXViaSqlApiV5` SQL text
  * executes against — extends this to the read path: historical query
  * results for both a generation-reordered paged family (GPU page-position
  * swap) and the host series must keep resolving each row by its own
@@ -29,21 +29,21 @@
  */
 import { assertEquals } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { buildMetricsSampleV4, type MetricsSampleV4Input } from './contract-v4.ts'
-import type { AuthenticatedMetricsSampleV4, SlotMapping } from './types-v4.ts'
+import { buildMetricsSampleV5, type MetricsSampleV5Input } from './contract-v5.ts'
+import type { AuthenticatedMetricsSampleV5, SlotMapping } from './types-v5.ts'
 import {
-  AE_V4_BLOB_FAMILY_INDEX,
-  AE_V4_BLOB_TOPOLOGY_GENERATION_INDEX,
-  AE_V4_FAMILY_HOST_IO,
-  AE_V4_FAMILY_HOST_SYSTEM,
-  AE_V4_FAMILY_NETWORK,
-  AE_V4_MISSING_METRIC_SENTINEL,
-  type AnalyticsEngineDataPointLikeV4,
-  buildMetricsDataPointsV4,
-} from './backends/cloudflare/field-map-v4.ts'
-import { computeTopologyGenerationBreaks } from './query/series-response-v4.ts'
-import { CloudflareAnalyticsEngineServerMetricsStoreV4 } from './backends/cloudflare/store-v4.ts'
-import { createFakeAnalyticsEngineV4 } from './testing/fake-analytics-engine-v4.ts'
+  AE_V5_BLOB_FAMILY_INDEX,
+  AE_V5_BLOB_TOPOLOGY_GENERATION_INDEX,
+  AE_V5_FAMILY_HOST_IO,
+  AE_V5_FAMILY_HOST_SYSTEM,
+  AE_V5_FAMILY_NETWORK,
+  AE_V5_MISSING_METRIC_SENTINEL,
+  type AnalyticsEngineDataPointLikeV5,
+  buildMetricsDataPointsV5,
+} from './backends/cloudflare/field-map-v5.ts'
+import { computeTopologyGenerationBreaks } from './query/series-response-v5.ts'
+import { CloudflareAnalyticsEngineServerMetricsStoreV5 } from './backends/cloudflare/store-v5.ts'
+import { createFakeAnalyticsEngineV5 } from './testing/fake-analytics-engine-v5.ts'
 
 const HOST_CPU_FIELDS = [
   'busyPercent',
@@ -87,10 +87,10 @@ function zeroFields(fields: readonly string[]): Record<string, number | null> {
   return out
 }
 
-function baseInput(overrides: Partial<MetricsSampleV4Input> = {}): MetricsSampleV4Input {
+function baseInput(overrides: Partial<MetricsSampleV5Input> = {}): MetricsSampleV5Input {
   return {
     metadata: {
-      version: 4,
+      version: 5,
       sampledAt: '2026-01-01T00:00:00.000Z',
       intervalSeconds: 60,
       sequence: 1,
@@ -99,11 +99,11 @@ function baseInput(overrides: Partial<MetricsSampleV4Input> = {}): MetricsSample
       bootGeneration: 1,
     },
     host: {
-      cpu: zeroFields(HOST_CPU_FIELDS) as MetricsSampleV4Input['host']['cpu'],
-      kernel: zeroFields(HOST_KERNEL_FIELDS) as MetricsSampleV4Input['host']['kernel'],
-      memory: zeroFields(HOST_MEMORY_FIELDS) as MetricsSampleV4Input['host']['memory'],
-      storage: zeroFields(HOST_STORAGE_FIELDS) as MetricsSampleV4Input['host']['storage'],
-      network: zeroFields(HOST_NETWORK_FIELDS) as MetricsSampleV4Input['host']['network'],
+      cpu: zeroFields(HOST_CPU_FIELDS) as MetricsSampleV5Input['host']['cpu'],
+      kernel: zeroFields(HOST_KERNEL_FIELDS) as MetricsSampleV5Input['host']['kernel'],
+      memory: zeroFields(HOST_MEMORY_FIELDS) as MetricsSampleV5Input['host']['memory'],
+      storage: zeroFields(HOST_STORAGE_FIELDS) as MetricsSampleV5Input['host']['storage'],
+      network: zeroFields(HOST_NETWORK_FIELDS) as MetricsSampleV5Input['host']['network'],
     },
     networks: [],
     filesystems: [],
@@ -117,8 +117,8 @@ function baseInput(overrides: Partial<MetricsSampleV4Input> = {}): MetricsSample
   }
 }
 
-function buildSample(overrides: Partial<MetricsSampleV4Input> = {}): AuthenticatedMetricsSampleV4 {
-  const built = buildMetricsSampleV4(baseInput(overrides))
+function buildSample(overrides: Partial<MetricsSampleV5Input> = {}): AuthenticatedMetricsSampleV5 {
+  const built = buildMetricsSampleV5(baseInput(overrides))
   return {
     ...built,
     serverId: '11111111-2222-4333-8444-555555555555',
@@ -151,16 +151,17 @@ function emptySlotMapping(overrides: Partial<SlotMapping> = {}): SlotMapping {
   }
 }
 
-function hostIoPoint(points: AnalyticsEngineDataPointLikeV4[]): AnalyticsEngineDataPointLikeV4 {
+function hostIoPoint(points: AnalyticsEngineDataPointLikeV5[]): AnalyticsEngineDataPointLikeV5 {
   const found = points.find(
-    (point) => point.blobs[AE_V4_BLOB_FAMILY_INDEX] === AE_V4_FAMILY_HOST_IO
+    (point) => point.blobs[AE_V5_BLOB_FAMILY_INDEX] === AE_V5_FAMILY_HOST_IO
   )
   if (!found) throw new Error('no host.io point found')
   return found
 }
 
-// host.io's NIC0 rx-bytes/s embed slot: HOST_IO_FIELD_ORDER.length (11) + 0.
-const NIC0_RX_DOUBLE_INDEX = 11
+// host.io's NIC0 rx-bytes/s embed slot: HOST_IO_FIELD_ORDER.length (9 in v5 —
+// 7 host.storage + 2 host.network) + 0.
+const NIC0_RX_DOUBLE_INDEX = 9
 
 // ---------------------------------------------------------------------------
 // Own-generation resolution: two generations, two distinct devices, each
@@ -170,7 +171,7 @@ const NIC0_RX_DOUBLE_INDEX = 11
 it("generation 1's host.io row embeds generation 1's own slot-mapped NIC", () => {
   const sampleGen1 = buildSample({
     metadata: {
-      version: 4,
+      version: 5,
       sampledAt: '2026-01-01T00:00:00.000Z',
       intervalSeconds: 60,
       sequence: 1,
@@ -181,14 +182,14 @@ it("generation 1's host.io row embeds generation 1's own slot-mapped NIC", () =>
     networks: [nic('eth0', 100)],
   })
   const slotMappingGen1 = emptySlotMapping({ normalNicSlots: ['eth0'] })
-  const point = hostIoPoint(buildMetricsDataPointsV4(sampleGen1, slotMappingGen1))
+  const point = hostIoPoint(buildMetricsDataPointsV5(sampleGen1, slotMappingGen1))
   assertEquals(point.doubles[NIC0_RX_DOUBLE_INDEX], 100)
 })
 
 it("generation 2's host.io row embeds generation 2's own (replaced) slot-mapped NIC", () => {
   const sampleGen2 = buildSample({
     metadata: {
-      version: 4,
+      version: 5,
       sampledAt: '2026-01-02T00:00:00.000Z',
       intervalSeconds: 60,
       sequence: 2,
@@ -199,14 +200,14 @@ it("generation 2's host.io row embeds generation 2's own (replaced) slot-mapped 
     networks: [nic('eth1', 300)],
   })
   const slotMappingGen2 = emptySlotMapping({ normalNicSlots: ['eth1'] })
-  const point = hostIoPoint(buildMetricsDataPointsV4(sampleGen2, slotMappingGen2))
+  const point = hostIoPoint(buildMetricsDataPointsV5(sampleGen2, slotMappingGen2))
   assertEquals(point.doubles[NIC0_RX_DOUBLE_INDEX], 300)
 })
 
 it("decoding generation 2's sample with generation 1's mapping never finds the replaced device (proves resolution is identity-addressed, not positional)", () => {
   const sampleGen2 = buildSample({
     metadata: {
-      version: 4,
+      version: 5,
       sampledAt: '2026-01-02T00:00:00.000Z',
       intervalSeconds: 60,
       sequence: 2,
@@ -217,11 +218,11 @@ it("decoding generation 2's sample with generation 1's mapping never finds the r
     networks: [nic('eth1', 300)],
   })
   const wrongGenerationMapping = emptySlotMapping({ normalNicSlots: ['eth0'] })
-  const point = hostIoPoint(buildMetricsDataPointsV4(sampleGen2, wrongGenerationMapping))
+  const point = hostIoPoint(buildMetricsDataPointsV5(sampleGen2, wrongGenerationMapping))
   // eth0 does not exist in this sample under the wrong (stale) mapping —
   // the slot goes missing rather than silently reading eth1's value under
   // eth0's name.
-  assertEquals(point.doubles[NIC0_RX_DOUBLE_INDEX], AE_V4_MISSING_METRIC_SENTINEL)
+  assertEquals(point.doubles[NIC0_RX_DOUBLE_INDEX], AE_V5_MISSING_METRIC_SENTINEL)
 })
 
 it('the same raw sample decodes to different slot-1 values under a swapped mapping (real identity resolution, not array-position packing)', () => {
@@ -237,8 +238,8 @@ it('the same raw sample decodes to different slot-1 values under a swapped mappi
   const mappingB = emptySlotMapping({
     normalNicSlots: ['eth1', 'eth0'],
   })
-  const pointA = hostIoPoint(buildMetricsDataPointsV4(sample, mappingA))
-  const pointB = hostIoPoint(buildMetricsDataPointsV4(sample, mappingB))
+  const pointA = hostIoPoint(buildMetricsDataPointsV5(sample, mappingA))
+  const pointB = hostIoPoint(buildMetricsDataPointsV5(sample, mappingB))
   assertEquals(pointA.doubles[NIC0_RX_DOUBLE_INDEX], 100)
   assertEquals(pointB.doubles[NIC0_RX_DOUBLE_INDEX], 300)
 })
@@ -252,7 +253,7 @@ it('without a SlotMapping, host.io falls back to positional embedding (networks[
   const sample = buildSample({
     networks: [nic('eth0', 100), nic('eth1', 300)],
   })
-  const point = hostIoPoint(buildMetricsDataPointsV4(sample, undefined))
+  const point = hostIoPoint(buildMetricsDataPointsV5(sample, undefined))
   assertEquals(point.doubles[NIC0_RX_DOUBLE_INDEX], 100)
 })
 
@@ -265,7 +266,7 @@ it('without a SlotMapping, host.io falls back to positional embedding (networks[
 it("every row (host.system, host.io, and a paged family) carries its own sample's topologyGeneration in blob7", () => {
   const sample = buildSample({
     metadata: {
-      version: 4,
+      version: 5,
       sampledAt: '2026-01-03T00:00:00.000Z',
       intervalSeconds: 60,
       sequence: 3,
@@ -275,27 +276,27 @@ it("every row (host.system, host.io, and a paged family) carries its own sample'
     },
     networks: [nic('eth0', 1), nic('eth1', 2), nic('eth2', 3), nic('eth3', 4)],
   })
-  const points = buildMetricsDataPointsV4(sample, undefined)
-  const families = points.map((point) => point.blobs[AE_V4_BLOB_FAMILY_INDEX])
+  const points = buildMetricsDataPointsV5(sample, undefined)
+  const families = points.map((point) => point.blobs[AE_V5_BLOB_FAMILY_INDEX])
   assertEquals(
-    families.includes(AE_V4_FAMILY_HOST_SYSTEM) &&
-      families.includes(AE_V4_FAMILY_HOST_IO) &&
-      families.includes(AE_V4_FAMILY_NETWORK),
+    families.includes(AE_V5_FAMILY_HOST_SYSTEM) &&
+      families.includes(AE_V5_FAMILY_HOST_IO) &&
+      families.includes(AE_V5_FAMILY_NETWORK),
     true
   )
   for (const point of points) {
     assertEquals(
-      point.blobs[AE_V4_BLOB_TOPOLOGY_GENERATION_INDEX],
+      point.blobs[AE_V5_BLOB_TOPOLOGY_GENERATION_INDEX],
       '7',
       `family ${
-        point.blobs[AE_V4_BLOB_FAMILY_INDEX]
+        point.blobs[AE_V5_BLOB_FAMILY_INDEX]
       } must carry its own sample's topologyGeneration`
     )
   }
 })
 
 // ---------------------------------------------------------------------------
-// computeTopologyGenerationBreaks — v4 analogue of v3's
+// computeTopologyGenerationBreaks — v5 analogue of v3's
 // computeGenerationBreaks, at the already-decoded query-result layer.
 // ---------------------------------------------------------------------------
 
@@ -304,7 +305,13 @@ it('computeTopologyGenerationBreaks: empty input has no breaks', () => {
 })
 
 it('computeTopologyGenerationBreaks: all points sharing one generation have no breaks', () => {
-  const points = [{ topologyGeneration: 1 }, { topologyGeneration: 1 }, { topologyGeneration: 1 }]
+  const points = [
+    { topologyGeneration: 1 },
+    { topologyGeneration: 1 },
+    {
+      topologyGeneration: 1,
+    },
+  ]
   assertEquals(computeTopologyGenerationBreaks(points), [])
 })
 
@@ -345,13 +352,13 @@ it('computeTopologyGenerationBreaks: an unknown gap between two same-generation 
 
 // ---------------------------------------------------------------------------
 // Executed query-layer resolution (Cloudflare AE, via
-// `createFakeAnalyticsEngineV4`) — proves the real `queryXViaSqlApiV4` SQL
+// `createFakeAnalyticsEngineV5`) — proves the real `queryXViaSqlApiV5` SQL
 // resolves historical rows by their own generation/identity after a
 // reorder/swap, not just that the write-path packer produced the right
 // bytes.
 // ---------------------------------------------------------------------------
 
-function gpuV4(gpuId: string, seed: number) {
+function gpuV5(gpuId: string, seed: number) {
   return {
     gpuId,
     utilizationPercent: seed,
@@ -370,8 +377,8 @@ it("queryEntitySeries resolves each generation's page-position swap by identity,
   const SERVER_ID = '11111111-2222-4333-8444-555555555555'
   const BASE_MS = Date.UTC(2026, 5, 2)
   const INTERVAL_SECONDS = 60
-  const fakeAe = await createFakeAnalyticsEngineV4()
-  const store = new CloudflareAnalyticsEngineServerMetricsStoreV4(fakeAe.dataset, {
+  const fakeAe = await createFakeAnalyticsEngineV5()
+  const store = new CloudflareAnalyticsEngineServerMetricsStoreV5(fakeAe.dataset, {
     sql: fakeAe.sqlConfig,
   })
   try {
@@ -379,7 +386,7 @@ it("queryEntitySeries resolves each generation's page-position swap by identity,
     const gen1AtMs = BASE_MS
     const gen1Sample = buildSample({
       metadata: {
-        version: 4,
+        version: 5,
         sampledAt: new Date(gen1AtMs).toISOString(),
         intervalSeconds: INTERVAL_SECONDS,
         sequence: 1,
@@ -387,7 +394,7 @@ it("queryEntitySeries resolves each generation's page-position swap by identity,
         topologyGeneration: 1,
         bootGeneration: 1,
       },
-      gpus: [gpuV4('gpu0', 11), gpuV4('gpu1', 22)],
+      gpus: [gpuV5('gpu0', 11), gpuV5('gpu1', 22)],
     })
     fakeAe.setNow(gen1AtMs)
     store.writeSample(gen1Sample, emptySlotMapping({ gpuPageOrder: ['gpu0', 'gpu1'] }))
@@ -399,7 +406,7 @@ it("queryEntitySeries resolves each generation's page-position swap by identity,
     const gen2AtMs = BASE_MS + INTERVAL_SECONDS * 1000
     const gen2Sample = buildSample({
       metadata: {
-        version: 4,
+        version: 5,
         sampledAt: new Date(gen2AtMs).toISOString(),
         intervalSeconds: INTERVAL_SECONDS,
         sequence: 2,
@@ -407,7 +414,7 @@ it("queryEntitySeries resolves each generation's page-position swap by identity,
         topologyGeneration: 2,
         bootGeneration: 1,
       },
-      gpus: [gpuV4('gpu0', 33), gpuV4('gpu1', 44)],
+      gpus: [gpuV5('gpu0', 33), gpuV5('gpu1', 44)],
     })
     fakeAe.setNow(gen2AtMs)
     store.writeSample(gen2Sample, emptySlotMapping({ gpuPageOrder: ['gpu1', 'gpu0'] }))
@@ -459,15 +466,15 @@ it("queryHostSeries: topologyGenerations reports both generations across a reord
   const SERVER_ID = '11111111-2222-4333-8444-555555555555'
   const BASE_MS = Date.UTC(2026, 5, 3)
   const INTERVAL_SECONDS = 60
-  const fakeAe = await createFakeAnalyticsEngineV4()
-  const store = new CloudflareAnalyticsEngineServerMetricsStoreV4(fakeAe.dataset, {
+  const fakeAe = await createFakeAnalyticsEngineV5()
+  const store = new CloudflareAnalyticsEngineServerMetricsStoreV5(fakeAe.dataset, {
     sql: fakeAe.sqlConfig,
   })
   try {
     const gen1AtMs = BASE_MS
     const gen1Sample = buildSample({
       metadata: {
-        version: 4,
+        version: 5,
         sampledAt: new Date(gen1AtMs).toISOString(),
         intervalSeconds: INTERVAL_SECONDS,
         sequence: 1,
@@ -484,7 +491,7 @@ it("queryHostSeries: topologyGenerations reports both generations across a reord
     const gen2AtMs = BASE_MS + INTERVAL_SECONDS * 1000
     const gen2Sample = buildSample({
       metadata: {
-        version: 4,
+        version: 5,
         sampledAt: new Date(gen2AtMs).toISOString(),
         intervalSeconds: INTERVAL_SECONDS,
         sequence: 2,

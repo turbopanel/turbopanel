@@ -8,13 +8,13 @@ import {
   getDaemonCellRegistry,
   getDb,
   getQueryCache,
-  getServerMetricsStoreV4,
+  getServerMetricsStoreV5,
   raceWithTimeout,
   runWithDbTimeout,
 } from './db.ts'
 import type { Context } from 'hono'
 import type { DaemonCellRegistry } from './daemon/cell/contracts.ts'
-import type { ServerMetricsStoreV4 } from './daemon/metrics/types-v4.ts'
+import type { ServerMetricsStoreV5 } from './daemon/metrics/types-v5.ts'
 import type { QueryCache } from './query-cache/contracts.ts'
 
 // The projection path never inspects the Db shape when fn ignores it, so a cast
@@ -128,9 +128,9 @@ it('context getters read typed Hono variables', () => {
     db: FAKE_DB,
     daemonCellRegistry: { kind: 'registry' } as unknown as DaemonCellRegistry,
     queryCache: { kind: 'cache' } as unknown as QueryCache,
-    serverMetricsStoreV4: {
+    serverMetricsStoreV5: {
       kind: 'metrics',
-    } as unknown as ServerMetricsStoreV4,
+    } as unknown as ServerMetricsStoreV5,
   }
   const c = {
     get: (key: string) => vars[key as keyof typeof vars],
@@ -139,7 +139,7 @@ it('context getters read typed Hono variables', () => {
   assertEquals(getDb(c), FAKE_DB)
   assertEquals(getDaemonCellRegistry(c), vars.daemonCellRegistry)
   assertEquals(getQueryCache(c), vars.queryCache)
-  assertEquals(getServerMetricsStoreV4(c), vars.serverMetricsStoreV4)
+  assertEquals(getServerMetricsStoreV5(c), vars.serverMetricsStoreV5)
 
   const empty = { get: () => undefined } as unknown as Context
   assertEquals(getDb(empty), undefined)

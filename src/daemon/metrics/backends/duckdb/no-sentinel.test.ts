@@ -1,6 +1,6 @@
 /**
- * DuckDB never leaks the Cloudflare Analytics Engine v4 missing-metric
- * sentinel (`AE_V4_MISSING_METRIC_SENTINEL`, `-1e308`) through its query
+ * DuckDB never leaks the Cloudflare Analytics Engine v5 missing-metric
+ * sentinel (`AE_V5_MISSING_METRIC_SENTINEL`, `-1e308`) through its query
  * surface — a value absent from a written sample must come back as a real
  * SQL `NULL` (JS `null`), never AE's positional-packing placeholder. DuckDB
  * has no positional slot layout at all (`schema.ts`'s doc comment), so this
@@ -15,15 +15,15 @@
  */
 import { assertEquals } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { buildMetricsSampleV4 } from '../../contract-v4.ts'
-import { truncateSampleToCapabilityPlanV4 } from '../../capability-plan.ts'
-import type { AuthenticatedMetricsSampleV4 } from '../../types-v4.ts'
+import { buildMetricsSampleV5 } from '../../contract-v5.ts'
+import { truncateSampleToCapabilityPlanV5 } from '../../capability-plan.ts'
+import type { AuthenticatedMetricsSampleV5 } from '../../types-v5.ts'
 import { representativeMachineFixtures } from '../../testing/representative-machines.ts'
 import {
-  AE_V4_MISSING_METRIC_SENTINEL,
-  PER_ENTITY_FIELD_ORDER_V4,
-  SINGLE_ROW_FIELD_ORDER_V4,
-} from '../cloudflare/field-map-v4.ts'
+  AE_V5_MISSING_METRIC_SENTINEL,
+  PER_ENTITY_FIELD_ORDER_V5,
+  SINGLE_ROW_FIELD_ORDER_V5,
+} from '../cloudflare/field-map-v5.ts'
 import { HOST_METRIC_FIELD_REFS } from './schema.ts'
 import { DuckDbParquetServerMetricsStore } from './store.ts'
 
@@ -39,7 +39,12 @@ async function withStore(
   const metricsDir = await Deno.makeTempDir({
     prefix: 'tp-duckdb-no-sentinel-',
   })
-  const store = new DuckDbParquetServerMetricsStore({ metricsDir }, { writeBatchMaxRows: 1 })
+  const store = new DuckDbParquetServerMetricsStore(
+    { metricsDir },
+    {
+      writeBatchMaxRows: 1,
+    }
+  )
   try {
     await run(store)
   } finally {
@@ -49,9 +54,9 @@ async function withStore(
 }
 
 function authenticate(
-  built: ReturnType<typeof buildMetricsSampleV4>,
+  built: ReturnType<typeof buildMetricsSampleV5>,
   atMs: number
-): AuthenticatedMetricsSampleV4 {
+): AuthenticatedMetricsSampleV5 {
   return {
     ...built,
     serverId: SERVER_ID,
@@ -60,7 +65,7 @@ function authenticate(
 }
 
 function assertNoSentinel(value: unknown, label: string): void {
-  assertEquals(value === AE_V4_MISSING_METRIC_SENTINEL, false, label)
+  assertEquals(value === AE_V5_MISSING_METRIC_SENTINEL, false, label)
 }
 
 // A handful of shapes covering every per-entity family plus a fixture with
@@ -78,10 +83,10 @@ const FIXTURES_TO_CHECK = [
 for (const name of FIXTURES_TO_CHECK) {
   const fixture = representativeMachineFixtures().find((f) => f.name === name)!
 
-  it(`no-sentinel: "${fixture.name}" host series + entity series never surface AE_V4_MISSING_METRIC_SENTINEL`, async () => {
+  it(`no-sentinel: "${fixture.name}" host series + entity series never surface AE_V5_MISSING_METRIC_SENTINEL`, async () => {
     await withStore(async (store) => {
-      const built = buildMetricsSampleV4(fixture.input)
-      const truncated = truncateSampleToCapabilityPlanV4(built, fixture.plan)
+      const built = buildMetricsSampleV5(fixture.input)
+      const truncated = truncateSampleToCapabilityPlanV5(built, fixture.plan)
       await store.writeSample(authenticate(truncated, FROM_MS + 60_000))
 
       const hostResult = await store.queryHostSeries({
@@ -110,7 +115,7 @@ for (const name of FIXTURES_TO_CHECK) {
           serverId: SERVER_ID,
           family,
           entityIds,
-          metrics: PER_ENTITY_FIELD_ORDER_V4[family],
+          metrics: PER_ENTITY_FIELD_ORDER_V5[family],
           from: new Date(FROM_MS).toISOString(),
           to: new Date(TO_MS).toISOString(),
           resolutionSeconds: 3600,
@@ -134,7 +139,7 @@ for (const name of FIXTURES_TO_CHECK) {
           serverId: SERVER_ID,
           family,
           entityIds,
-          metrics: SINGLE_ROW_FIELD_ORDER_V4[family],
+          metrics: SINGLE_ROW_FIELD_ORDER_V5[family],
           from: new Date(FROM_MS).toISOString(),
           to: new Date(TO_MS).toISOString(),
           resolutionSeconds: 3600,
@@ -152,7 +157,7 @@ for (const name of FIXTURES_TO_CHECK) {
 }
 
 function entityIdsForFamily(
-  sample: ReturnType<typeof buildMetricsSampleV4>,
+  sample: ReturnType<typeof buildMetricsSampleV5>,
   family: 'gpu' | 'network' | 'filesystem' | 'block' | 'hardware.physical'
 ): string[] {
   switch (family) {
@@ -180,14 +185,15 @@ it('no-sentinel: a sample with every host metric explicitly null never surfaces 
         stealPercent: null,
         softirqPercent: null,
         pressureSomePercent: null,
-        maxCoreBusyPercent: null,
+        saturatedCoreCount: null,
         procsRunning: null,
         procsBlocked: null,
         processCount: null,
       },
       kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
       memory: {
-        availableBytes: null,
+        usedBytes: null,
+        cachedFilesBytes: null,
         swapUsedBytes: null,
         pressureSomePercent: null,
         pressureFullPercent: null,
@@ -200,17 +206,15 @@ it('no-sentinel: a sample with every host metric explicitly null never surfaces 
         ioPressureFullPercent: null,
         diskReadBytesPerSecond: null,
         diskWriteBytesPerSecond: null,
-        diskReadLatencyMs: null,
-        diskWriteLatencyMs: null,
-        maxBlockDeviceUtilPercent: null,
+        diskLatencyMs: null,
         rootFilesystemAvailableBytes: null,
         rootFilesystemFreeInodes: null,
       },
       network: { tcpRetransmitPercent: null, softnetDropsPerSecond: null },
     }
-    const built = buildMetricsSampleV4({
+    const built = buildMetricsSampleV5({
       metadata: {
-        version: 4,
+        version: 5,
         sampledAt: new Date(FROM_MS + 60_000).toISOString(),
         intervalSeconds: 60,
         sequence: 1,

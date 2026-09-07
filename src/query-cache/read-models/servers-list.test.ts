@@ -25,6 +25,7 @@ function directAttachDaemonState() {
       publicJwk: { kty: 'OKP', crv: 'Ed25519', x: 'abc' },
       fingerprint: 'fp-1',
       createdAt: '2020-01-01T00:00:00.000Z',
+      machineClass: null,
     },
     projection: {
       remoteAddress: '__direct__',
@@ -120,6 +121,7 @@ test('cachedServersListReadModel sorts visible ids and enriches from primary db'
       licenseId: null,
       options: null,
       createdAt: '2024-01-02T00:00:00.000Z',
+      machineClass: null,
     },
     {
       id: 'srv-a',
@@ -128,6 +130,7 @@ test('cachedServersListReadModel sorts visible ids and enriches from primary db'
       licenseId: 'lic-1',
       options: null,
       createdAt: '2024-01-01T00:00:00.000Z',
+      machineClass: null,
     },
   ]
   const presenceRows = listRows.map((row) => ({
@@ -185,6 +188,7 @@ test('cachedServersListReadModel works without query cache in context', async ()
     licenseId: null,
     options: null,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }]
   const db = createStubDb({
     listRows,
@@ -220,6 +224,7 @@ test('cachedServersListReadModel marks __direct__ servers as colocated', async (
     licenseId: null,
     options: null,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }]
   const presenceRows = [{
     id: 'srv-colocated',
@@ -284,6 +289,7 @@ test('cachedServersListReadModel uses redis cache key with sorted visible ids', 
     licenseId: null,
     options: null,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }]
   const db = createStubDb({ listRows, presenceRows: [] })
   const store = new Map<string, string>()
@@ -338,6 +344,7 @@ test('cachedServersListReadModel never returns a managedMonitor secret', async (
     licenseId: null,
     options: LEGACY_MONITOR_OPTIONS,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }]
   const db = createStubDb({ listRows, presenceRows: [] })
   const cache = createPassthroughQueryCache(db)
@@ -362,6 +369,7 @@ test('cachedServersListReadModel never caches a managedMonitor secret in redis',
     licenseId: null,
     options: LEGACY_MONITOR_OPTIONS,
     createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: null,
   }]
   const db = createStubDb({ listRows, presenceRows: [] })
   const store = new Map<string, string>()

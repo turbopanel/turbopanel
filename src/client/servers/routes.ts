@@ -355,6 +355,7 @@ function parseServerPatchBody(
 function buildServerUpdateFields(patch: ServerPatchFields): Record<string, unknown> {
   const update: Record<string, unknown> = { updatedAt: patch.updatedAt }
   if (patch.name !== undefined) update.name = patch.name
+  if (patch.machineClass !== undefined) update.machineClass = patch.machineClass
   if (patch.options !== undefined) {
     update.options = sql`COALESCE(${server.options}, '{}'::jsonb) || ${
       JSON.stringify(patch.options)

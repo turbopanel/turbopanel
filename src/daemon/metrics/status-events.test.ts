@@ -1,6 +1,6 @@
 import { assertEquals } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { resetMetricsRateLimitForTests } from './validation-v4.ts'
+import { resetMetricsRateLimitForTests } from './validation-v5.ts'
 import {
   emitServerStatusEvent,
   getServerStatusEventSink,

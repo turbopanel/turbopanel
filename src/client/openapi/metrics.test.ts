@@ -86,7 +86,7 @@ test('HostMetricValues is an open string-keyed map of number|null — never a cl
   assertEquals(schema.additionalProperties, { type: ['number', 'null'] })
 })
 
-test('HostSeriesChartPointDerived requires exactly the v4 derived-value set (no v3 storage/http/thermal breakdown)', () => {
+test('HostSeriesChartPointDerived requires exactly the v5 derived-value set (no v3 storage/http/thermal breakdown)', () => {
   const schema = metricsSchemas.HostSeriesChartPointDerived as SchemaObject
   assertEquals(schema.required, [
     'cpuUsagePercent',
@@ -161,7 +161,7 @@ test('HostSeriesChartResponse bundles host/entities/inventory/topologyGeneration
   )
 })
 
-test('EntitySeriesResult documents every PerEntityHostedFamilyV4', () => {
+test('EntitySeriesResult documents every PerEntityHostedFamilyV5', () => {
   const schema = metricsSchemas.EntitySeriesResult as SchemaObject
   const familySchema = schema.properties!.family as SchemaObject
   assertEquals(familySchema.enum, [
@@ -196,7 +196,7 @@ test('HostSummaryChartResponse carries the envelope but not host-series-only fie
   assertEquals('entities' in (schema.properties ?? {}), false)
 })
 
-test('FleetHostSnapshotResponse documents the fixed v4 fleet metric set and per-server derived values, never per-server cpuLimits', () => {
+test('FleetHostSnapshotResponse documents the fixed v5 fleet metric set and per-server derived values, never per-server cpuLimits', () => {
   const schema = metricsSchemas.FleetHostSnapshotResponse as SchemaObject
   assertEquals(schema.required, ['ok', 'from', 'to', 'backend', 'available', 'metrics', 'servers'])
   assertEquals('cpuLimits' in (schema.properties ?? {}), false)

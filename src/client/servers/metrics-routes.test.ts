@@ -20,19 +20,19 @@ import {
   setServerMetricsLiveMaxMinutes,
 } from '../../lib/settings/server-metrics-settings.ts'
 import type {
-  EntitySeriesQueryV4,
-  EntitySeriesResultV4,
-  FleetHostSnapshotQueryV4,
-  FleetHostSnapshotResultV4,
-  HostSeriesQueryV4,
-  HostSeriesResultV4,
-  HostSummaryQueryV4,
-  HostSummaryResultV4,
-  ServerMetricsStoreV4,
+  EntitySeriesQueryV5,
+  EntitySeriesResultV5,
+  FleetHostSnapshotQueryV5,
+  FleetHostSnapshotResultV5,
+  HostSeriesQueryV5,
+  HostSeriesResultV5,
+  HostSummaryQueryV5,
+  HostSummaryResultV5,
+  ServerMetricsStoreV5,
   StatusHistoryQuery,
   StatusHistoryResult,
-} from '../../daemon/metrics/types-v4.ts'
-import { FLEET_HOST_METRICS_V4 } from './metrics-routes-helpers.ts'
+} from '../../daemon/metrics/types-v5.ts'
+import { FLEET_HOST_METRICS_V5 } from './metrics-routes-helpers.ts'
 import { registerServerMetricsRoutes } from './metrics-routes.ts'
 import { resetDenoMetricsChartCacheForTests } from '../../daemon/metrics/query/cache.ts'
 import { MAX_METRICS_POINTS } from '../../daemon/metrics/query/resolution.ts'
@@ -73,7 +73,7 @@ type MetricsRouteJsonBody = {
   temperatureUnit?: string
 }
 
-/** `/servers/:id/metrics/series` v4 bundled response — see `buildSeriesRouteResponseV4`. */
+/** `/servers/:id/metrics/series` v5 bundled response — see `buildSeriesRouteResponseV5`. */
 type SeriesRouteJsonBody = {
   ok?: boolean
   error?: string
@@ -131,31 +131,31 @@ const FROM = '2026-01-01T00:00:00.000Z'
 const TO = '2026-01-01T01:00:00.000Z'
 
 /**
- * Fake `ServerMetricsStoreV4` for `/series`/`/summary`/`/connection`/`/latest`
+ * Fake `ServerMetricsStoreV5` for `/series`/`/summary`/`/connection`/`/latest`
  * tests. A query method is present on the returned object only when its
- * handler is provided, mirroring `ServerMetricsStoreV4`'s optional-on-interface
+ * handler is provided, mirroring `ServerMetricsStoreV5`'s optional-on-interface
  * methods (a route must treat a genuinely absent method as "unavailable", not
  * call through to a no-op).
  */
-function createFakeMetricsStoreV4(
+function createFakeMetricsStoreV5(
   handlers: {
-    queryHostSeries?: (input: HostSeriesQueryV4) => Promise<HostSeriesResultV4>
-    queryHostSummary?: (input: HostSummaryQueryV4) => Promise<HostSummaryResultV4>
-    queryEntitySeries?: (input: EntitySeriesQueryV4) => Promise<EntitySeriesResultV4>
-    queryFleetHostSnapshot?: (input: FleetHostSnapshotQueryV4) => Promise<FleetHostSnapshotResultV4>
+    queryHostSeries?: (input: HostSeriesQueryV5) => Promise<HostSeriesResultV5>
+    queryHostSummary?: (input: HostSummaryQueryV5) => Promise<HostSummaryResultV5>
+    queryEntitySeries?: (input: EntitySeriesQueryV5) => Promise<EntitySeriesResultV5>
+    queryFleetHostSnapshot?: (input: FleetHostSnapshotQueryV5) => Promise<FleetHostSnapshotResultV5>
     queryStatusHistory?: (input: StatusHistoryQuery) => Promise<StatusHistoryResult>
   } = {}
-): ServerMetricsStoreV4 & {
-  seriesCalls: HostSeriesQueryV4[]
-  summaryCalls: HostSummaryQueryV4[]
-  entityCalls: EntitySeriesQueryV4[]
-  fleetCalls: FleetHostSnapshotQueryV4[]
+): ServerMetricsStoreV5 & {
+  seriesCalls: HostSeriesQueryV5[]
+  summaryCalls: HostSummaryQueryV5[]
+  entityCalls: EntitySeriesQueryV5[]
+  fleetCalls: FleetHostSnapshotQueryV5[]
   connectionCalls: StatusHistoryQuery[]
 } {
-  const seriesCalls: HostSeriesQueryV4[] = []
-  const summaryCalls: HostSummaryQueryV4[] = []
-  const entityCalls: EntitySeriesQueryV4[] = []
-  const fleetCalls: FleetHostSnapshotQueryV4[] = []
+  const seriesCalls: HostSeriesQueryV5[] = []
+  const summaryCalls: HostSummaryQueryV5[] = []
+  const entityCalls: EntitySeriesQueryV5[] = []
+  const fleetCalls: FleetHostSnapshotQueryV5[] = []
   const connectionCalls: StatusHistoryQuery[] = []
 
   return {
@@ -168,7 +168,7 @@ function createFakeMetricsStoreV4(
     writeStatusEvent: () => {},
     ...(handlers.queryHostSeries
       ? {
-          queryHostSeries: (input: HostSeriesQueryV4) => {
+          queryHostSeries: (input: HostSeriesQueryV5) => {
             seriesCalls.push(input)
             return handlers.queryHostSeries!(input)
           },
@@ -176,7 +176,7 @@ function createFakeMetricsStoreV4(
       : {}),
     ...(handlers.queryHostSummary
       ? {
-          queryHostSummary: (input: HostSummaryQueryV4) => {
+          queryHostSummary: (input: HostSummaryQueryV5) => {
             summaryCalls.push(input)
             return handlers.queryHostSummary!(input)
           },
@@ -184,7 +184,7 @@ function createFakeMetricsStoreV4(
       : {}),
     ...(handlers.queryEntitySeries
       ? {
-          queryEntitySeries: (input: EntitySeriesQueryV4) => {
+          queryEntitySeries: (input: EntitySeriesQueryV5) => {
             entityCalls.push(input)
             return handlers.queryEntitySeries!(input)
           },
@@ -192,7 +192,7 @@ function createFakeMetricsStoreV4(
       : {}),
     ...(handlers.queryFleetHostSnapshot
       ? {
-          queryFleetHostSnapshot: (input: FleetHostSnapshotQueryV4) => {
+          queryFleetHostSnapshot: (input: FleetHostSnapshotQueryV5) => {
             fleetCalls.push(input)
             return handlers.queryFleetHostSnapshot!(input)
           },
@@ -213,15 +213,15 @@ async function createMetricsRoutesTestApp(
   db: ReturnType<typeof createDenoDb>,
   runtime: 'workers' | 'deno' = 'deno',
   registry?: DaemonCellRegistry,
-  metricsStoreV4?: ServerMetricsStoreV4
+  metricsStoreV5?: ServerMetricsStoreV5
 ) {
   const secretsConfig = parseTestSecretsConfig('deno')
   const secrets = await deriveSecretsConfig(secretsConfig, 'session-signing')
   const app = new Hono<AppEnv>()
   app.use('*', (c, next) => {
     c.set('db', db)
-    if (metricsStoreV4) {
-      c.set('serverMetricsStoreV4', metricsStoreV4)
+    if (metricsStoreV5) {
+      c.set('serverMetricsStoreV5', metricsStoreV5)
     }
     if (registry) {
       c.set('daemonCellRegistry', registry)
@@ -257,7 +257,7 @@ async function withMetricsFixtures(
     cookie: string
   }) => Promise<void>,
   registry?: DaemonCellRegistry,
-  metricsStoreV4?: ServerMetricsStoreV4
+  metricsStoreV5?: ServerMetricsStoreV5
 ): Promise<void> {
   if (!dbUrl) {
     console.warn('Skipping metrics route tests: TURBOPANEL_DATABASE_URL not set')
@@ -266,7 +266,7 @@ async function withMetricsFixtures(
 
   resetDenoMetricsChartCacheForTests()
   const db = createDenoDb()
-  const { app, secrets } = await createMetricsRoutesTestApp(db, 'deno', registry, metricsStoreV4)
+  const { app, secrets } = await createMetricsRoutesTestApp(db, 'deno', registry, metricsStoreV5)
 
   const email = `metrics-route-test-${crypto.randomUUID()}@example.com`
   const [insertedOrg] = await db
@@ -387,7 +387,7 @@ it('GET /servers/:id/metrics/series rejects invalid range', async () => {
 })
 
 it('GET /servers/:id/metrics/series issues one fan-in queryHostSeries call', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSeries: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -423,7 +423,7 @@ it('GET /servers/:id/metrics/series issues one fan-in queryHostSeries call', asy
       const values = body.host!.points[0]!.values
       assertEquals(values['host.cpu.busyPercent'], 25)
       assertEquals(values['host.memory.availableBytes'], 2_000)
-      // Derived presentation values are server-computed. v4's
+      // Derived presentation values are server-computed. v5's
       // host.cpu.busyPercent is already the "used" semantic (no v3
       // idle-inversion); memoryUsedPercent needs the topology-reported
       // memoryTotalBytes, which no generation was recorded here, so it's null.
@@ -447,64 +447,8 @@ it('GET /servers/:id/metrics/series issues one fan-in queryHostSeries call', asy
   )
 })
 
-it('GET /servers/:id/metrics/series forwards explicit cpuDetail.*/memoryDetail.* selectors to queryHostSeries (DuckDB backend) and returns cpuHotspots', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
-    queryHostSeries: (input) =>
-      Promise.resolve({
-        kind: 'duckdb',
-        available: true,
-        serverId: input.serverId,
-        metrics: input.metrics,
-        points: [
-          {
-            at: FROM,
-            values: {
-              'cpuDetail.averageFrequencyMHz': 3200,
-              'memoryDetail.memoryFreeBytes': 2_000_000,
-            },
-            sampleCount: 1,
-            expectedSampleCount: 1,
-            cpuHotspots: [
-              {
-                coreId: 'cpu:p0c0t0',
-                values: { busyPercent: 91, iowaitPercent: 1, stealPercent: 0 },
-              },
-            ],
-          },
-        ],
-        resolutionSeconds: input.resolutionSeconds ?? 60,
-        gapCount: 0,
-        sampleCount: 1,
-      }),
-  })
-
-  await withMetricsFixtures(
-    async ({ app, serverId, cookie }) => {
-      const url = `/servers/${serverId}/metrics/series?from=${FROM}&to=${TO}&metrics=cpuDetail.averageFrequencyMHz,memoryDetail.memoryFreeBytes`
-      const res = await app.request(url, { headers: { Cookie: cookie } })
-      assertEquals(res.status, 200)
-      const body = await readSeriesJson(res)
-      assertEquals(body.ok, true)
-      assertEquals(body.host!.metrics, [
-        'cpuDetail.averageFrequencyMHz',
-        'memoryDetail.memoryFreeBytes',
-      ])
-      const values = body.host!.points[0]!.values
-      assertEquals(values['cpuDetail.averageFrequencyMHz'], 3200)
-      assertEquals(values['memoryDetail.memoryFreeBytes'], 2_000_000)
-      assertEquals(body.host!.points[0]!.cpuHotspots?.[0]?.coreId, 'cpu:p0c0t0')
-      assertEquals(fakeStore.seriesCalls[0]!.metrics, [
-        'cpuDetail.averageFrequencyMHz',
-        'memoryDetail.memoryFreeBytes',
-      ])
-    },
-    undefined,
-    fakeStore
-  )
-})
-
 it('GET /servers/:id/metrics/series attaches cpuLimits, temperatureUnit, and topology-generation breaks', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSeries: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -570,7 +514,7 @@ it('GET /servers/:id/metrics/series attaches cpuLimits, temperatureUnit, and top
 })
 
 it('GET /servers/:id/metrics/series does not serve a stale cache entry across a topology-generation bump', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSeries: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -640,7 +584,7 @@ it('GET /servers/:id/metrics/series does not serve a stale cache entry across a 
 })
 
 it('GET /servers/:id/metrics/series resolves cpuLimits from the daemon-reported CPU model when hardwareProfile.cpuModel is unset', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSeries: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -691,8 +635,8 @@ it('GET /servers/:id/metrics/series resolves cpuLimits from the daemon-reported 
   )
 })
 
-it('GET /servers/metrics/latest requests only the v4 fleet host metric set', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+it('GET /servers/metrics/latest requests only the v5 fleet host metric set', async () => {
+  const fakeStore = createFakeMetricsStoreV5({
     queryFleetHostSnapshot: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -759,17 +703,17 @@ it('GET /servers/metrics/latest requests only the v4 fleet host metric set', asy
       assertEquals(body.ok, true)
       assertEquals(body.available, true)
       assertEquals(body.backend, 'duckdb')
-      // The fleet path requests the fixed v4 host metric set only — no
+      // The fleet path requests the fixed v5 host metric set only — no
       // stored derived metrics, no per-server request.
-      assertEquals(body.metrics, [...FLEET_HOST_METRICS_V4])
+      assertEquals(body.metrics, [...FLEET_HOST_METRICS_V5])
       assertEquals(fakeStore.fleetCalls.length, 1)
-      assertEquals(fakeStore.fleetCalls[0]!.metrics, [...FLEET_HOST_METRICS_V4])
+      assertEquals(fakeStore.fleetCalls[0]!.metrics, [...FLEET_HOST_METRICS_V5])
       assertEquals(fakeStore.fleetCalls[0]!.serverIds, [serverId])
 
       const row = body.servers!.find((entry) => entry.serverId === serverId)
       assertExists(row)
       // Derived presentation values are server-computed, not reimplemented by
-      // the UI: v4's host.cpu.busyPercent is already the "used" semantic;
+      // the UI: v5's host.cpu.busyPercent is already the "used" semantic;
       // used % for memory/swap comes from the topology-reported totals.
       assertEquals(row!.derived.cpuUsagePercent, 40)
       assertEquals(row!.derived.memoryUsedPercent, 75)
@@ -810,7 +754,7 @@ it('GET /servers/:id/metrics/series rejects oversized maxPoints', async () => {
 it('GET /servers/:id/metrics/series clamps resolution=60 over maximum range', async () => {
   const from = '2026-01-01T00:00:00.000Z'
   const to = '2026-04-01T00:00:00.000Z'
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSeries: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -843,7 +787,7 @@ it('GET /servers/:id/metrics/series clamps resolution=60 over maximum range', as
 })
 
 it('GET /servers/:id/metrics/series cache uses canonical range for exact timestamps', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSeries: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -889,7 +833,7 @@ it('GET /servers/:id/metrics/series cache uses canonical range for exact timesta
 })
 
 it('GET /servers/:id/metrics/series maps Analytics Engine failures to 503', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSeries: () => Promise.reject(new Error('AE SQL unavailable')),
   })
 
@@ -946,7 +890,7 @@ it('GET /servers/:id/metrics/series maps Analytics Engine failures to 503', asyn
 })
 
 it('GET /servers/:id/metrics/series maps backend failures to 503', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSeries: () => Promise.reject(new Error('metrics backend unavailable')),
   })
 
@@ -967,7 +911,7 @@ it('GET /servers/:id/metrics/series maps backend failures to 503', async () => {
 })
 
 it('GET /servers/:id/metrics/series fans out per-entity-family selectors and attaches the topology inventory', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryEntitySeries: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -1039,7 +983,7 @@ it('GET /servers/:id/metrics/series fans out per-entity-family selectors and att
 })
 
 it('GET /servers/:id/metrics/series allows a slot-mapped NIC as a standalone network entity, forwarding slotMapping/topologyGeneration to queryEntitySeries', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryEntitySeries: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -1061,7 +1005,7 @@ it('GET /servers/:id/metrics/series allows a slot-mapped NIC as a standalone net
     async ({ db, app, serverId, cookie }) => {
       // eth0 is the sole uplink, so it resolves to NIC slot 1 — no longer
       // rejected: Cloudflare reconstructs its rx/tx from host.io, and DuckDB
-      // already stored the full row (see EntitySeriesQueryV4's doc comment).
+      // already stored the full row (see EntitySeriesQueryV5's doc comment).
       await recordTopologyGeneration(db, serverId, {
         generation: 1,
         bootGeneration: 1,
@@ -1145,7 +1089,7 @@ it('GET /servers/:id/metrics/series still rejects a TurboFabric mesh device as a
 })
 
 it('GET /servers/:id/metrics/summary returns normalized payload', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSummary: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -1181,7 +1125,7 @@ it('GET /servers/:id/metrics/summary returns normalized payload', async () => {
 })
 
 it('GET /servers/:id/metrics/summary attaches an operator TDP/Tjmax override', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryHostSummary: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -1320,7 +1264,7 @@ it('GET /servers/:id/metrics/connection rejects invalid range', async () => {
 })
 
 it('GET /servers/:id/metrics/connection maps backend failures to 503', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryStatusHistory: () => Promise.reject(new Error('metrics backend unavailable')),
   })
 
@@ -1344,7 +1288,7 @@ it('GET /servers/:id/metrics/connection maps backend failures to 503', async () 
 })
 
 it('GET /servers/:id/metrics/connection returns payload and caches on repeat', async () => {
-  const fakeStore = createFakeMetricsStoreV4({
+  const fakeStore = createFakeMetricsStoreV5({
     queryStatusHistory: (input) =>
       Promise.resolve({
         kind: 'duckdb',
@@ -1927,7 +1871,9 @@ it('PUT /servers/:id/metrics/hardware-profile rejects a topology-id pin not pres
     const member = await app.request(`/servers/${serverId}/metrics/hardware-profile`, {
       method: 'PUT',
       headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ nicSlotDeviceIds: ['mac:aa:bb:cc:dd:ee:ff', 'mac:port'] }),
+      body: JSON.stringify({
+        nicSlotDeviceIds: ['mac:aa:bb:cc:dd:ee:ff', 'mac:port'],
+      }),
     })
     assertEquals(member.status, 400)
     const memberBody = (await member.json()) as { error?: string }

@@ -1,45 +1,45 @@
 /**
- * Representative-machine fixture builders for the v4 metrics regression net.
+ * Representative-machine fixture builders for the v5 metrics regression net.
  *
  * Sixteen machine shapes exercising every row-count-affecting dimension of
- * the v4 contract: NIC counts (embedded vs. paged vs. fabric-excluded), GPU
+ * the v5 contract: NIC counts (embedded vs. paged vs. fabric-excluded), GPU
  * paging, presence-gated managed-service families (ingress/database-proxy),
  * bare-metal hardware signals, high-cardinality entity arrays (block
  * devices, filesystems, GPUs, NICs), and the two capability-gated detail
  * families (cpuDetail/memoryDetail).
  *
- * Each fixture pairs a `MetricsSampleV4Input`, the `MetricsCapabilityPlanV4`
+ * Each fixture pairs a `MetricsSampleV5Input`, the `MetricsCapabilityPlanV5`
  * that must entitle it (so a caller can round-trip through
- * `truncateSampleToCapabilityPlanV4` before packing — a plan that doesn't
+ * `truncateSampleToCapabilityPlanV5` before packing — a plan that doesn't
  * grant enough slots would silently truncate the fixture's own entities),
  * and the `SlotMapping` that makes NIC/fabric/paging identity-addressed
  * rather than positional. `expectedFamilies` is the exact ordered
- * `blob2`/family multiset `buildMetricsDataPointsV4` emits (host.system,
+ * `blob2`/family multiset `buildMetricsDataPointsV5` emits (host.system,
  * host.io, gpu, network, filesystem, block, hardware.physical,
  * managed.ingress, managed.database_proxy, cpu.detail, memory.detail,
- * cpu.core.live, event — see `field-map-v4.ts`'s doc comment), and
+ * cpu.core.live, event — see `field-map-v5.ts`'s doc comment), and
  * `expectedRowCount` is that array's length.
  *
  * Pure data only — no `@std/*` imports — so this module stays safe to import
  * from anywhere in the metrics tree (Workers bundling included).
  */
 
-import { METRICS_SCHEMA_VERSION_V4, type MetricsSampleV4Input } from '../contract-v4.ts'
+import { METRICS_SCHEMA_VERSION_V5, type MetricsSampleV5Input } from '../contract-v5.ts'
 import {
-  type MetricsCapabilityPlanOverrideV4,
-  type MetricsCapabilityPlanV4,
+  type MetricsCapabilityPlanOverrideV5,
+  type MetricsCapabilityPlanV5,
   resolveMetricsCapabilityPlan,
   type ServerMachineClass,
 } from '../capability-plan.ts'
-import type { HostedFamilyV4 } from '../metric-descriptors-v4.ts'
-import type { SlotMapping } from '../types-v4.ts'
+import type { HostedFamilyV5 } from '../metric-descriptors-v5.ts'
+import type { SlotMapping } from '../types-v5.ts'
 
 export type RepresentativeMachineFixture = {
   name: string
-  input: MetricsSampleV4Input
-  plan: MetricsCapabilityPlanV4
+  input: MetricsSampleV5Input
+  plan: MetricsCapabilityPlanV5
   slotMapping: SlotMapping
-  expectedFamilies: HostedFamilyV4[]
+  expectedFamilies: HostedFamilyV5[]
   expectedRowCount: number
 }
 
@@ -47,7 +47,7 @@ export type RepresentativeMachineFixture = {
 // Building blocks
 // ---------------------------------------------------------------------------
 
-function zeroHost(): MetricsSampleV4Input['host'] {
+function zeroHost(): MetricsSampleV5Input['host'] {
   return {
     cpu: {
       busyPercent: 0,
@@ -57,14 +57,15 @@ function zeroHost(): MetricsSampleV4Input['host'] {
       stealPercent: 0,
       softirqPercent: 0,
       pressureSomePercent: 0,
-      maxCoreBusyPercent: 0,
+      saturatedCoreCount: 0,
       procsRunning: 0,
       procsBlocked: 0,
       processCount: 0,
     },
     kernel: { fileHandlesUsedPercent: 0, conntrackUsedPercent: 0 },
     memory: {
-      availableBytes: 0,
+      usedBytes: 0,
+      cachedFilesBytes: null,
       swapUsedBytes: 0,
       pressureSomePercent: 0,
       pressureFullPercent: 0,
@@ -77,9 +78,7 @@ function zeroHost(): MetricsSampleV4Input['host'] {
       ioPressureFullPercent: 0,
       diskReadBytesPerSecond: 0,
       diskWriteBytesPerSecond: 0,
-      diskReadLatencyMs: 0,
-      diskWriteLatencyMs: 0,
-      maxBlockDeviceUtilPercent: 0,
+      diskLatencyMs: 0,
       rootFilesystemAvailableBytes: 0,
       rootFilesystemFreeInodes: 0,
     },
@@ -88,10 +87,10 @@ function zeroHost(): MetricsSampleV4Input['host'] {
 }
 
 function baseMetadata(
-  overrides: Partial<MetricsSampleV4Input['metadata']> = {}
-): MetricsSampleV4Input['metadata'] {
+  overrides: Partial<MetricsSampleV5Input['metadata']> = {}
+): MetricsSampleV5Input['metadata'] {
   return {
-    version: METRICS_SCHEMA_VERSION_V4,
+    version: METRICS_SCHEMA_VERSION_V5,
     sampledAt: '2026-01-01T00:00:00.000Z',
     intervalSeconds: 60,
     sequence: 1,
@@ -102,7 +101,7 @@ function baseMetadata(
   }
 }
 
-function baseInput(overrides: Partial<MetricsSampleV4Input> = {}): MetricsSampleV4Input {
+function baseInput(overrides: Partial<MetricsSampleV5Input> = {}): MetricsSampleV5Input {
   return {
     metadata: baseMetadata(),
     host: zeroHost(),
@@ -133,8 +132,8 @@ function emptySlotMapping(overrides: Partial<SlotMapping> = {}): SlotMapping {
 
 function plan(
   machineClass: ServerMachineClass,
-  overrides: MetricsCapabilityPlanOverrideV4 = {}
-): MetricsCapabilityPlanV4 {
+  overrides: MetricsCapabilityPlanOverrideV5 = {}
+): MetricsCapabilityPlanV5 {
   return resolveMetricsCapabilityPlan(machineClass, undefined, overrides, 'hosted')
 }
 
@@ -225,13 +224,8 @@ function databaseProxy(sourceId: string, seed = 1) {
   }
 }
 
-function cpuHotspot(coreId: string, seed = 1) {
-  return { coreId, busyPercent: seed, iowaitPercent: seed, stealPercent: 0 }
-}
-
-function cpuDetail(): NonNullable<MetricsSampleV4Input['cpuDetail']> {
+function cpuDetail(): NonNullable<MetricsSampleV5Input['cpuDetail']> {
   return {
-    hotspots: Array.from({ length: 4 }, (_, i) => cpuHotspot(`cpu${i}`, i)),
     averageFrequencyMHz: 2000,
     minimumFrequencyMHz: 1000,
     maximumFrequencyMHz: 3000,
@@ -242,7 +236,7 @@ function cpuDetail(): NonNullable<MetricsSampleV4Input['cpuDetail']> {
   }
 }
 
-function memoryDetail(): NonNullable<MetricsSampleV4Input['memoryDetail']> {
+function memoryDetail(): NonNullable<MetricsSampleV5Input['memoryDetail']> {
   return {
     memoryFreeBytes: 1,
     cachedBytes: 1,
@@ -266,7 +260,7 @@ function memoryDetail(): NonNullable<MetricsSampleV4Input['memoryDetail']> {
   }
 }
 
-const HOST_BASE_FAMILIES: HostedFamilyV4[] = ['host.system', 'host.io']
+const HOST_BASE_FAMILIES: HostedFamilyV5[] = ['host.system', 'host.io']
 
 function ids(count: number, prefix: string): string[] {
   return Array.from({ length: count }, (_, i) => `${prefix}${i}`)
@@ -275,6 +269,33 @@ function ids(count: number, prefix: string): string[] {
 // ---------------------------------------------------------------------------
 // 1. 1-NIC VM
 // ---------------------------------------------------------------------------
+
+/**
+ * A VM that also reported a hardware-health event this tick. Exists so the
+ * `"event"` row shape is actually covered: v4 never set `double20` on event
+ * rows and no fixture carried an event, so the row-count suite's
+ * `double20 === intervalSeconds` assertion never ran against one.
+ */
+function vmWithEvent(): RepresentativeMachineFixture {
+  return {
+    name: 'vm-with-event',
+    input: baseInput({
+      networks: [nic('eth0')],
+      events: [
+        {
+          eventId: 'evt-1',
+          at: '2026-01-01T00:00:00.000Z',
+          kind: 'oom_kill',
+          severity: 'warning',
+        },
+      ],
+    }),
+    plan: plan('virtual'),
+    slotMapping: emptySlotMapping({ normalNicSlots: ['eth0'] }),
+    expectedFamilies: [...HOST_BASE_FAMILIES, 'oom_kill' as HostedFamilyV5],
+    expectedRowCount: 3,
+  }
+}
 
 function oneNicVm(): RepresentativeMachineFixture {
   return {
@@ -473,7 +494,7 @@ function bareMetalGpu(): RepresentativeMachineFixture {
 // ---------------------------------------------------------------------------
 // 11. 4-NIC host, all four monitored on a 4-slot plan (2 embedded + 2 paged
 //     -> 1 network page). An unmonitored NIC never reaches the store at all
-//     (`truncateSampleToCapabilityPlanV4`), so only monitored slots page.
+//     (`truncateSampleToCapabilityPlanV5`), so only monitored slots page.
 // ---------------------------------------------------------------------------
 
 function fourNic(): RepresentativeMachineFixture {
@@ -622,5 +643,6 @@ export function representativeMachineFixtures(): RepresentativeMachineFixture[] 
     twentyFourBlockDevices(),
     twelveExtraFilesystems(),
     largeCpuRam(),
+    vmWithEvent(),
   ]
 }

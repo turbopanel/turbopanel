@@ -1,33 +1,33 @@
 /**
- * Executing fake Cloudflare Analytics Engine v4 for tests, backed by an
+ * Executing fake Cloudflare Analytics Engine v5 for tests, backed by an
  * in-memory DuckDB table shaped like the real AE dataset (`index1`,
- * `timestamp`, `blob1..blob{AE_V4_BLOB_COUNT}`,
- * `double1..double{AE_V4_DOUBLE_COUNT}`, plus a literal `_sample_interval`
+ * `timestamp`, `blob1..blob{AE_V5_BLOB_COUNT}`,
+ * `double1..double{AE_V5_DOUBLE_COUNT}`, plus a literal `_sample_interval`
  * column, always `1.0` — every real write in this codebase samples at
  * interval 1, so a constant stands in for AE's approximate-sampling weight).
  *
  * The point of this harness is that tests write through the real
- * `CloudflareAnalyticsEngineServerMetricsStoreV4` write path and read back
- * through the real `queryXViaSqlApiV4` functions (`sql-api-v4.ts`) by
+ * `CloudflareAnalyticsEngineServerMetricsStoreV5` write path and read back
+ * through the real `queryXViaSqlApiV5` functions (`sql-api-v5.ts`) by
  * literally executing the SQL text those functions generate against this
  * table — never reimplementing their aggregation semantics in TypeScript, so
  * a regression in the query builders can't hide behind a harness that
  * duplicates (and silently drifts from) the same logic.
  *
  * A handful of ClickHouse-flavored SQL identifiers the generated queries use
- * have no DuckDB-native equivalent under the same name; `installAeShimsV4`
+ * have no DuckDB-native equivalent under the same name; `installAeShimsV5`
  * defines them as DuckDB macros once per connection. `if(cond, a, b)` and
  * string `LIKE`/`CONCAT` are DuckDB built-ins already and need no shim.
  */
 
 import { DuckDBInstance } from '@duckdb/node-api'
 import {
-  AE_V4_BLOB_COUNT,
-  AE_V4_DATASET_NAME,
-  AE_V4_DOUBLE_COUNT,
-} from '../backends/cloudflare/field-map-v4.ts'
-import type { AnalyticsEngineDatasetLike } from '../backends/cloudflare/store-v4.ts'
-import type { CloudflareAnalyticsSqlConfig } from '../backends/cloudflare/sql-api-v4.ts'
+  AE_V5_BLOB_COUNT,
+  AE_V5_DATASET_NAME,
+  AE_V5_DOUBLE_COUNT,
+} from '../backends/cloudflare/field-map-v5.ts'
+import type { AnalyticsEngineDatasetLike } from '../backends/cloudflare/store-v5.ts'
+import type { CloudflareAnalyticsSqlConfig } from '../backends/cloudflare/sql-api-v5.ts'
 
 type FakeAeConnectionLike = {
   run(sql: string, values?: unknown[]): Promise<unknown>
@@ -45,10 +45,10 @@ type PendingWrite = {
   doubles: number[]
 }
 
-export type FakeAnalyticsEngineV4 = {
-  /** Pass to `CloudflareAnalyticsEngineServerMetricsStoreV4`'s constructor. */
+export type FakeAnalyticsEngineV5 = {
+  /** Pass to `CloudflareAnalyticsEngineServerMetricsStoreV5`'s constructor. */
   dataset: AnalyticsEngineDatasetLike
-  /** Pass as `{ sql: sqlConfig }` to the store, or straight to a `queryXViaSqlApiV4` call. */
+  /** Pass as `{ sql: sqlConfig }` to the store, or straight to a `queryXViaSqlApiV5` call. */
   sqlConfig: CloudflareAnalyticsSqlConfig
   /**
    * Sets the ingest timestamp `writeDataPoint` stamps on every write from
@@ -62,7 +62,7 @@ export type FakeAnalyticsEngineV4 = {
   close(): Promise<void>
 }
 
-async function installAeShimsV4(connection: FakeAeConnectionLike): Promise<void> {
+async function installAeShimsV5(connection: FakeAeConnectionLike): Promise<void> {
   // Every generated query's `toDateTime(...)` range bound and `timestamp`
   // column must agree on a timezone, or `WHERE timestamp >= toDateTime(...)`
   // silently drops every row whenever the host machine's local timezone
@@ -79,14 +79,14 @@ async function installAeShimsV4(connection: FakeAeConnectionLike): Promise<void>
 }
 
 /** JSON can't serialize BigInt (DuckDB returns BIGINT-typed expressions, e.g. `intDiv`, as JS `bigint`) — normalize recursively before enveloping a query result. */
-function normalizeForJsonV4(value: unknown): unknown {
+function normalizeForJsonV5(value: unknown): unknown {
   if (typeof value === 'bigint') return Number(value)
   if (value instanceof Date) return value.toISOString()
-  if (Array.isArray(value)) return value.map(normalizeForJsonV4)
+  if (Array.isArray(value)) return value.map(normalizeForJsonV5)
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {}
     for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = normalizeForJsonV4(inner)
+      out[key] = normalizeForJsonV5(inner)
     }
     return out
   }
@@ -95,7 +95,7 @@ function normalizeForJsonV4(value: unknown): unknown {
 
 // Values are inlined as SQL literals rather than bound via `?` --
 // `@duckdb/node-api`'s parameter binder infers BIGINT for any
-// integer-valued JS `number` (including the AE v4 missing-metric sentinel
+// integer-valued JS `number` (including the AE v5 missing-metric sentinel
 // `-1e308`, which is integer-valued) and overflows converting it to
 // `BigInt`. Every value here is either a controlled string (escaped) or a
 // finite double we format ourselves, so literal interpolation is safe.
@@ -108,17 +108,17 @@ function doubleLiteral(value: number): string {
   return value.toString()
 }
 
-export async function createFakeAnalyticsEngineV4(options?: {
+export async function createFakeAnalyticsEngineV5(options?: {
   dataset?: string
-}): Promise<FakeAnalyticsEngineV4> {
-  const datasetName = options?.dataset ?? AE_V4_DATASET_NAME
+}): Promise<FakeAnalyticsEngineV5> {
+  const datasetName = options?.dataset ?? AE_V5_DATASET_NAME
   const instance = await DuckDBInstance.create(':memory:')
   const connection = (await instance.connect()) as unknown as FakeAeConnectionLike
-  await installAeShimsV4(connection)
+  await installAeShimsV5(connection)
 
-  const blobColumns = Array.from({ length: AE_V4_BLOB_COUNT }, (_, i) => `blob${i + 1} VARCHAR`)
+  const blobColumns = Array.from({ length: AE_V5_BLOB_COUNT }, (_, i) => `blob${i + 1} VARCHAR`)
   const doubleColumns = Array.from(
-    { length: AE_V4_DOUBLE_COUNT },
+    { length: AE_V5_DOUBLE_COUNT },
     (_, i) => `double${i + 1} DOUBLE`
   )
   await connection.run(
@@ -132,13 +132,13 @@ export async function createFakeAnalyticsEngineV4(options?: {
 
   const dataset: AnalyticsEngineDatasetLike = {
     writeDataPoint(event) {
-      const doubles = new Array<number>(AE_V4_DOUBLE_COUNT).fill(0)
+      const doubles = new Array<number>(AE_V5_DOUBLE_COUNT).fill(0)
       ;(event.doubles ?? []).forEach((value, i) => {
-        if (i < AE_V4_DOUBLE_COUNT) doubles[i] = value
+        if (i < AE_V5_DOUBLE_COUNT) doubles[i] = value
       })
-      const blobs = new Array<string>(AE_V4_BLOB_COUNT).fill('')
+      const blobs = new Array<string>(AE_V5_BLOB_COUNT).fill('')
       ;(event.blobs ?? []).forEach((value, i) => {
-        if (i < AE_V4_BLOB_COUNT) blobs[i] = value
+        if (i < AE_V5_BLOB_COUNT) blobs[i] = value
       })
       pending.push({
         index1: event.indexes?.[0] ?? '',
@@ -157,8 +157,8 @@ export async function createFakeAnalyticsEngineV4(options?: {
       'index1',
       `"timestamp"`,
       '_sample_interval',
-      ...Array.from({ length: AE_V4_BLOB_COUNT }, (_, i) => `blob${i + 1}`),
-      ...Array.from({ length: AE_V4_DOUBLE_COUNT }, (_, i) => `double${i + 1}`),
+      ...Array.from({ length: AE_V5_BLOB_COUNT }, (_, i) => `blob${i + 1}`),
+      ...Array.from({ length: AE_V5_DOUBLE_COUNT }, (_, i) => `double${i + 1}`),
     ]
     const tuples = rows.map((row) => {
       const values = [
@@ -179,7 +179,7 @@ export async function createFakeAnalyticsEngineV4(options?: {
     const sql = typeof init?.body === 'string' ? init.body : ''
     try {
       const reader = await connection.runAndReadAll(sql)
-      const data = reader.getRowObjectsJS().map((row) => normalizeForJsonV4(row)) as Array<
+      const data = reader.getRowObjectsJS().map((row) => normalizeForJsonV5(row)) as Array<
         Record<string, unknown>
       >
       return new Response(

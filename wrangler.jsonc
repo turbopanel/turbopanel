@@ -112,8 +112,8 @@
   // host.system row, one always-present host.io row, plus presence-gated pages
   // for gpu/network/filesystem/block/hardware.physical and one row per
   // managed.ingress/managed.database_proxy entry and per event — see
-  // backends/cloudflare/field-map-v4.ts. `workers.ts` wires this binding
-  // straight into a real `CloudflareAnalyticsEngineServerMetricsStoreV4` for
+  // backends/cloudflare/field-map-v5.ts. `workers.ts` wires this binding
+  // straight into a real `CloudflareAnalyticsEngineServerMetricsStoreV5` for
   // both writes and reads — metric samples, status transitions, and metric
   // events all land here directly.
   // SQL API reads need secrets: TURBOPANEL_ANALYTICS_ENGINE_API_TOKEN
@@ -121,8 +121,8 @@
   // Optional: TURBOPANEL_SERVER_METRICS_AE_MAX_RANGE_SECONDS (default = 90-day AE retention).
   "analytics_engine_datasets": [
     {
-      "binding": "SERVER_METRICS_V4",
-      "dataset": "turbopanel_server_metrics_v4"
+      "binding": "SERVER_METRICS_V5",
+      "dataset": "turbopanel_server_metrics_v5"
     }
   ],
   // Command execution logs (transcripts). Buckets are NOT auto-created — create
@@ -216,8 +216,8 @@
       "triggers": { "crons": ["* * * * *"] },
       "analytics_engine_datasets": [
         {
-          "binding": "SERVER_METRICS_V4",
-          "dataset": "turbopanel_server_metrics_v4"
+          "binding": "SERVER_METRICS_V5",
+          "dataset": "turbopanel_server_metrics_v5"
         }
       ],
       "r2_buckets": [
@@ -326,8 +326,8 @@
       "triggers": { "crons": ["* * * * *"] },
       "analytics_engine_datasets": [
         {
-          "binding": "SERVER_METRICS_V4",
-          "dataset": "turbopanel_server_metrics_v4"
+          "binding": "SERVER_METRICS_V5",
+          "dataset": "turbopanel_server_metrics_v5"
         }
       ],
       "r2_buckets": [

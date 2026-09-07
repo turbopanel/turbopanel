@@ -1,7 +1,7 @@
 /**
- * Wire-facing identity for a single v4 metric on a single entity instance —
+ * Wire-facing identity for a single v5 metric on a single entity instance —
  * the string queries/routes use to name "this field, on this entity" without
- * re-deriving `MetricEntityScopeV4` plumbing at every call site.
+ * re-deriving `MetricEntityScopeV5` plumbing at every call site.
  *
  * Host-singleton scopes (`host.cpu`, `host.kernel`, `host.memory`,
  * `host.storage`, `host.network`, `cpuDetail`, `memoryDetail`) have exactly
@@ -9,42 +9,42 @@
  * `canonicalName` (e.g. `host.cpu.busyPercent`) — no entity id.
  *
  * Per-entity scopes (`network`, `filesystem`, `block`, `gpu`,
- * `hardwareSignal`, `ingress`, `databaseProxy`, `cpuCore`) can have many
+ * `hardwareSignal`, `ingress`, `databaseProxy`) can have many
  * instances per server, so their identity prefixes an alias + entity id ahead
  * of the bare field name: `network:eth0.receiveBytesPerSecond`,
- * `hardware:psu1.value`, `cpuCore:cpu3.busyPercent`. `hardwareSignal` uses
+ * `hardware:psu1.value`. `hardwareSignal` uses
  * the short alias `hardware` for wire brevity; every other scope's alias
  * matches its scope name.
  *
  * `cpuHotspot` is deliberately NOT a per-entity scope here even though it is
- * an array in the wire contract (`CpuDetailSampleV4.hotspots`) — its 4 slots
+ * an array in the wire contract (`CpuDetailSampleV5.hotspots`) — its 4 slots
  * are embedded fields of the singleton `cpuDetail` family, not independently
  * queryable entities under any id of their own. The `/metrics/series` route
  * surfaces hotspot values as part of the `cpuDetail` singleton response
- * payload instead — see `HostSeriesPointV4.cpuHotspots`.
+ * payload instead — see `HostSeriesPointV5.cpuHotspots`.
  *
  * `host.io`'s embedded NIC slots are a related but distinct case: unlike
  * `cpuHotspot`, a slot-mapped NIC keeps its own `network`-scope entity id
  * (`network:<deviceId>.<field>`) and is queryable through the ordinary
- * per-entity path — `EntitySeriesQueryV4.slotMapping` lets the Cloudflare
+ * per-entity path — `EntitySeriesQueryV5.slotMapping` lets the Cloudflare
  * backend reconstruct its `receiveBytesPerSecond`/`transmitBytesPerSecond`
- * from `host.io`'s own rows (see `types-v4.ts`'s `EntitySeriesQueryV4` doc
+ * from `host.io`'s own rows (see `types-v5.ts`'s `EntitySeriesQueryV5` doc
  * comment). No new scope or alias is needed for that — the id format is
  * identical to any other `network` entity.
  */
 
 import {
-  HOST_METRICS_METRIC_DESCRIPTORS_V4,
-  type MetricEntityScopeV4,
-} from './metric-descriptors-v4.ts'
+  HOST_METRICS_METRIC_DESCRIPTORS_V5,
+  type MetricEntityScopeV5,
+} from './metric-descriptors-v5.ts'
 
 export type EntityMetricSelector = {
-  scope: MetricEntityScopeV4
+  scope: MetricEntityScopeV5
   entityId?: string
   field: string
 }
 
-const SINGLETON_SCOPES: ReadonlySet<MetricEntityScopeV4> = new Set([
+const SINGLETON_SCOPES: ReadonlySet<MetricEntityScopeV5> = new Set([
   'host.cpu',
   'host.kernel',
   'host.memory',
@@ -55,7 +55,7 @@ const SINGLETON_SCOPES: ReadonlySet<MetricEntityScopeV4> = new Set([
 ])
 
 /** Per-entity scope -> wire alias. Only `hardwareSignal` differs from its scope name. */
-const SCOPE_TO_ALIAS: Partial<Record<MetricEntityScopeV4, string>> = {
+const SCOPE_TO_ALIAS: Partial<Record<MetricEntityScopeV5, string>> = {
   network: 'network',
   filesystem: 'filesystem',
   block: 'block',
@@ -63,18 +63,17 @@ const SCOPE_TO_ALIAS: Partial<Record<MetricEntityScopeV4, string>> = {
   hardwareSignal: 'hardware',
   ingress: 'ingress',
   databaseProxy: 'databaseProxy',
-  cpuCore: 'cpuCore',
 }
 
-const ALIAS_TO_SCOPE: Record<string, MetricEntityScopeV4> = Object.fromEntries(
-  Object.entries(SCOPE_TO_ALIAS).map(([scope, alias]) => [alias!, scope as MetricEntityScopeV4])
+const ALIAS_TO_SCOPE: Record<string, MetricEntityScopeV5> = Object.fromEntries(
+  Object.entries(SCOPE_TO_ALIAS).map(([scope, alias]) => [alias!, scope as MetricEntityScopeV5])
 )
 
-function descriptorFor(scope: MetricEntityScopeV4, field: string): { canonicalName: string } {
+function descriptorFor(scope: MetricEntityScopeV5, field: string): { canonicalName: string } {
   const canonicalName = `${scope}.${field}`
-  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[canonicalName]
+  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[canonicalName]
   if (!descriptor) {
-    throw new TypeError(`unknown v4 metric field "${field}" for entity scope "${scope}"`)
+    throw new TypeError(`unknown v5 metric field "${field}" for entity scope "${scope}"`)
   }
   return descriptor
 }
@@ -107,7 +106,7 @@ export function parseEntityMetricId(id: string): EntityMetricSelector {
   const colonIndex = id.indexOf(':')
 
   if (colonIndex === -1) {
-    const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V4[id]
+    const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[id]
     if (!descriptor || !SINGLETON_SCOPES.has(descriptor.entityScope)) {
       throw new TypeError(`invalid entity metric id "${id}"`)
     }

@@ -1,13 +1,13 @@
 import { assertEquals, assertThrows } from '@std/assert'
 import {
-  buildMetricsSampleV4,
+  buildMetricsSampleV5,
   clampPercent,
-  METRIC_EVENT_KINDS_V4,
-  type MetricEventV4,
-  METRICS_SCHEMA_VERSION_V4,
-  type MetricsSampleV4Input,
+  METRIC_EVENT_KINDS_V5,
+  type MetricEventV5,
+  METRICS_SCHEMA_VERSION_V5,
+  type MetricsSampleV5Input,
   sanitizeFinite,
-} from './contract-v4.ts'
+} from './contract-v5.ts'
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -17,12 +17,12 @@ import {
  */
 const test = Deno.test.bind(Deno)
 
-test('METRICS_SCHEMA_VERSION_V4 is 4', () => {
-  assertEquals(METRICS_SCHEMA_VERSION_V4, 4)
+test('METRICS_SCHEMA_VERSION_V5 is 5', () => {
+  assertEquals(METRICS_SCHEMA_VERSION_V5, 5)
 })
 
-test('METRIC_EVENT_KINDS_V4 has no duplicates', () => {
-  assertEquals(new Set(METRIC_EVENT_KINDS_V4).size, METRIC_EVENT_KINDS_V4.length)
+test('METRIC_EVENT_KINDS_V5 has no duplicates', () => {
+  assertEquals(new Set(METRIC_EVENT_KINDS_V5).size, METRIC_EVENT_KINDS_V5.length)
 })
 
 test('clampPercent clamps 0-100 and passes null', () => {
@@ -44,19 +44,19 @@ test('sanitizeFinite rejects NaN and +/-Infinity, keeps missing as null', () => 
 })
 
 /**
- * Shared fixture, hand-mirrored into `contract-v4.test.ts` in
- * `turbopaneld/src/metrics`. Both files exercise `buildMetricsSampleV4`
+ * Shared fixture, hand-mirrored into `contract-v5.test.ts` in
+ * `turbopaneld/src/metrics`. Both files exercise `buildMetricsSampleV5`
  * against this same hard-coded expected-shape input/output pair as a
  * behavioral check — it is not itself the drift gate. Real mirror-drift
  * detection is the parity suite at the bottom of this file, which reads the
- * counterpart `contract-v4.ts` off the co-located sibling checkout and
+ * counterpart `contract-v5.ts` off the co-located sibling checkout and
  * diffs it directly, rather than trusting two hand-copied fixtures to stay
  * in sync by discipline alone.
  */
-function fixtureInput(): MetricsSampleV4Input {
+function fixtureInput(): MetricsSampleV5Input {
   return {
     metadata: {
-      version: METRICS_SCHEMA_VERSION_V4,
+      version: METRICS_SCHEMA_VERSION_V5,
       sampledAt: '2020-01-01T00:00:00.000Z',
       intervalSeconds: 60,
       sequence: 1,
@@ -73,7 +73,7 @@ function fixtureInput(): MetricsSampleV4Input {
         stealPercent: 0,
         softirqPercent: 0.5,
         pressureSomePercent: 150,
-        maxCoreBusyPercent: 99,
+        saturatedCoreCount: 2,
         procsRunning: 3,
         procsBlocked: 0,
         processCount: 42,
@@ -83,7 +83,8 @@ function fixtureInput(): MetricsSampleV4Input {
         conntrackUsedPercent: Number.NaN,
       },
       memory: {
-        availableBytes: 1_000_000,
+        usedBytes: 1_000_000,
+        cachedFilesBytes: 250_000,
         swapUsedBytes: 0,
         pressureSomePercent: 5,
         pressureFullPercent: 0,
@@ -96,9 +97,7 @@ function fixtureInput(): MetricsSampleV4Input {
         ioPressureFullPercent: 0,
         diskReadBytesPerSecond: 500,
         diskWriteBytesPerSecond: 250,
-        diskReadLatencyMs: 1.2,
-        diskWriteLatencyMs: 2.4,
-        maxBlockDeviceUtilPercent: 60,
+        diskLatencyMs: 1.8,
         rootFilesystemAvailableBytes: 2_000_000,
         rootFilesystemFreeInodes: 10_000,
       },
@@ -149,16 +148,16 @@ function fixtureInput(): MetricsSampleV4Input {
         at: '2020-01-01T00:00:00.000Z',
         kind: 'smart_critical',
         severity: 'critical',
-      } satisfies MetricEventV4,
+      } satisfies MetricEventV5,
     ],
   }
 }
 
-test('buildMetricsSampleV4 sanitizes the shared cross-repo fixture', () => {
-  const sample = buildMetricsSampleV4(fixtureInput())
+test('buildMetricsSampleV5 sanitizes the shared cross-repo fixture', () => {
+  const sample = buildMetricsSampleV5(fixtureInput())
 
   assertEquals(sample.type, 'metrics')
-  assertEquals(sample.metadata.version, 4)
+  assertEquals(sample.metadata.version, 5)
   assertEquals(sample.host.cpu.pressureSomePercent, 100)
   assertEquals(sample.host.cpu.processCount, 42)
   assertEquals(sample.host.kernel.conntrackUsedPercent, null)
@@ -169,52 +168,52 @@ test('buildMetricsSampleV4 sanitizes the shared cross-repo fixture', () => {
   assertEquals(sample.events[0].kind, 'smart_critical')
 })
 
-test('buildMetricsSampleV4 never coerces missing metrics to 0', () => {
+test('buildMetricsSampleV5 never coerces missing metrics to 0', () => {
   const input = fixtureInput()
   input.host.storage.diskReadBytesPerSecond = undefined
-  const sample = buildMetricsSampleV4(input)
+  const sample = buildMetricsSampleV5(input)
   assertEquals(sample.host.storage.diskReadBytesPerSecond, null)
 })
 
-test('buildMetricsSampleV4 rejects a metadata.version that does not match METRICS_SCHEMA_VERSION_V4', () => {
+test('buildMetricsSampleV5 rejects a metadata.version that does not match METRICS_SCHEMA_VERSION_V5', () => {
   const input = fixtureInput()
   // deno-lint-ignore no-explicit-any
   input.metadata.version = 3 as any
   assertThrows(
-    () => buildMetricsSampleV4(input),
+    () => buildMetricsSampleV5(input),
     TypeError,
-    `metrics metadata.version must be ${METRICS_SCHEMA_VERSION_V4}`
+    `metrics metadata.version must be ${METRICS_SCHEMA_VERSION_V5}`
   )
 })
 
-test('buildMetricsSampleV4 rejects an invalid collectionMode', () => {
+test('buildMetricsSampleV5 rejects an invalid collectionMode', () => {
   const input = fixtureInput()
   // deno-lint-ignore no-explicit-any
   input.metadata.collectionMode = 'turbo' as any
   assertThrows(
-    () => buildMetricsSampleV4(input),
+    () => buildMetricsSampleV5(input),
     TypeError,
     'metrics metadata.collectionMode must be "baseline" or "live"'
   )
 })
 
-test('buildMetricsSampleV4 rejects non-positive intervalSeconds', () => {
+test('buildMetricsSampleV5 rejects non-positive intervalSeconds', () => {
   for (const intervalSeconds of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
     const input = fixtureInput()
     input.metadata.intervalSeconds = intervalSeconds
     assertThrows(
-      () => buildMetricsSampleV4(input),
+      () => buildMetricsSampleV5(input),
       TypeError,
       'metrics metadata.intervalSeconds must be a finite positive number'
     )
   }
 })
 
-test('buildMetricsSampleV4 rejects negative sequence/topologyGeneration/bootGeneration', () => {
+test('buildMetricsSampleV5 rejects negative sequence/topologyGeneration/bootGeneration', () => {
   const sequenceInput = fixtureInput()
   sequenceInput.metadata.sequence = -1
   assertThrows(
-    () => buildMetricsSampleV4(sequenceInput),
+    () => buildMetricsSampleV5(sequenceInput),
     TypeError,
     'metrics metadata.sequence must be a finite non-negative number'
   )
@@ -222,7 +221,7 @@ test('buildMetricsSampleV4 rejects negative sequence/topologyGeneration/bootGene
   const topologyInput = fixtureInput()
   topologyInput.metadata.topologyGeneration = -1
   assertThrows(
-    () => buildMetricsSampleV4(topologyInput),
+    () => buildMetricsSampleV5(topologyInput),
     TypeError,
     'metrics metadata.topologyGeneration must be a finite non-negative number'
   )
@@ -230,24 +229,24 @@ test('buildMetricsSampleV4 rejects negative sequence/topologyGeneration/bootGene
   const bootInput = fixtureInput()
   bootInput.metadata.bootGeneration = -1
   assertThrows(
-    () => buildMetricsSampleV4(bootInput),
+    () => buildMetricsSampleV5(bootInput),
     TypeError,
     'metrics metadata.bootGeneration must be a finite non-negative number'
   )
 })
 
-test('buildMetricsSampleV4 accepts a zero sequence/topologyGeneration/bootGeneration', () => {
+test('buildMetricsSampleV5 accepts a zero sequence/topologyGeneration/bootGeneration', () => {
   const input = fixtureInput()
   input.metadata.sequence = 0
   input.metadata.topologyGeneration = 0
   input.metadata.bootGeneration = 0
-  const sample = buildMetricsSampleV4(input)
+  const sample = buildMetricsSampleV5(input)
   assertEquals(sample.metadata.sequence, 0)
   assertEquals(sample.metadata.topologyGeneration, 0)
   assertEquals(sample.metadata.bootGeneration, 0)
 })
 
-test('buildMetricsSampleV4 rejects an unknown event kind', () => {
+test('buildMetricsSampleV5 rejects an unknown event kind', () => {
   const input = fixtureInput()
   input.events = [
     {
@@ -259,13 +258,13 @@ test('buildMetricsSampleV4 rejects an unknown event kind', () => {
     },
   ]
   assertThrows(
-    () => buildMetricsSampleV4(input),
+    () => buildMetricsSampleV5(input),
     TypeError,
     'metrics event has an unknown kind: not_a_real_kind'
   )
 })
 
-test('buildMetricsSampleV4 rejects an invalid event severity', () => {
+test('buildMetricsSampleV5 rejects an invalid event severity', () => {
   const input = fixtureInput()
   input.events = [
     {
@@ -277,13 +276,13 @@ test('buildMetricsSampleV4 rejects an invalid event severity', () => {
     },
   ]
   assertThrows(
-    () => buildMetricsSampleV4(input),
+    () => buildMetricsSampleV5(input),
     TypeError,
     'metrics event evt-bad has an invalid severity: urgent'
   )
 })
 
-test('buildMetricsSampleV4 rejects an entity array beyond the defensive cap', () => {
+test('buildMetricsSampleV5 rejects an entity array beyond the defensive cap', () => {
   const input = fixtureInput()
   input.networks = Array.from({ length: 65 }, (_, i) => ({
     deviceId: `eth${i}`,
@@ -295,75 +294,13 @@ test('buildMetricsSampleV4 rejects an entity array beyond the defensive cap', ()
     transmitDropsPerSecond: 0,
   }))
   assertThrows(
-    () => buildMetricsSampleV4(input),
+    () => buildMetricsSampleV5(input),
     TypeError,
     'metrics networks has 65 entries, exceeding the 64-entry cap'
   )
 })
 
-test('buildMetricsSampleV4 leaves cpuDetail/memoryDetail/cpuCoreLive undefined when omitted', () => {
-  const sample = buildMetricsSampleV4(fixtureInput())
-  assertEquals(sample.cpuDetail, undefined)
-  assertEquals(sample.memoryDetail, undefined)
-  assertEquals(sample.cpuCoreLive, undefined)
-})
-
-test("buildMetricsSampleV4 sanitizes cpuDetail's hotspots and scalar fields", () => {
-  const input = fixtureInput()
-  input.cpuDetail = {
-    hotspots: [
-      { coreId: 'cpu0', busyPercent: 101, iowaitPercent: -5, stealPercent: 2 },
-      { coreId: 'cpu1', busyPercent: 80, iowaitPercent: 1, stealPercent: 0 },
-      { coreId: 'cpu2', busyPercent: 70, iowaitPercent: 1, stealPercent: 0 },
-      { coreId: 'cpu3', busyPercent: 60, iowaitPercent: 1, stealPercent: 0 },
-    ],
-    averageFrequencyMHz: 2400,
-    minimumFrequencyMHz: 800,
-    maximumFrequencyMHz: 3600,
-    contextSwitchesPerSecond: 5000,
-    interruptsPerSecond: 1200,
-    forksPerSecond: 10,
-    cpuIrqPercent: 150,
-  }
-  const sample = buildMetricsSampleV4(input)
-  assertEquals(sample.cpuDetail?.hotspots.length, 4)
-  assertEquals(sample.cpuDetail?.hotspots[0].coreId, 'cpu0')
-  assertEquals(sample.cpuDetail?.hotspots[0].busyPercent, 100)
-  assertEquals(sample.cpuDetail?.hotspots[0].iowaitPercent, 0)
-  assertEquals(sample.cpuDetail?.averageFrequencyMHz, 2400)
-  assertEquals(sample.cpuDetail?.minimumFrequencyMHz, 800)
-  assertEquals(sample.cpuDetail?.maximumFrequencyMHz, 3600)
-  assertEquals(sample.cpuDetail?.contextSwitchesPerSecond, 5000)
-  assertEquals(sample.cpuDetail?.interruptsPerSecond, 1200)
-  assertEquals(sample.cpuDetail?.forksPerSecond, 10)
-  assertEquals(sample.cpuDetail?.cpuIrqPercent, 100)
-})
-
-test('buildMetricsSampleV4 rejects cpuDetail.hotspots beyond the 4-entry cap', () => {
-  const input = fixtureInput()
-  input.cpuDetail = {
-    hotspots: Array.from({ length: 5 }, (_, i) => ({
-      coreId: `cpu${i}`,
-      busyPercent: 0,
-      iowaitPercent: 0,
-      stealPercent: 0,
-    })),
-    averageFrequencyMHz: null,
-    minimumFrequencyMHz: null,
-    maximumFrequencyMHz: null,
-    contextSwitchesPerSecond: null,
-    interruptsPerSecond: null,
-    forksPerSecond: null,
-    cpuIrqPercent: null,
-  }
-  assertThrows(
-    () => buildMetricsSampleV4(input),
-    TypeError,
-    'metrics cpuDetail.hotspots has 5 entries, exceeding the 4-entry cap'
-  )
-})
-
-test('buildMetricsSampleV4 sanitizes all 19 memoryDetail fields, never coercing missing to 0', () => {
+test('buildMetricsSampleV5 sanitizes all 19 memoryDetail fields, never coercing missing to 0', () => {
   const input = fixtureInput()
   input.memoryDetail = {
     memoryFreeBytes: 1,
@@ -386,39 +323,12 @@ test('buildMetricsSampleV4 sanitizes all 19 memoryDetail fields, never coercing 
     pageScanKswapdPerSecond: 18,
     compactionStallsPerSecond: 19,
   }
-  const sample = buildMetricsSampleV4(input)
+  const sample = buildMetricsSampleV5(input)
   assertEquals(sample.memoryDetail?.memoryFreeBytes, 1)
   assertEquals(sample.memoryDetail?.inactiveFileBytes, 16)
   assertEquals(sample.memoryDetail?.pageScanDirectPerSecond, null)
   assertEquals(sample.memoryDetail?.pageScanKswapdPerSecond, 18)
   assertEquals(sample.memoryDetail?.compactionStallsPerSecond, 19)
-})
-
-test('buildMetricsSampleV4 sanitizes and clamps cpuCoreLive entries', () => {
-  const input = fixtureInput()
-  input.cpuCoreLive = [
-    { coreId: 'cpu0', busyPercent: 105, iowaitPercent: 1, stealPercent: 0 },
-    { coreId: 'cpu1', busyPercent: 50, iowaitPercent: -1, stealPercent: 0 },
-  ]
-  const sample = buildMetricsSampleV4(input)
-  assertEquals(sample.cpuCoreLive?.length, 2)
-  assertEquals(sample.cpuCoreLive?.[0].busyPercent, 100)
-  assertEquals(sample.cpuCoreLive?.[1].iowaitPercent, 0)
-})
-
-test('buildMetricsSampleV4 rejects a cpuCoreLive array beyond the defensive cap', () => {
-  const input = fixtureInput()
-  input.cpuCoreLive = Array.from({ length: 65 }, (_, i) => ({
-    coreId: `cpu${i}`,
-    busyPercent: 0,
-    iowaitPercent: 0,
-    stealPercent: 0,
-  }))
-  assertThrows(
-    () => buildMetricsSampleV4(input),
-    TypeError,
-    'metrics cpuCoreLive has 65 entries, exceeding the 64-entry cap'
-  )
 })
 
 // ---------------------------------------------------------------------------
@@ -438,12 +348,12 @@ test('buildMetricsSampleV4 rejects a cpuCoreLive array beyond the defensive cap'
 // follow-up, not part of this change.
 // ---------------------------------------------------------------------------
 
-const SIBLING_CONTRACT_V4_URL = new URL(
-  '../../../../turbopaneld/src/metrics/contract-v4.ts',
+const SIBLING_CONTRACT_V5_URL = new URL(
+  '../../../../turbopaneld/src/metrics/contract-v5.ts',
   import.meta.url
 )
 
-const siblingContractV4Exists = await Deno.stat(SIBLING_CONTRACT_V4_URL)
+const siblingContractV5Exists = await Deno.stat(SIBLING_CONTRACT_V5_URL)
   .then((stat) => stat.isFile)
   .catch(() => false)
 
@@ -454,27 +364,27 @@ function stripHeaderDocblock(source: string): string {
 }
 
 test({
-  name: 'contract-v4.ts stays byte-identical to its turbopaneld mirror below the header docblock',
-  ignore: !siblingContractV4Exists,
+  name: 'contract-v5.ts stays byte-identical to its turbopaneld mirror below the header docblock',
+  ignore: !siblingContractV5Exists,
   fn: async () => {
     const [ownSource, siblingSource] = await Promise.all([
-      Deno.readTextFile(new URL('./contract-v4.ts', import.meta.url)),
-      Deno.readTextFile(SIBLING_CONTRACT_V4_URL),
+      Deno.readTextFile(new URL('./contract-v5.ts', import.meta.url)),
+      Deno.readTextFile(SIBLING_CONTRACT_V5_URL),
     ])
     assertEquals(stripHeaderDocblock(ownSource), stripHeaderDocblock(siblingSource))
   },
 })
 
 test({
-  name: 'contract-v4.ts agrees with its turbopaneld mirror on schema version, event kinds, and export set',
-  ignore: !siblingContractV4Exists,
+  name: 'contract-v5.ts agrees with its turbopaneld mirror on schema version, event kinds, and export set',
+  ignore: !siblingContractV5Exists,
   fn: async () => {
     const [own, sibling] = await Promise.all([
-      import('./contract-v4.ts'),
-      import(SIBLING_CONTRACT_V4_URL.href),
+      import('./contract-v5.ts'),
+      import(SIBLING_CONTRACT_V5_URL.href),
     ])
-    assertEquals(sibling.METRICS_SCHEMA_VERSION_V4, own.METRICS_SCHEMA_VERSION_V4)
-    assertEquals(sibling.METRIC_EVENT_KINDS_V4, own.METRIC_EVENT_KINDS_V4)
+    assertEquals(sibling.METRICS_SCHEMA_VERSION_V5, own.METRICS_SCHEMA_VERSION_V5)
+    assertEquals(sibling.METRIC_EVENT_KINDS_V5, own.METRIC_EVENT_KINDS_V5)
     assertEquals(new Set(Object.keys(sibling)), new Set(Object.keys(own)))
   },
 })

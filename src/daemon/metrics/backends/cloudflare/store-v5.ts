@@ -1,48 +1,48 @@
 /**
- * Workers Analytics Engine metrics store (Cloudflare backend) for the v4
+ * Workers Analytics Engine metrics store (Cloudflare backend) for the v5
  * contract. Each sample is written as one `writeDataPoint` call per row
- * produced by {@link buildMetricsDataPointsV4} — see `field-map-v4.ts` for
+ * produced by {@link buildMetricsDataPointsV5} — see `field-map-v5.ts` for
  * the family emission order and presence-gating rules. Status transitions
  * stay one data point.
  *
  * `queryStatusHistory` is the one query method this store implements —
- * status rows have no per-entity/topology ambiguity (see `types-v4.ts`'s
- * `ServerMetricsStoreV4` doc comment), unlike the paged metric families,
+ * status rows have no per-entity/topology ambiguity (see `types-v5.ts`'s
+ * `ServerMetricsStoreV5` doc comment), unlike the paged metric families,
  * whose entity-scoped query wiring is still a later phase (see
- * `sql-api-v4.ts`'s doc comment).
+ * `sql-api-v5.ts`'s doc comment).
  */
 
 import type {
-  AuthenticatedMetricsSampleV4,
-  EntityIdsSeenQueryV4,
-  EntityIdsSeenResultV4,
-  EntitySeriesQueryV4,
-  EntitySeriesResultV4,
-  FleetHostSnapshotQueryV4,
-  FleetHostSnapshotResultV4,
-  HostSeriesQueryV4,
-  HostSeriesResultV4,
-  HostSummaryQueryV4,
-  HostSummaryResultV4,
-  MetricEventsQueryV4,
-  MetricEventsResultV4,
-  ServerMetricsStoreV4,
+  AuthenticatedMetricsSampleV5,
+  EntityIdsSeenQueryV5,
+  EntityIdsSeenResultV5,
+  EntitySeriesQueryV5,
+  EntitySeriesResultV5,
+  FleetHostSnapshotQueryV5,
+  FleetHostSnapshotResultV5,
+  HostSeriesQueryV5,
+  HostSeriesResultV5,
+  HostSummaryQueryV5,
+  HostSummaryResultV5,
+  MetricEventsQueryV5,
+  MetricEventsResultV5,
+  ServerMetricsStoreV5,
   ServerStatusEvent,
   SlotMapping,
   StatusHistoryQuery,
   StatusHistoryResult,
-} from '../../types-v4.ts'
-import { buildMetricsDataPointsV4, buildStatusDataPointV4 } from './field-map-v4.ts'
-import type { CloudflareAnalyticsSqlConfig } from './sql-api-v4.ts'
+} from '../../types-v5.ts'
+import { buildMetricsDataPointsV5, buildStatusDataPointV5 } from './field-map-v5.ts'
+import type { CloudflareAnalyticsSqlConfig } from './sql-api-v5.ts'
 import {
-  queryEntityIdsSeenViaSqlApiV4,
-  queryEntitySeriesViaSqlApiV4,
-  queryFleetHostSnapshotViaSqlApiV4,
-  queryHostSeriesViaSqlApiV4,
-  queryHostSummaryViaSqlApiV4,
-  queryMetricEventsViaSqlApiV4,
-  queryStatusHistoryViaSqlApiV4,
-} from './sql-api-v4.ts'
+  queryEntityIdsSeenViaSqlApiV5,
+  queryEntitySeriesViaSqlApiV5,
+  queryFleetHostSnapshotViaSqlApiV5,
+  queryHostSeriesViaSqlApiV5,
+  queryHostSummaryViaSqlApiV5,
+  queryMetricEventsViaSqlApiV5,
+  queryStatusHistoryViaSqlApiV5,
+} from './sql-api-v5.ts'
 
 /**
  * Narrow AE binding shape mirroring Workers `AnalyticsEngineDataset` /
@@ -54,36 +54,36 @@ export type AnalyticsEngineDatasetLike = {
   writeDataPoint(event: { indexes?: string[]; doubles?: number[]; blobs?: string[] }): void
 }
 
-export type CloudflareAnalyticsEngineStoreOptionsV4 = {
+export type CloudflareAnalyticsEngineStoreOptionsV5 = {
   /** Optional SQL API config for queryStatusHistory. */
   sql?: CloudflareAnalyticsSqlConfig
 }
 
 /**
- * Workers Analytics Engine v4 metrics store.
+ * Workers Analytics Engine v5 metrics store.
  * Writes are fire-and-forget (`writeDataPoint` is sync / non-blocking).
  */
-export class CloudflareAnalyticsEngineServerMetricsStoreV4 implements ServerMetricsStoreV4 {
+export class CloudflareAnalyticsEngineServerMetricsStoreV5 implements ServerMetricsStoreV5 {
   readonly #dataset: AnalyticsEngineDatasetLike
   readonly #sql: CloudflareAnalyticsSqlConfig | null
 
   constructor(
     dataset: AnalyticsEngineDatasetLike,
-    options?: CloudflareAnalyticsEngineStoreOptionsV4
+    options?: CloudflareAnalyticsEngineStoreOptionsV5
   ) {
     this.#dataset = dataset
     this.#sql = options?.sql ?? null
   }
 
   /**
-   * One `writeDataPoint` call per row {@link buildMetricsDataPointsV4}
+   * One `writeDataPoint` call per row {@link buildMetricsDataPointsV5}
    * produces for this sample, all synchronous, fire-and-forget, never
    * awaited. Cloudflare docs: do not await; the runtime writes in the
    * background. `slotMapping` is forwarded verbatim — see that function's
    * doc comment for identity-addressed-vs-positional packing.
    */
-  writeSample(input: AuthenticatedMetricsSampleV4, slotMapping?: SlotMapping): void {
-    for (const point of buildMetricsDataPointsV4(input, slotMapping)) {
+  writeSample(input: AuthenticatedMetricsSampleV5, slotMapping?: SlotMapping): void {
+    for (const point of buildMetricsDataPointsV5(input, slotMapping)) {
       this.#dataset.writeDataPoint(point)
     }
   }
@@ -93,7 +93,7 @@ export class CloudflareAnalyticsEngineServerMetricsStoreV4 implements ServerMetr
    * synchronous, fire-and-forget (same discipline as {@link writeSample}).
    */
   writeStatusEvent(input: ServerStatusEvent): void {
-    this.#dataset.writeDataPoint(buildStatusDataPointV4(input))
+    this.#dataset.writeDataPoint(buildStatusDataPointV5(input))
   }
 
   queryStatusHistory(input: StatusHistoryQuery): Promise<StatusHistoryResult> {
@@ -111,10 +111,10 @@ export class CloudflareAnalyticsEngineServerMetricsStoreV4 implements ServerMetr
         truncated: false,
       })
     }
-    return queryStatusHistoryViaSqlApiV4(this.#sql, input)
+    return queryStatusHistoryViaSqlApiV5(this.#sql, input)
   }
 
-  queryHostSeries(input: HostSeriesQueryV4): Promise<HostSeriesResultV4> {
+  queryHostSeries(input: HostSeriesQueryV5): Promise<HostSeriesResultV5> {
     if (!this.#sql) {
       return Promise.resolve({
         kind: 'analytics-engine',
@@ -127,10 +127,10 @@ export class CloudflareAnalyticsEngineServerMetricsStoreV4 implements ServerMetr
         sampleCount: 0,
       })
     }
-    return queryHostSeriesViaSqlApiV4(this.#sql, input)
+    return queryHostSeriesViaSqlApiV5(this.#sql, input)
   }
 
-  queryHostSummary(input: HostSummaryQueryV4): Promise<HostSummaryResultV4> {
+  queryHostSummary(input: HostSummaryQueryV5): Promise<HostSummaryResultV5> {
     if (!this.#sql) {
       return Promise.resolve({
         kind: 'analytics-engine',
@@ -140,10 +140,10 @@ export class CloudflareAnalyticsEngineServerMetricsStoreV4 implements ServerMetr
         latestAt: null,
       })
     }
-    return queryHostSummaryViaSqlApiV4(this.#sql, input)
+    return queryHostSummaryViaSqlApiV5(this.#sql, input)
   }
 
-  queryFleetHostSnapshot(input: FleetHostSnapshotQueryV4): Promise<FleetHostSnapshotResultV4> {
+  queryFleetHostSnapshot(input: FleetHostSnapshotQueryV5): Promise<FleetHostSnapshotResultV5> {
     if (!this.#sql) {
       return Promise.resolve({
         kind: 'analytics-engine',
@@ -152,10 +152,10 @@ export class CloudflareAnalyticsEngineServerMetricsStoreV4 implements ServerMetr
         servers: [],
       })
     }
-    return queryFleetHostSnapshotViaSqlApiV4(this.#sql, input)
+    return queryFleetHostSnapshotViaSqlApiV5(this.#sql, input)
   }
 
-  queryMetricEvents(input: MetricEventsQueryV4): Promise<MetricEventsResultV4> {
+  queryMetricEvents(input: MetricEventsQueryV5): Promise<MetricEventsResultV5> {
     if (!this.#sql) {
       return Promise.resolve({
         kind: 'analytics-engine',
@@ -165,10 +165,10 @@ export class CloudflareAnalyticsEngineServerMetricsStoreV4 implements ServerMetr
         truncated: false,
       })
     }
-    return queryMetricEventsViaSqlApiV4(this.#sql, input)
+    return queryMetricEventsViaSqlApiV5(this.#sql, input)
   }
 
-  queryEntitySeries(input: EntitySeriesQueryV4): Promise<EntitySeriesResultV4> {
+  queryEntitySeries(input: EntitySeriesQueryV5): Promise<EntitySeriesResultV5> {
     if (!this.#sql) {
       return Promise.resolve({
         kind: 'analytics-engine',
@@ -180,10 +180,10 @@ export class CloudflareAnalyticsEngineServerMetricsStoreV4 implements ServerMetr
         entities: [],
       })
     }
-    return queryEntitySeriesViaSqlApiV4(this.#sql, input)
+    return queryEntitySeriesViaSqlApiV5(this.#sql, input)
   }
 
-  queryEntityIdsSeen(input: EntityIdsSeenQueryV4): Promise<EntityIdsSeenResultV4> {
+  queryEntityIdsSeen(input: EntityIdsSeenQueryV5): Promise<EntityIdsSeenResultV5> {
     if (!this.#sql) {
       return Promise.resolve({
         kind: 'analytics-engine',
@@ -191,6 +191,6 @@ export class CloudflareAnalyticsEngineServerMetricsStoreV4 implements ServerMetr
         entityIds: [],
       })
     }
-    return queryEntityIdsSeenViaSqlApiV4(this.#sql, input)
+    return queryEntityIdsSeenViaSqlApiV5(this.#sql, input)
   }
 }

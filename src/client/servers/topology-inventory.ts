@@ -2,7 +2,7 @@
  * Builds UI-facing entity inventories from a daemon-reported `TopologySnapshot`
  * (`getLatestTopologyGeneration` / `server-topology-records.ts`) plus its
  * derived `SlotMapping` (`topology-slot-mapping.ts`) — the label/role metadata
- * the v4 metrics routes attach to `network`/`filesystem`/`block`/`gpu`/
+ * the v5 metrics routes attach to `network`/`filesystem`/`block`/`gpu`/
  * `hardwareSignal` entity series so a chart legend never has to show a bare
  * device id with no name or role context.
  *
@@ -27,13 +27,13 @@ import type {
  * (members, VLAN children, tunnels, container bridges, loopback — or an
  * uplink the operator hasn't added to the monitored list).
  */
-export type NetworkEntityRoleV4 = 'nic' | 'fabric' | 'other'
+export type NetworkEntityRoleV5 = 'nic' | 'fabric' | 'other'
 
-export type NetworkInventoryEntryV4 = {
+export type NetworkInventoryEntryV5 = {
   deviceId: string
   name: string
   kind: NetworkDeviceKind
-  role: NetworkEntityRoleV4
+  role: NetworkEntityRoleV5
   /** 1-based NIC slot when `role === 'nic'` — slots 1/2 embed in `host.io` on Cloudflare, 3+ page as `network` rows. */
   slot?: number
   speedMbps?: number
@@ -42,7 +42,7 @@ export type NetworkInventoryEntryV4 = {
   defaultRoute?: boolean
 }
 
-export type FilesystemInventoryEntryV4 = {
+export type FilesystemInventoryEntryV5 = {
   filesystemId: string
   mountpoint: string
   roles: FilesystemRole[]
@@ -51,7 +51,7 @@ export type FilesystemInventoryEntryV4 = {
   isRoot: boolean
 }
 
-export type BlockDeviceInventoryEntryV4 = {
+export type BlockDeviceInventoryEntryV5 = {
   deviceId: string
   kernelName: string
   model?: string
@@ -59,33 +59,53 @@ export type BlockDeviceInventoryEntryV4 = {
   isServiceDevice: boolean
 }
 
-export type GpuInventoryEntryV4 = {
+export type GpuInventoryEntryV5 = {
   gpuId: string
   kind: GpuKind
   vendor: string
   chip: string
 }
 
-export type HardwareSignalInventoryEntryV4 = {
+export type HardwareSignalInventoryEntryV5 = {
   signalId: string
   kind: string
   unit: string
+  /**
+   * Which part of the machine this sensor belongs to (`cpu` / `disk` /
+   * `board`). The daemon has always resolved this; v4 dropped it here, so the
+   * UI rendered a bare kernel label with no attribution — two NVMe drives
+   * both showed an indistinguishable "Composite".
+   */
+  component: string
+  /**
+   * The hwmon chip, resolved to the backing block device for storage sensors
+   * (`nvme0n1`, `sda`) — parsed out of `signalId`, which the daemon forms as
+   * `signal:<chip>:<label>`. Carried explicitly so the UI never has to
+   * re-parse the id.
+   */
+  chip: string
   label: string
   thresholds?: PhysicalSignalThresholds
 }
 
-export type TopologyInventoryV4 = {
-  networks: NetworkInventoryEntryV4[]
-  filesystems: FilesystemInventoryEntryV4[]
-  blockDevices: BlockDeviceInventoryEntryV4[]
-  gpus: GpuInventoryEntryV4[]
-  hardwareSignals: HardwareSignalInventoryEntryV4[]
+/** The `<chip>` segment of a `signal:<chip>:<label>` id; empty when the id isn't that shape. */
+export function hardwareSignalChipV5(signalId: string): string {
+  const parts = signalId.split(':')
+  return parts.length >= 3 && parts[0] === 'signal' ? parts[1]! : ''
+}
+
+export type TopologyInventoryV5 = {
+  networks: NetworkInventoryEntryV5[]
+  filesystems: FilesystemInventoryEntryV5[]
+  blockDevices: BlockDeviceInventoryEntryV5[]
+  gpus: GpuInventoryEntryV5[]
+  hardwareSignals: HardwareSignalInventoryEntryV5[]
 }
 
 function networkRole(
   deviceId: string,
   slotMapping: SlotMapping
-): { role: NetworkEntityRoleV4; slot?: number } {
+): { role: NetworkEntityRoleV5; slot?: number } {
   const slotIndex = slotMapping.normalNicSlots.indexOf(deviceId)
   if (slotIndex !== -1) return { role: 'nic', slot: slotIndex + 1 }
   if (slotMapping.fabricDeviceIds.includes(deviceId)) return { role: 'fabric' }
@@ -93,11 +113,11 @@ function networkRole(
 }
 
 /** Build every family's inventory from one topology snapshot + its slot mapping. */
-export function buildTopologyInventoryV4(
+export function buildTopologyInventoryV5(
   snapshot: TopologySnapshot,
   slotMapping: SlotMapping
-): TopologyInventoryV4 {
-  const networks: NetworkInventoryEntryV4[] = snapshot.networks.map((device) => ({
+): TopologyInventoryV5 {
+  const networks: NetworkInventoryEntryV5[] = snapshot.networks.map((device) => ({
     deviceId: device.deviceId,
     name: device.name,
     kind: device.kind,
@@ -107,7 +127,7 @@ export function buildTopologyInventoryV4(
     ...(device.defaultRoute === true ? { defaultRoute: true } : {}),
   }))
 
-  const filesystems: FilesystemInventoryEntryV4[] = snapshot.filesystems.map((fs) => ({
+  const filesystems: FilesystemInventoryEntryV5[] = snapshot.filesystems.map((fs) => ({
     filesystemId: fs.filesystemId,
     mountpoint: fs.mountpoint,
     roles: fs.roles,
@@ -115,7 +135,7 @@ export function buildTopologyInventoryV4(
     isRoot: fs.filesystemId === slotMapping.rootFilesystemId,
   }))
 
-  const blockDevices: BlockDeviceInventoryEntryV4[] = snapshot.blockDevices.map((device) => ({
+  const blockDevices: BlockDeviceInventoryEntryV5[] = snapshot.blockDevices.map((device) => ({
     deviceId: device.deviceId,
     kernelName: device.kernelName,
     ...(device.model !== undefined ? { model: device.model } : {}),
@@ -123,18 +143,20 @@ export function buildTopologyInventoryV4(
     isServiceDevice: device.isServiceDevice,
   }))
 
-  const gpus: GpuInventoryEntryV4[] = snapshot.gpus.map((gpu) => ({
+  const gpus: GpuInventoryEntryV5[] = snapshot.gpus.map((gpu) => ({
     gpuId: gpu.gpuId,
     kind: gpu.kind,
     vendor: gpu.vendor,
     chip: gpu.chip,
   }))
 
-  const hardwareSignals: HardwareSignalInventoryEntryV4[] = snapshot.hardwareSignals.map(
+  const hardwareSignals: HardwareSignalInventoryEntryV5[] = snapshot.hardwareSignals.map(
     (signal) => ({
       signalId: signal.signalId,
       kind: signal.kind,
       unit: signal.unit,
+      component: signal.component,
+      chip: hardwareSignalChipV5(signal.signalId),
       label: signal.label,
       ...(signal.thresholds !== undefined ? { thresholds: signal.thresholds } : {}),
     })
@@ -146,9 +168,9 @@ export function buildTopologyInventoryV4(
 /**
  * The root-role filesystem's `totalBytes` per the current `SlotMapping`, or
  * `null` when no filesystem is marked root or its capacity is unknown —
- * feeds `derived-metrics-v4.ts`'s `HostCapacitiesV4.rootFilesystemTotalBytes`.
+ * feeds `derived-metrics-v5.ts`'s `HostCapacitiesV5.rootFilesystemTotalBytes`.
  */
-export function rootFilesystemTotalBytesV4(
+export function rootFilesystemTotalBytesV5(
   snapshot: TopologySnapshot,
   slotMapping: SlotMapping
 ): number | null {

@@ -16,8 +16,8 @@ import {
   resolveCpuCatalogEntry,
 } from "../hardware/cpu-catalog.ts";
 import {
-  type MetricsCapabilityPlanOverrideV4,
-  type MetricsCapabilityPlanV4,
+  type MetricsCapabilityPlanOverrideV5,
+  type MetricsCapabilityPlanV5,
   type MetricsDeploymentKind,
   parseServerMetricsCapabilityPlanOverride,
   resolveMetricsCapabilityPlan,
@@ -360,12 +360,12 @@ export type ServerOptions = {
    */
   hosting?: { enabled: boolean };
   /**
-   * Per-server override for the v4 metrics capability plan (see
+   * Per-server override for the v5 metrics capability plan (see
    * `../../daemon/metrics/capability-plan.ts`). Wins over any org-wide
    * `organization.options.metricsCapabilityPlan` field it sets — see
    * {@link resolveEffectiveMetricsCapabilityPlan}.
    */
-  metricsCapabilityPlan?: MetricsCapabilityPlanOverrideV4;
+  metricsCapabilityPlan?: MetricsCapabilityPlanOverrideV5;
 };
 
 const OS_FAMILIES = new Set<ServerOsFamily>([
@@ -1722,7 +1722,7 @@ export function resolveEffectiveCpuThermalLimits(
 }
 
 /**
- * Resolve the effective v4 metrics capability plan for a server:
+ * Resolve the effective v5 metrics capability plan for a server:
  * `machineClass`-scoped platform default → org-wide
  * `organization.options.metricsCapabilityPlan` → per-server
  * `server.options.metricsCapabilityPlan`, field by field. Unlike
@@ -1734,14 +1734,14 @@ export function resolveEffectiveCpuThermalLimits(
  * `../../daemon/metrics/capability-plan.ts`'s
  * `platformDefaultMetricsCapabilityPlan`) — ingest (`api-routes.ts`)
  * classifies the reporting server from its persisted topology snapshot
- * (`classifyServerMachineForMetrics`) and supplies the result here.
+ * (`resolveServerMachineClass`) and supplies the result here.
  */
 export function resolveEffectiveMetricsCapabilityPlan(
   machineClass: ServerMachineClass,
   orgOptions: OrganizationOptions | undefined,
   serverOptions: ServerOptions | undefined,
   deployment: MetricsDeploymentKind,
-): MetricsCapabilityPlanV4 {
+): MetricsCapabilityPlanV5 {
   return resolveMetricsCapabilityPlan(
     machineClass,
     orgOptions?.metricsCapabilityPlan,

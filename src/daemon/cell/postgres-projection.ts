@@ -24,7 +24,7 @@ import { normalizeMachineKey } from '../../lib/machine-key.ts'
 import type { ServerMetadata } from '../../lib/db/server-metadata.ts'
 import { geoEquals, parseServerGeo, type ServerGeo } from '../../lib/geo/server-geo.ts'
 import type { DaemonCell, DaemonCellSnapshot } from './contracts.ts'
-import type { ServerStatusTransitionReason } from '../metrics/types-v4.ts'
+import type { ServerStatusTransitionReason } from '../metrics/types-v5.ts'
 import { emitServerStatusEvent, type ServerStatusEventSink } from '../metrics/status-events.ts'
 
 export type ProjectionIdentity = {

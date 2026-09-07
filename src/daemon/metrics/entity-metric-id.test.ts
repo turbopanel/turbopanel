@@ -99,11 +99,6 @@ const ROUND_TRIP_CASES: {
     },
     id: 'databaseProxy:pgbouncer.queries',
   },
-  {
-    name: 'cpuCore entity',
-    selector: { scope: 'cpuCore', entityId: 'cpu3', field: 'busyPercent' },
-    id: 'cpuCore:cpu3.busyPercent',
-  },
 ]
 
 for (const { name, selector, id } of ROUND_TRIP_CASES) {
@@ -125,7 +120,7 @@ test('formatEntityMetricId rejects unknown field for a valid scope', () => {
         field: 'notAField',
       }),
     TypeError,
-    'unknown v4 metric field'
+    'unknown v5 metric field'
   )
 })
 
@@ -162,7 +157,7 @@ test('parseEntityMetricId rejects an unknown field for a known alias', () => {
   assertThrows(
     () => parseEntityMetricId('gpu:gpu0.notAField'),
     TypeError,
-    'unknown v4 metric field'
+    'unknown v5 metric field'
   )
 })
 

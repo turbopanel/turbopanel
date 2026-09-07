@@ -10,7 +10,7 @@ import {
   parseManagedOrganizationDefaults,
 } from './managed/org-defaults.ts'
 import {
-  type MetricsCapabilityPlanOverrideV4,
+  type MetricsCapabilityPlanOverrideV5,
   parseMetricsCapabilityPlanOverride,
 } from '../daemon/metrics/capability-plan.ts'
 
@@ -76,12 +76,12 @@ export type OrganizationOptions = {
    */
   temperatureUnit?: TemperatureUnit
   /**
-   * Org-wide default overrides for the v4 metrics capability plan (see
+   * Org-wide default overrides for the v5 metrics capability plan (see
    * `../daemon/metrics/capability-plan.ts`). Layered under any per-server
    * `server.options.metricsCapabilityPlan` override by
    * `resolveEffectiveMetricsCapabilityPlan` (`db/server-metadata.ts`).
    */
-  metricsCapabilityPlan?: MetricsCapabilityPlanOverrideV4
+  metricsCapabilityPlan?: MetricsCapabilityPlanOverrideV5
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

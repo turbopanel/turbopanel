@@ -1,4 +1,4 @@
-import { AE_DEFAULT_MAX_RANGE_SECONDS } from '../backends/cloudflare/sql-api-v4.ts'
+import { AE_DEFAULT_MAX_RANGE_SECONDS } from '../backends/cloudflare/sql-api-v5.ts'
 import { bucketFloor } from './buckets.ts'
 
 export { bucketFloor } from './buckets.ts'
@@ -64,7 +64,12 @@ function clampResolutionForMaxPoints(
   return current
 }
 
-export type ParseMaxPointsResult = { ok: true; value: number } | { ok: false; message: string }
+export type ParseMaxPointsResult =
+  | { ok: true; value: number }
+  | {
+      ok: false
+      message: string
+    }
 
 /** Client `maxPoints` may only lower the server cap — never raise it. */
 export function parseMaxPoints(raw: string | undefined): ParseMaxPointsResult {

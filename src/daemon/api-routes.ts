@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Context, Env, Next } from 'hono'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { isInstanceInstalled } from '../client/authn/install-state.ts'
 import { lookupActiveLicense } from '../client/authn/license.ts'
 import { organization, server } from '../lib/db/schema.ts'
@@ -13,24 +13,26 @@ import {
   parseDaemonSecretEnvelope,
 } from '../client/authn/data-encryption.ts'
 import type { Db } from '../db.ts'
-import { getDb, getExecutionLogStore, getServerMetricsStoreV4 } from '../db.ts'
+import { getDb, getExecutionLogStore, getServerMetricsStoreV5 } from '../db.ts'
 import { contentLengthExceeds, readBodyWithByteLimit } from '../lib/http/bounded-body.ts'
 import {
-  MAX_METRICS_PAYLOAD_BYTES_V4,
+  MAX_METRICS_PAYLOAD_BYTES_V5,
   metricsPayloadByteLength,
   rateLimitedMetricsLog,
-  validateMetricsSampleV4,
-} from './metrics/validation-v4.ts'
+  validateMetricsSampleV5,
+} from './metrics/validation-v5.ts'
 import {
-  type MetricsCapabilityPlanV4,
+  type MetricsCapabilityPlanV5,
   type MetricsDeploymentKind,
   metricsDeploymentKindForRuntime,
-  resolveDefaultMetricsCapabilityPlanV4,
-  type ServerMachineClass,
-  truncateSampleToCapabilityPlanV4,
+  resolveDefaultMetricsCapabilityPlanV5,
+  truncateSampleToCapabilityPlanV5,
+  isServerMachineClass,
+  resolveServerMachineClass,
 } from './metrics/capability-plan.ts'
-import { DisabledServerMetricsStoreV4 } from './metrics/disabled-store-v4.ts'
-import type { AuthenticatedMetricsSampleV4 } from './metrics/types-v4.ts'
+import { decimateSampleToCadenceTiersV5 } from './metrics/cadence-tiers-v5.ts'
+import { DisabledServerMetricsStoreV5 } from './metrics/disabled-store-v5.ts'
+import type { AuthenticatedMetricsSampleV5 } from './metrics/types-v5.ts'
 import { type OrganizationOptions, parseOrganizationOptions } from '../lib/organization-options.ts'
 import {
   parseServerHardwareProfile,
@@ -443,31 +445,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Classify a reporting server as `"physical"` vs `"virtual"` for
- * {@link resolveEffectiveMetricsCapabilityPlan} — no dedicated classification
- * field is persisted yet, so this infers it from whichever topology snapshot
- * is on hand (the daemon's `topology-report.snapshot`, stored verbatim by
- * `recordTopologyGeneration`): a physical host is the only kind that ever
- * discovers host-level sensors, so a non-empty `hardwareSignals` array is a
- * reliable physical signal. Falls back to the *raw*, pre-truncation sample's
- * own `hardwareSignals` (validated but not yet plan-truncated) when no
- * snapshot is available at all — never circular, since truncation to the
- * plan's `physicalHardwareSignalSlots` happens after this classification, on
- * the resolved plan.
- */
-function classifyServerMachineForMetrics(
-  topologySnapshot: unknown,
-  rawSample: AuthenticatedMetricsSampleV4
-): ServerMachineClass {
-  if (isPlainObject(topologySnapshot) && Array.isArray(topologySnapshot.hardwareSignals)) {
-    return topologySnapshot.hardwareSignals.length > 0 ? 'physical' : 'virtual'
-  }
-  return rawSample.hardwareSignals.length > 0 ? 'physical' : 'virtual'
-}
-
-/**
  * A snapshot is only usable for slot mapping once it carries every array
- * `computeSlotMapping` reads. `classifyServerMachineForMetrics` only ever
+ * `computeSlotMapping` reads. `resolveServerMachineClass` only ever
  * needs `hardwareSignals`, so some recorded/test snapshots are intentionally
  * that minimal — treat those the same as "no snapshot" here rather than
  * letting `computeSlotMapping` throw on a missing array.
@@ -490,7 +469,7 @@ function isSlotMappableTopologySnapshot(value: Record<string, unknown>): value i
  * `hardwareProfile` overrides. `undefined` when the snapshot is missing/not a
  * plausible topology report (unknown generation) or resolution otherwise
  * fails — callers must fall back to topology-agnostic packing in that case
- * (see `field-map-v4.ts`).
+ * (see `field-map-v5.ts`).
  */
 function resolveSlotMappingForIngest(
   serverId: string,
@@ -519,13 +498,13 @@ function resolveSlotMappingForIngest(
 }
 
 type IngestPlanAndTopology = {
-  plan: MetricsCapabilityPlanV4
+  plan: MetricsCapabilityPlanV5
   slotMapping: SlotMapping | undefined
 }
 
 /**
  * Ingest-time capability-plan resolution + topology reconciliation for
- * `POST /api/daemon/v1/metrics`. Resolves the effective v4 metrics
+ * `POST /api/daemon/v1/metrics`. Resolves the effective v5 metrics
  * capability plan from persisted server/org state (replacing the
  * conservative default-only resolution) and, alongside it, checks whether
  * the sample's `metadata.topologyGeneration` has ever been recorded via
@@ -536,14 +515,14 @@ type IngestPlanAndTopology = {
  * {@link resolveSlotMappingForIngest}) for the store's `writeSample` call.
  *
  * Every DB read/write here is best-effort: a failure logs and falls back to
- * {@link resolveDefaultMetricsCapabilityPlanV4} plus no slot mapping, rather
+ * {@link resolveDefaultMetricsCapabilityPlanV5} plus no slot mapping, rather
  * than rejecting an otherwise-valid sample or blocking the fire-and-forget
  * write path.
  */
 async function resolveIngestPlanAndReconcileTopology(
   db: Db,
   serverId: string,
-  sample: AuthenticatedMetricsSampleV4,
+  sample: AuthenticatedMetricsSampleV5,
   deployment: MetricsDeploymentKind
 ): Promise<IngestPlanAndTopology> {
   try {
@@ -555,6 +534,7 @@ async function resolveIngestPlanAndReconcileTopology(
           serverOptions: server.options,
           orgOptions: organization.options,
           serverMetadata: server.metadata,
+          machineClass: server.machineClass,
         })
         .from(server)
         .leftJoin(organization, eq(organization.id, server.organizationId))
@@ -571,10 +551,34 @@ async function resolveIngestPlanAndReconcileTopology(
       })
     }
 
-    const snapshotForClass = topologyMatch?.snapshot ?? latestTopology?.snapshot
-    const machineClass = classifyServerMachineForMetrics(snapshotForClass, sample)
-
     const row = serverRows[0]
+    const snapshotForClass = topologyMatch?.snapshot ?? latestTopology?.snapshot
+    const machineClass = resolveServerMachineClass(
+      row?.machineClass,
+      snapshotForClass,
+      sample.hardwareSignals.length
+    )
+    if (
+      row !== undefined &&
+      !isServerMachineClass(row.machineClass) &&
+      machineClass === 'physical'
+    ) {
+      // Persist the inference only when it is proof (sensors discovered) and
+      // only while the column is still undeclared, so an operator edit that
+      // races this guess wins. `'virtual'` is never written back: it is only
+      // absence of proof, and pinning it would stop a sensor found by a later
+      // topology generation from promoting the host. Fire-and-forget, like
+      // `markTopologyResyncRequested` above.
+      db.update(server)
+        .set({ machineClass: 'physical' })
+        .where(and(eq(server.id, serverId), isNull(server.machineClass)))
+        .catch((err) => {
+          rateLimitedMetricsLog(serverId, 'machine_class_record_failed', () => {
+            console.warn(`metrics machine class record failed for ${serverId}: ${String(err)}`)
+          })
+        })
+    }
+
     const serverOptions = parseServerOptions(row?.serverOptions) ?? undefined
     const orgOptions: OrganizationOptions = parseOrganizationOptions(row?.orgOptions)
 
@@ -603,7 +607,7 @@ async function resolveIngestPlanAndReconcileTopology(
       console.warn(`metrics capability plan resolution failed for ${serverId}: ${String(err)}`)
     })
     return {
-      plan: resolveDefaultMetricsCapabilityPlanV4(deployment),
+      plan: resolveDefaultMetricsCapabilityPlanV5(deployment),
       slotMapping: undefined,
     }
   }
@@ -1131,7 +1135,14 @@ export function registerDaemonApiRoutes<E extends Env>(
         return c.json({ ok: true, nextSeq: result.nextSeq }, 202)
       } catch (err) {
         if (err instanceof ExecutionLogGapError) {
-          return c.json({ ok: false, error: 'seq gap', nextSeq: err.expectedSeq }, 409)
+          return c.json(
+            {
+              ok: false,
+              error: 'seq gap',
+              nextSeq: err.expectedSeq,
+            },
+            409
+          )
         }
         if (err instanceof ExecutionLogSealedError) {
           return c.json({ ok: false, error: 'log sealed' }, 409)
@@ -1151,10 +1162,10 @@ export function registerDaemonApiRoutes<E extends Env>(
     async (c) => {
       const serverId = c.get('daemonServerId')
 
-      const lengthReject = rejectIfContentLengthTooLarge(c, MAX_METRICS_PAYLOAD_BYTES_V4)
+      const lengthReject = rejectIfContentLengthTooLarge(c, MAX_METRICS_PAYLOAD_BYTES_V5)
       if (lengthReject) return lengthReject
 
-      const bodyRead = await readRequestBodyWithLimit(c, MAX_METRICS_PAYLOAD_BYTES_V4)
+      const bodyRead = await readRequestBodyWithLimit(c, MAX_METRICS_PAYLOAD_BYTES_V5)
       if (!bodyRead.ok) {
         return c.json({ ok: false, error: 'request body too large' }, 413)
       }
@@ -1171,7 +1182,7 @@ export function registerDaemonApiRoutes<E extends Env>(
         return c.json({ ok: false, error: 'invalid metrics payload' }, 400)
       }
 
-      const result = validateMetricsSampleV4(parsed, {
+      const result = validateMetricsSampleV5(parsed, {
         serverId,
         receivedAt: new Date().toISOString(),
         payloadBytes,
@@ -1193,24 +1204,32 @@ export function registerDaemonApiRoutes<E extends Env>(
       const { plan, slotMapping } = db
         ? await resolveIngestPlanAndReconcileTopology(db, serverId, result.sample, deployment)
         : {
-            plan: resolveDefaultMetricsCapabilityPlanV4(deployment),
+            plan: resolveDefaultMetricsCapabilityPlanV5(deployment),
             slotMapping: undefined,
           }
 
-      const truncated = truncateSampleToCapabilityPlanV4(result.sample, plan, slotMapping)
+      // The plan decides what this server is entitled to store; the cadence
+      // tiers decide how often that entitlement is actually written. Slow
+      // families (filesystem space, sensor temperatures, the detail
+      // families) land every 5 minutes instead of every tick, which is also
+      // what stops a 10 s live lease multiplying every family by six.
+      const truncated = decimateSampleToCadenceTiersV5(
+        truncateSampleToCapabilityPlanV5(result.sample, plan, slotMapping),
+        slotMapping
+      )
       const sample = {
         ...truncated,
         serverId,
         receivedAt: result.sample.receivedAt,
       }
 
-      const store = getServerMetricsStoreV4(c) ?? new DisabledServerMetricsStoreV4()
+      const store = getServerMetricsStoreV5(c) ?? new DisabledServerMetricsStoreV5()
       const logWriteFailed = (err: unknown) => {
         rateLimitedMetricsLog(serverId, 'write_failed', () => {
           console.warn(`metrics write failed for ${serverId}: ${String(err)}`)
         })
       }
-      // Fire-and-forget per `ServerMetricsStoreV4`'s contract (types-v4.ts) —
+      // Fire-and-forget per `ServerMetricsStoreV5`'s contract (types-v5.ts) —
       // callers must never await a write into the request path. Only a
       // synchronous throw needs its own catch; an async rejection is
       // handled by `.catch` on the returned promise.

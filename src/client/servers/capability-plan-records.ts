@@ -1,5 +1,5 @@
 /**
- * Append-only history of resolved v4 metrics-capability-plan generations
+ * Append-only history of resolved v5 metrics-capability-plan generations
  * (`capabilityPlanGeneration` table, see `../../lib/db/schema.ts`) — one row
  * per `(server, generation)`, written lazily whenever a resolved plan is
  * needed — `POST /api/daemon/v1/metrics` (`../../daemon/api-routes.ts`)
@@ -17,7 +17,7 @@ import type { Db } from '../../db.ts'
 import { capabilityPlanGeneration } from '../../lib/db/schema.ts'
 import {
   computeMetricsCapabilityPlanHash,
-  type MetricsCapabilityPlanV4,
+  type MetricsCapabilityPlanV5,
 } from '../../daemon/metrics/capability-plan.ts'
 
 export type CapabilityPlanGenerationRecord = {
@@ -76,7 +76,7 @@ export async function getLatestCapabilityPlanGeneration(
 export async function recordCapabilityPlanGenerationIfChanged(
   db: Db,
   serverId: string,
-  resolvedPlan: MetricsCapabilityPlanV4
+  resolvedPlan: MetricsCapabilityPlanV5
 ): Promise<number> {
   const planHash = await computeMetricsCapabilityPlanHash(resolvedPlan)
 

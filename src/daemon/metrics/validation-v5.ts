@@ -1,18 +1,18 @@
 import {
-  buildMetricsSampleV4,
-  METRIC_EVENT_KINDS_V4,
-  type MetricEventKindV4,
-  type MetricEventSeverityV4,
-  type MetricEventV4,
-  METRICS_SCHEMA_VERSION_V4,
-  type MetricsSampleMetadataV4,
-  type MetricsSampleV4,
-  type MetricsSampleV4Input,
-  type NumaNodeSampleV4,
+  buildMetricsSampleV5,
+  METRIC_EVENT_KINDS_V5,
+  type MetricEventKindV5,
+  type MetricEventSeverityV5,
+  type MetricEventV5,
+  METRICS_SCHEMA_VERSION_V5,
+  type MetricsSampleMetadataV5,
+  type MetricsSampleV5,
+  type MetricsSampleV5Input,
+  type NumaNodeSampleV5,
   sanitizeFinite,
-} from './contract-v4.ts'
-import { type MetricEntityScopeV4, sanitizeMetricValueV4 } from './metric-descriptors-v4.ts'
-import type { AuthenticatedMetricsSampleV4 } from './types-v4.ts'
+} from './contract-v5.ts'
+import { type MetricEntityScopeV5, sanitizeMetricValueV5 } from './metric-descriptors-v5.ts'
+import type { AuthenticatedMetricsSampleV5 } from './types-v5.ts'
 
 // ---------------------------------------------------------------------------
 // Shared validation primitives — version/backend-neutral, this module is
@@ -57,29 +57,29 @@ export function metricsPayloadByteLength(raw: string | ArrayBuffer): number {
 }
 
 /**
- * Hard cap on raw v4 metrics frame size (UTF-8 bytes).
+ * Hard cap on raw v5 metrics frame size (UTF-8 bytes).
  *
  * Worst case: 7 bounded entity arrays (`networks`/`filesystems`/
  * `blockDevices`/`gpus`/`hardwareSignals`/`ingressSources`/`databaseProxies`)
- * × 64 entries (`MAX_METRIC_ENTITY_ARRAY_LENGTH_V4`) × ~250 bytes of JSON per
+ * × 64 entries (`MAX_METRIC_ENTITY_ARRAY_LENGTH_V5`) × ~250 bytes of JSON per
  * entry (generous for the widest entity, `ingressSources`, at 17 numeric
  * fields plus id/discriminator strings) + 128 events
- * (`MAX_METRIC_EVENTS_PER_SAMPLE_V4`) × ~150 bytes of JSON per event
+ * (`MAX_METRIC_EVENTS_PER_SAMPLE_V5`) × ~150 bytes of JSON per event
  * (including a small `payload`) ≈ 7×64×250 + 128×150 = 112,000 + 19,200 ≈
  * 131,200 bytes (~129 KiB). Doubled for headroom (host block, metadata, JSON
  * key repetition, UTF-8 overhead) → 262,144 bytes (256 KiB).
  */
-export const MAX_METRICS_PAYLOAD_BYTES_V4 = 262_144
+export const MAX_METRICS_PAYLOAD_BYTES_V5 = 262_144
 
 /**
  * Defensive pre-construction caps — must stay in sync with the private
  * `MAX_METRIC_ENTITY_ARRAY_LENGTH` / `MAX_METRIC_EVENTS_PER_SAMPLE` constants
- * in `contract-v4.ts`. Rejecting oversized arrays here (with a clear reason)
- * is strictly better than letting `buildMetricsSampleV4` throw a generic
+ * in `contract-v5.ts`. Rejecting oversized arrays here (with a clear reason)
+ * is strictly better than letting `buildMetricsSampleV5` throw a generic
  * `TypeError`, but both layers must agree on the same ceiling.
  */
-const MAX_METRIC_ENTITY_ARRAY_LENGTH_V4 = 64
-const MAX_METRIC_EVENTS_PER_SAMPLE_V4 = 128
+const MAX_METRIC_ENTITY_ARRAY_LENGTH_V5 = 64
+const MAX_METRIC_EVENTS_PER_SAMPLE_V5 = 128
 
 const MAX_EVENT_PAYLOAD_KEYS = 32
 
@@ -178,10 +178,10 @@ function parseIntervalSeconds(value: unknown): ValidateResult<number> {
 }
 
 function rejectOversizedPayload(payloadBytes: number | undefined): ValidateFail | null {
-  if (payloadBytes === undefined || payloadBytes <= MAX_METRICS_PAYLOAD_BYTES_V4) {
+  if (payloadBytes === undefined || payloadBytes <= MAX_METRICS_PAYLOAD_BYTES_V5) {
     return null
   }
-  return fail(`payload exceeds max size ${MAX_METRICS_PAYLOAD_BYTES_V4}`)
+  return fail(`payload exceeds max size ${MAX_METRICS_PAYLOAD_BYTES_V5}`)
 }
 
 function parseArray(raw: unknown, field: string, cap: number): ValidateResult<unknown[]> {
@@ -212,28 +212,18 @@ const ALLOWED_TOP_LEVEL_FIELDS: ReadonlySet<string> = new Set([
   'events',
   'cpuDetail',
   'memoryDetail',
-  'cpuCoreLive',
   'numaNodes',
 ])
-
-/** Top-level fields that only ever appear on a retired v3 frame — never on v4. */
-const V3_ONLY_TOP_LEVEL_FIELDS = ['version', 'parts', 'dimensions', 'at']
 
 function parseEnvelope(raw: unknown): ValidateResult<Record<string, unknown>> {
   if (!isRecord(raw)) return fail('payload must be an object')
   if (raw.type !== 'metrics') return fail('type must be "metrics"')
 
-  if (!isRecord(raw.metadata)) {
-    const looksLikeV3 = V3_ONLY_TOP_LEVEL_FIELDS.some((field) => field in raw)
-    if (looksLikeV3) {
-      return fail('payload uses retired schema v3 shape — daemon must upgrade to v4')
-    }
-    return fail('metadata must be an object')
-  }
+  if (!isRecord(raw.metadata)) return fail('metadata must be an object')
 
   for (const key of Object.keys(raw)) {
     if (!ALLOWED_TOP_LEVEL_FIELDS.has(key)) {
-      return fail(`${key} is not a recognized v4 field`)
+      return fail(`${key} is not a recognized v5 field`)
     }
   }
   return { ok: true, value: raw }
@@ -249,15 +239,15 @@ const ALLOWED_METADATA_FIELDS: ReadonlySet<string> = new Set([
   'bootGeneration',
 ])
 
-function parseMetadata(raw: unknown, nowMs: number): ValidateResult<MetricsSampleMetadataV4> {
+function parseMetadata(raw: unknown, nowMs: number): ValidateResult<MetricsSampleMetadataV5> {
   if (!isRecord(raw)) return fail('metadata must be an object')
   for (const key of Object.keys(raw)) {
     if (!ALLOWED_METADATA_FIELDS.has(key)) {
-      return fail(`metadata.${key} is not a recognized v4 metadata field`)
+      return fail(`metadata.${key} is not a recognized v5 metadata field`)
     }
   }
-  if (raw.version !== METRICS_SCHEMA_VERSION_V4) {
-    return fail(`metadata.version must be ${METRICS_SCHEMA_VERSION_V4}`)
+  if (raw.version !== METRICS_SCHEMA_VERSION_V5) {
+    return fail(`metadata.version must be ${METRICS_SCHEMA_VERSION_V5}`)
   }
   const sampledAt = parseTimestamp(raw.sampledAt, 'metadata.sampledAt', {
     checkSkew: true,
@@ -287,7 +277,7 @@ function parseMetadata(raw: unknown, nowMs: number): ValidateResult<MetricsSampl
   return {
     ok: true,
     value: {
-      version: METRICS_SCHEMA_VERSION_V4,
+      version: METRICS_SCHEMA_VERSION_V5,
       sampledAt: sampledAt.value,
       intervalSeconds: intervalSeconds.value,
       sequence: sequence.value,
@@ -302,7 +292,7 @@ function parseMetadata(raw: unknown, nowMs: number): ValidateResult<MetricsSampl
 // Generic numeric field-group parsing — shared by `host.*` sub-objects and
 // the optional `cpuDetail`/`memoryDetail` blocks. `label` and `scope` are the
 // same string for every caller in this file (they mirror
-// `metric-descriptors-v4.ts`'s `<entityScope>.<fieldName>` naming), kept as
+// `metric-descriptors-v5.ts`'s `<entityScope>.<fieldName>` naming), kept as
 // separate parameters only because they serve different purposes (error
 // messages vs. descriptor lookup).
 // ---------------------------------------------------------------------------
@@ -310,7 +300,7 @@ function parseMetadata(raw: unknown, nowMs: number): ValidateResult<MetricsSampl
 function parseFieldGroup(
   raw: unknown,
   label: string,
-  scope: MetricEntityScopeV4,
+  scope: MetricEntityScopeV5,
   numericFields: readonly string[]
 ): ValidateResult<Record<string, number | null>> {
   if (!isRecord(raw)) return fail(`${label} must be an object`)
@@ -326,7 +316,7 @@ function parseFieldGroup(
     if (value !== null && typeof value !== 'number') {
       return fail(`${label}.${field} must be a number or null`)
     }
-    out[field] = sanitizeMetricValueV4(`${scope}.${field}`, value)
+    out[field] = sanitizeMetricValueV5(`${scope}.${field}`, value)
   }
   return { ok: true, value: out }
 }
@@ -411,7 +401,7 @@ const ALLOWED_HOST_GROUPS: ReadonlySet<string> = new Set([
   'network',
 ])
 
-function parseHost(raw: unknown): ValidateResult<MetricsSampleV4Input['host']> {
+function parseHost(raw: unknown): ValidateResult<MetricsSampleV5Input['host']> {
   if (!isRecord(raw)) return fail('host must be an object')
   for (const key of Object.keys(raw)) {
     if (!ALLOWED_HOST_GROUPS.has(key)) {
@@ -452,7 +442,7 @@ function parseHost(raw: unknown): ValidateResult<MetricsSampleV4Input['host']> {
   return {
     ok: true,
     // Every field on each group was validated against its exact numeric
-    // field list above, so this matches `MetricsSampleV4Input["host"]`'s
+    // field list above, so this matches `MetricsSampleV5Input["host"]`'s
     // shape by construction.
     value: {
       cpu: cpu.value,
@@ -460,7 +450,7 @@ function parseHost(raw: unknown): ValidateResult<MetricsSampleV4Input['host']> {
       memory: memory.value,
       storage: storage.value,
       network: network.value,
-    } as MetricsSampleV4Input['host'],
+    } as MetricsSampleV5Input['host'],
   }
 }
 
@@ -470,20 +460,20 @@ function parseHost(raw: unknown): ValidateResult<MetricsSampleV4Input['host']> {
 // intentionally don't match the array field names 1:1 (`networks` →
 // `"network"`, `blockDevices` → `"block"`, `ingressSources` → `"ingress"`,
 // `databaseProxies` → `"databaseProxy"`, `hardwareSignals` →
-// `"hardwareSignal"`) — see `metric-descriptors-v4.ts`'s entity-scope naming.
+// `"hardwareSignal"`) — see `metric-descriptors-v5.ts`'s entity-scope naming.
 // ---------------------------------------------------------------------------
 
-type EntitySpecV4 = {
+type EntitySpecV5 = {
   arrayField: string
   idField: string
   /** `null` for entity types with no descriptor entry yet (e.g. `numaNodes`) — falls back to plain finite-sanitize. */
-  scope: MetricEntityScopeV4 | null
+  scope: MetricEntityScopeV5 | null
   stringFields: readonly string[]
   numericFields: readonly string[]
 }
 
 function assignEntityNumericFields(
-  spec: EntitySpecV4,
+  spec: EntitySpecV5,
   raw: Record<string, unknown>,
   label: string,
   out: Record<string, unknown>
@@ -495,14 +485,14 @@ function assignEntityNumericFields(
     }
     const numeric = value as number | null
     out[field] = spec.scope
-      ? sanitizeMetricValueV4(`${spec.scope}.${field}`, numeric)
+      ? sanitizeMetricValueV5(`${spec.scope}.${field}`, numeric)
       : sanitizeFinite(numeric)
   }
   return null
 }
 
 function parseEntityEntry(
-  spec: EntitySpecV4,
+  spec: EntitySpecV5,
   raw: unknown,
   index: number
 ): ValidateResult<Record<string, unknown>> {
@@ -533,7 +523,7 @@ function parseEntityEntry(
   return { ok: true, value: out }
 }
 
-function parseEntityArray<T>(raw: unknown, spec: EntitySpecV4, cap: number): ValidateResult<T[]> {
+function parseEntityArray<T>(raw: unknown, spec: EntitySpecV5, cap: number): ValidateResult<T[]> {
   const arr = parseArray(raw, spec.arrayField, cap)
   if (!arr.ok) return arr
 
@@ -542,13 +532,13 @@ function parseEntityArray<T>(raw: unknown, spec: EntitySpecV4, cap: number): Val
     const entry = parseEntityEntry(spec, arr.value[i], i)
     if (!entry.ok) return entry
     // Every key was checked against `spec`'s exact field lists above, so
-    // this matches the RawInput<…> shape `buildMetricsSampleV4` expects.
+    // this matches the RawInput<…> shape `buildMetricsSampleV5` expects.
     out.push(entry.value as T)
   }
   return { ok: true, value: out }
 }
 
-const NETWORK_SPEC: EntitySpecV4 = {
+const NETWORK_SPEC: EntitySpecV5 = {
   arrayField: 'networks',
   idField: 'deviceId',
   scope: 'network',
@@ -563,7 +553,7 @@ const NETWORK_SPEC: EntitySpecV4 = {
   ],
 }
 
-const FILESYSTEM_SPEC: EntitySpecV4 = {
+const FILESYSTEM_SPEC: EntitySpecV5 = {
   arrayField: 'filesystems',
   idField: 'filesystemId',
   scope: 'filesystem',
@@ -571,7 +561,7 @@ const FILESYSTEM_SPEC: EntitySpecV4 = {
   numericFields: ['availableBytes', 'freeInodes'],
 }
 
-const BLOCK_DEVICE_SPEC: EntitySpecV4 = {
+const BLOCK_DEVICE_SPEC: EntitySpecV5 = {
   arrayField: 'blockDevices',
   idField: 'deviceId',
   scope: 'block',
@@ -589,7 +579,7 @@ const BLOCK_DEVICE_SPEC: EntitySpecV4 = {
   ],
 }
 
-const GPU_SPEC: EntitySpecV4 = {
+const GPU_SPEC: EntitySpecV5 = {
   arrayField: 'gpus',
   idField: 'gpuId',
   scope: 'gpu',
@@ -607,7 +597,7 @@ const GPU_SPEC: EntitySpecV4 = {
   ],
 }
 
-const HARDWARE_SIGNAL_SPEC: EntitySpecV4 = {
+const HARDWARE_SIGNAL_SPEC: EntitySpecV5 = {
   arrayField: 'hardwareSignals',
   idField: 'signalId',
   scope: 'hardwareSignal',
@@ -615,7 +605,7 @@ const HARDWARE_SIGNAL_SPEC: EntitySpecV4 = {
   numericFields: ['value'],
 }
 
-const INGRESS_SPEC: EntitySpecV4 = {
+const INGRESS_SPEC: EntitySpecV5 = {
   arrayField: 'ingressSources',
   idField: 'sourceId',
   scope: 'ingress',
@@ -641,7 +631,7 @@ const INGRESS_SPEC: EntitySpecV4 = {
   ],
 }
 
-const DATABASE_PROXY_SPEC: EntitySpecV4 = {
+const DATABASE_PROXY_SPEC: EntitySpecV5 = {
   arrayField: 'databaseProxies',
   idField: 'sourceId',
   scope: 'databaseProxy',
@@ -656,8 +646,8 @@ const DATABASE_PROXY_SPEC: EntitySpecV4 = {
   ],
 }
 
-/** No descriptor entry exists yet for `numaNodes` — see `EntitySpecV4.scope` doc. */
-const NUMA_NODE_SPEC: EntitySpecV4 = {
+/** No descriptor entry exists yet for `numaNodes` — see `EntitySpecV5.scope` doc. */
+const NUMA_NODE_SPEC: EntitySpecV5 = {
   arrayField: 'numaNodes',
   idField: 'nodeId',
   scope: null,
@@ -670,27 +660,11 @@ const NUMA_NODE_SPEC: EntitySpecV4 = {
   ],
 }
 
-const CPU_HOTSPOT_SPEC: EntitySpecV4 = {
-  arrayField: 'cpuDetail.hotspots',
-  idField: 'coreId',
-  scope: 'cpuHotspot',
-  stringFields: [],
-  numericFields: ['busyPercent', 'iowaitPercent', 'stealPercent'],
-}
-
-const CPU_CORE_LIVE_SPEC: EntitySpecV4 = {
-  arrayField: 'cpuCoreLive',
-  idField: 'coreId',
-  scope: 'cpuCore',
-  stringFields: [],
-  numericFields: ['busyPercent', 'iowaitPercent', 'stealPercent'],
-}
-
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
 
-const METRIC_EVENT_KIND_SET: ReadonlySet<string> = new Set(METRIC_EVENT_KINDS_V4)
+const METRIC_EVENT_KIND_SET: ReadonlySet<string> = new Set(METRIC_EVENT_KINDS_V5)
 const EVENT_SEVERITIES: ReadonlySet<string> = new Set(['info', 'warning', 'critical'])
 const ALLOWED_EVENT_FIELDS: ReadonlySet<string> = new Set([
   'eventId',
@@ -752,7 +726,7 @@ function parseEventPayload(
 }
 
 function assignOptionalEventString(
-  event: MetricEventV4,
+  event: MetricEventV5,
   key: 'entityId' | 'source',
   raw: unknown,
   field: string
@@ -763,7 +737,7 @@ function assignOptionalEventString(
   return null
 }
 
-function parseEvent(raw: unknown, index: number): ValidateResult<MetricEventV4> {
+function parseEvent(raw: unknown, index: number): ValidateResult<MetricEventV5> {
   const label = `events[${index}]`
   if (!isRecord(raw)) return fail(`${label} must be an object`)
   const unknown = rejectUnknownKeys(raw, ALLOWED_EVENT_FIELDS, label)
@@ -778,21 +752,21 @@ function parseEvent(raw: unknown, index: number): ValidateResult<MetricEventV4> 
   const at = parseTimestamp(raw.at, `${label}.at`, { checkSkew: false })
   if (!at.ok) return at
 
-  const kind = readClosedString<MetricEventKindV4>(
+  const kind = readClosedString<MetricEventKindV5>(
     raw.kind,
     METRIC_EVENT_KIND_SET,
     `${label}.kind is not a recognized event kind`
   )
   if (!kind.ok) return kind
 
-  const severity = readClosedString<MetricEventSeverityV4>(
+  const severity = readClosedString<MetricEventSeverityV5>(
     raw.severity,
     EVENT_SEVERITIES,
     `${label}.severity must be "info", "warning", or "critical"`
   )
   if (!severity.ok) return severity
 
-  const event: MetricEventV4 = {
+  const event: MetricEventV5 = {
     eventId: eventId.value,
     at: at.value,
     kind: kind.value,
@@ -811,11 +785,11 @@ function parseEvent(raw: unknown, index: number): ValidateResult<MetricEventV4> 
   return { ok: true, value: event }
 }
 
-function parseEvents(raw: unknown): ValidateResult<MetricEventV4[]> {
-  const arr = parseArray(raw, 'events', MAX_METRIC_EVENTS_PER_SAMPLE_V4)
+function parseEvents(raw: unknown): ValidateResult<MetricEventV5[]> {
+  const arr = parseArray(raw, 'events', MAX_METRIC_EVENTS_PER_SAMPLE_V5)
   if (!arr.ok) return arr
 
-  const events: MetricEventV4[] = []
+  const events: MetricEventV5[] = []
   for (let i = 0; i < arr.value.length; i++) {
     const event = parseEvent(arr.value[i], i)
     if (!event.ok) return event
@@ -829,18 +803,18 @@ function parseEvents(raw: unknown): ValidateResult<MetricEventV4[]> {
 // ---------------------------------------------------------------------------
 
 type RequiredEntityArrays = {
-  networks: MetricsSampleV4Input['networks']
-  filesystems: MetricsSampleV4Input['filesystems']
-  blockDevices: MetricsSampleV4Input['blockDevices']
-  gpus: MetricsSampleV4Input['gpus']
-  hardwareSignals: MetricsSampleV4Input['hardwareSignals']
-  ingressSources: MetricsSampleV4Input['ingressSources']
-  databaseProxies: MetricsSampleV4Input['databaseProxies']
+  networks: MetricsSampleV5Input['networks']
+  filesystems: MetricsSampleV5Input['filesystems']
+  blockDevices: MetricsSampleV5Input['blockDevices']
+  gpus: MetricsSampleV5Input['gpus']
+  hardwareSignals: MetricsSampleV5Input['hardwareSignals']
+  ingressSources: MetricsSampleV5Input['ingressSources']
+  databaseProxies: MetricsSampleV5Input['databaseProxies']
 }
 
 const REQUIRED_ENTITY_SPECS: readonly {
   key: keyof RequiredEntityArrays
-  spec: EntitySpecV4
+  spec: EntitySpecV5
 }[] = [
   { key: 'networks', spec: NETWORK_SPEC },
   { key: 'filesystems', spec: FILESYSTEM_SPEC },
@@ -856,7 +830,7 @@ function parseRequiredEntityArrays(
 ): ValidateResult<RequiredEntityArrays> {
   const out: Record<string, unknown> = {}
   for (const { key, spec } of REQUIRED_ENTITY_SPECS) {
-    const parsed = parseEntityArray(envelope[key], spec, MAX_METRIC_ENTITY_ARRAY_LENGTH_V4)
+    const parsed = parseEntityArray(envelope[key], spec, MAX_METRIC_ENTITY_ARRAY_LENGTH_V5)
     if (!parsed.ok) return parsed
     out[key] = parsed.value
   }
@@ -865,63 +839,46 @@ function parseRequiredEntityArrays(
 
 function parseOptionalEntityArray<T>(
   raw: unknown,
-  spec: EntitySpecV4
+  spec: EntitySpecV5
 ): ValidateResult<T[] | undefined> {
   if (raw === undefined) return { ok: true, value: undefined }
-  return parseEntityArray<T>(raw, spec, MAX_METRIC_ENTITY_ARRAY_LENGTH_V4)
+  return parseEntityArray<T>(raw, spec, MAX_METRIC_ENTITY_ARRAY_LENGTH_V5)
 }
 
 function parseCpuDetail(
   raw: unknown
-): ValidateResult<NonNullable<MetricsSampleV4Input['cpuDetail']>> {
+): ValidateResult<NonNullable<MetricsSampleV5Input['cpuDetail']>> {
   if (!isRecord(raw)) return fail('cpuDetail must be an object')
-  const unknown = rejectUnknownKeys(
-    raw,
-    new Set(['hotspots', ...CPU_DETAIL_NUMERIC_FIELDS]),
-    'cpuDetail'
-  )
+  const unknown = rejectUnknownKeys(raw, new Set(CPU_DETAIL_NUMERIC_FIELDS), 'cpuDetail')
   if (unknown) return unknown
-  const hotspots = parseEntityArray(raw.hotspots, CPU_HOTSPOT_SPEC, 4)
-  if (!hotspots.ok) return hotspots
-  const rawCpuDetailScalars = { ...raw }
-  delete rawCpuDetailScalars.hotspots
-  const scalars = parseFieldGroup(
-    rawCpuDetailScalars,
-    'cpuDetail',
-    'cpuDetail',
-    CPU_DETAIL_NUMERIC_FIELDS
-  )
+  const scalars = parseFieldGroup(raw, 'cpuDetail', 'cpuDetail', CPU_DETAIL_NUMERIC_FIELDS)
   if (!scalars.ok) return scalars
   return {
     ok: true,
-    value: {
-      ...scalars.value,
-      hotspots: hotspots.value,
-    } as NonNullable<MetricsSampleV4Input['cpuDetail']>,
+    value: scalars.value as NonNullable<MetricsSampleV5Input['cpuDetail']>,
   }
 }
 
 type OptionalSampleParts = {
-  cpuDetail?: NonNullable<MetricsSampleV4Input['cpuDetail']>
-  memoryDetail?: NonNullable<MetricsSampleV4Input['memoryDetail']>
-  cpuCoreLive?: NonNullable<MetricsSampleV4Input['cpuCoreLive']>
-  numaNodes?: NonNullable<MetricsSampleV4Input['numaNodes']>
+  cpuDetail?: NonNullable<MetricsSampleV5Input['cpuDetail']>
+  memoryDetail?: NonNullable<MetricsSampleV5Input['memoryDetail']>
+  numaNodes?: NonNullable<MetricsSampleV5Input['numaNodes']>
 }
 
 function parseOptionalSampleParts(
   envelope: Record<string, unknown>
 ): ValidateResult<OptionalSampleParts> {
-  const numaNodes = parseOptionalEntityArray<NumaNodeSampleV4>(envelope.numaNodes, NUMA_NODE_SPEC)
+  const numaNodes = parseOptionalEntityArray<NumaNodeSampleV5>(envelope.numaNodes, NUMA_NODE_SPEC)
   if (!numaNodes.ok) return numaNodes
 
-  let cpuDetail: MetricsSampleV4Input['cpuDetail']
+  let cpuDetail: MetricsSampleV5Input['cpuDetail']
   if (envelope.cpuDetail !== undefined) {
     const parsed = parseCpuDetail(envelope.cpuDetail)
     if (!parsed.ok) return parsed
     cpuDetail = parsed.value
   }
 
-  let memoryDetail: MetricsSampleV4Input['memoryDetail']
+  let memoryDetail: MetricsSampleV5Input['memoryDetail']
   if (envelope.memoryDetail !== undefined) {
     const parsed = parseFieldGroup(
       envelope.memoryDetail,
@@ -930,11 +887,8 @@ function parseOptionalSampleParts(
       MEMORY_DETAIL_NUMERIC_FIELDS
     )
     if (!parsed.ok) return parsed
-    memoryDetail = parsed.value as MetricsSampleV4Input['memoryDetail']
+    memoryDetail = parsed.value as MetricsSampleV5Input['memoryDetail']
   }
-
-  const cpuCoreLive = parseOptionalEntityArray(envelope.cpuCoreLive, CPU_CORE_LIVE_SPEC)
-  if (!cpuCoreLive.ok) return cpuCoreLive
 
   return {
     ok: true,
@@ -942,7 +896,6 @@ function parseOptionalSampleParts(
       numaNodes: numaNodes.value,
       cpuDetail,
       memoryDetail,
-      cpuCoreLive: cpuCoreLive.value as MetricsSampleV4Input['cpuCoreLive'],
     },
   }
 }
@@ -955,19 +908,24 @@ function caughtSampleError(err: unknown): ValidateFail {
 }
 
 /**
- * Validate a raw daemon metrics frame against the v4 wire contract.
+ * Validate a raw daemon metrics frame against the v5 wire contract.
  * `serverId` always comes from `ctx` — never from the client payload.
  */
-export function validateMetricsSampleV4(
+export function validateMetricsSampleV5(
   raw: unknown,
   ctx: {
     serverId: string
     receivedAt: string
     nowMs?: number
-    /** Raw frame UTF-8 byte length; rejects when over `MAX_METRICS_PAYLOAD_BYTES_V4`. */
+    /** Raw frame UTF-8 byte length; rejects when over `MAX_METRICS_PAYLOAD_BYTES_V5`. */
     payloadBytes?: number
   }
-): { ok: true; sample: AuthenticatedMetricsSampleV4 } | { ok: false; reason: string } {
+):
+  | { ok: true; sample: AuthenticatedMetricsSampleV5 }
+  | {
+      ok: false
+      reason: string
+    } {
   const oversized = rejectOversizedPayload(ctx.payloadBytes)
   if (oversized) return oversized
 
@@ -991,9 +949,9 @@ export function validateMetricsSampleV4(
   const optionals = parseOptionalSampleParts(envelope.value)
   if (!optionals.ok) return optionals
 
-  let built: MetricsSampleV4
+  let built: MetricsSampleV5
   try {
-    built = buildMetricsSampleV4({
+    built = buildMetricsSampleV5({
       metadata: metadata.value,
       host: host.value,
       ...entities.value,
