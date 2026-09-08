@@ -1,6 +1,6 @@
 const denoClientStatusSchema = {
   type: 'object',
-  required: ['ok', 'runtime', 'needsInstall', 'isInstallMode', 'isSignupEnabled'],
+  required: ['ok', 'runtime', 'needsInstall', 'isInstallMode', 'isSignupEnabled', 'billingEnabled'],
   description:
     'Public client status on Deno self-hosted. Reflects install wizard and sign-up state.',
   properties: {
@@ -24,12 +24,17 @@ const denoClientStatusSchema = {
       description:
         'Whether public sign-up is enabled. The `IS_SIGNUP_ENABLED` database setting wins unless `TURBOPANEL_IS_SIGNUP_ENABLED` is set to an explicit force-enable (`1`/`true`) or force-disable (`0`/`false`). Defaults to false when both are unset.',
     },
+    billingEnabled: {
+      type: 'boolean',
+      description:
+        'Whether this instance holds a Stripe key. Presence only — the console hides the billing area wholesale when false. Never the key.',
+    },
   },
 } as const
 
 const workersClientStatusSchema = {
   type: 'object',
-  required: ['ok', 'runtime', 'isSignupEnabled'],
+  required: ['ok', 'runtime', 'isSignupEnabled', 'billingEnabled'],
   description:
     'Public client status on Cloudflare Workers. Install fields are omitted — Workers bootstraps via public sign-up.',
   properties: {
@@ -44,6 +49,11 @@ const workersClientStatusSchema = {
       type: 'boolean',
       description:
         'Whether public sign-up is enabled. The `IS_SIGNUP_ENABLED` database setting wins unless `TURBOPANEL_IS_SIGNUP_ENABLED` is set to an explicit force-enable (`1`/`true`) or force-disable (`0`/`false`). Defaults to false when both are unset so production can open sign-up from the panel without a deploy.',
+    },
+    billingEnabled: {
+      type: 'boolean',
+      description:
+        'Whether this instance holds a Stripe key. Presence only — the console hides the billing area wholesale when false. Never the key.',
     },
   },
 } as const

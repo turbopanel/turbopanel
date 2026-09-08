@@ -23,6 +23,7 @@ import {
   runOfflineSweep,
   SELF_HEAL_SWEEP_BUDGET,
   shouldSweepExecutionLogs,
+  shouldSweepTierNotices,
   sweepExpiredCommandDispatchSafely,
   sweepExpiredExecutionLogsSafely,
   sweepExpiredWebhookDeliveriesSafely,
@@ -609,6 +610,21 @@ it("shouldSweepExecutionLogs is true on every 15th UTC minute", () => {
   );
   assertEquals(
     shouldSweepExecutionLogs(Date.parse("2026-01-01T00:01:00.000Z")),
+    false,
+  );
+});
+
+it("shouldSweepTierNotices is true on every UTC hour", () => {
+  assertEquals(
+    shouldSweepTierNotices(Date.parse("2026-01-01T00:00:00.000Z")),
+    true,
+  );
+  assertEquals(
+    shouldSweepTierNotices(Date.parse("2026-01-01T01:00:00.000Z")),
+    true,
+  );
+  assertEquals(
+    shouldSweepTierNotices(Date.parse("2026-01-01T00:15:00.000Z")),
     false,
   );
 });
@@ -1389,4 +1405,114 @@ it("runOfflineSweep logs lease-release-failed and still finishes the tick", asyn
     traces.some((line) => line.includes("event=tick-complete")),
     true,
   );
+});
+
+// ---------------------------------------------------------------------------
+// T12 · the billing phases on the cron tick: skipped wholesale without a key,
+// run in order with one, and what a throwing grace clock does to the rest.
+// ---------------------------------------------------------------------------
+
+import { createMemoryDb, type MemoryDb } from "../../test-fixtures/memory-db.ts";
+import {
+  license,
+  organization,
+  payer,
+  server,
+  setting,
+  subscription,
+  subscriptionItem,
+  tier,
+} from "../../lib/db/schema.ts";
+import { BILLING_RECONCILE_REPORT_KEY } from "../../lib/billing/reconcile.ts";
+
+/** Every scheduled phase fires on the hour: execution logs, tier notices, grace clock, reconcile. */
+const ON_THE_HOUR = Date.parse("2026-01-01T00:00:00.000Z");
+
+const inertSweep = {
+  listConnected: () => Promise.resolve([]),
+  listRecentlyOffline: () => Promise.resolve([]),
+  resolveActiveServerIds: () => Promise.resolve(new Map<string, number>()),
+  onDisconnected: () => Promise.resolve(),
+  onConnected: () => Promise.resolve(),
+};
+
+/** A projection-shaped memory db; `withSubscription: false` leaves that table unregistered so its first read throws. */
+function billingSweepDb(opts: { withSubscription: boolean }): MemoryDb {
+  return createMemoryDb([
+    [setting, []],
+    [organization, []],
+    [server, []],
+    [license, []],
+    [tier, []],
+    [payer, []],
+    ...(opts.withSubscription ? [[subscription, []] as const] : []),
+    [subscriptionItem, []],
+  ]);
+}
+
+async function runTickCapturingTrace(env: CloudflareBindings, db: Db): Promise<string[]> {
+  const traces: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => {
+    traces.push(args.map(String).join(" "));
+  };
+  try {
+    // `scheduledTime` picks the phases; the budget clock is the real one, so
+    // `nowMs` must be live or every phase reads as over budget before it runs.
+    await runOfflineSweep(env, null, {
+      db,
+      scheduledTime: ON_THE_HOUR,
+      nowMs: Date.now(),
+      sweepOnceDeps: inertSweep,
+    });
+  } finally {
+    console.info = originalInfo;
+  }
+  return traces;
+}
+
+const tickComplete = (traces: string[]) => traces.find((line) => line.includes("event=tick-complete")) ?? "";
+const reconcileReport = (db: MemoryDb) => db.rows(setting).find((row) => row.key === BILLING_RECONCILE_REPORT_KEY) ?? null;
+
+it("T12 · with no Stripe key neither billing phase runs: no projection read, no reconcile report, nothing marked skipped", async () => {
+  const db = billingSweepDb({ withSubscription: false });
+  const traces = await runTickCapturingTrace(inertEnv(), db);
+  // The grace clock would have read `subscription` (unregistered here, so it
+  // would have thrown) and reconcile would have listed payers.
+  assertEquals(db.ops.includes("select:subscription"), false);
+  assertEquals(db.ops.includes("select:payer"), false);
+  assertEquals(reconcileReport(db), null);
+  assertEquals(tickComplete(traces).includes("phasesSkipped=[]"), true);
+});
+
+it("T12 · with a key both billing phases run on their tick: the grace clock scans subscriptions, reconcile lists payers and writes its report", async () => {
+  const db = billingSweepDb({ withSubscription: true });
+  const env = { TURBOPANEL_STRIPE_SECRET_KEY: "sk_test_x" } as unknown as CloudflareBindings;
+  const traces = await runTickCapturingTrace(env, db);
+  assertEquals(db.ops.includes("select:subscription"), true);
+  assertEquals(db.ops.includes("select:payer"), true);
+  assertEquals(reconcileReport(db) !== null, true);
+  assertEquals(tickComplete(traces).includes("phasesSkipped=[]"), true);
+});
+
+it("T12 · finding: a throwing grace clock is NOT isolated — reconcile and the queued sweeps after it are skipped on that tick", async () => {
+  // `subscription` is unregistered, so the grace clock's first read throws.
+  const db = billingSweepDb({ withSubscription: false });
+  const env = { TURBOPANEL_STRIPE_SECRET_KEY: "sk_test_x" } as unknown as CloudflareBindings;
+  const traces = await runTickCapturingTrace(env, db);
+  assertEquals(
+    traces.some((line) => line.includes("event=budget-exhausted") && line.includes("phase=billing-grace-clock")),
+    true,
+  );
+  // The code comment promises each billing phase is isolated; the optional
+  // phase runner aborts the chain instead, exactly as it does for the other
+  // optional phases. Reconcile is Postgres-only and did not need Stripe.
+  const done = tickComplete(traces);
+  for (const phase of ["billing-grace-clock", "billing-reconcile", "reconcile"]) {
+    assertEquals(done.includes(phase), true, phase);
+  }
+  assertEquals(db.ops.includes("select:payer"), false);
+  assertEquals(reconcileReport(db), null);
+  // The tick lease is still released.
+  assertEquals((await tryBeginOfflineSweep(db)) !== null, true);
 });

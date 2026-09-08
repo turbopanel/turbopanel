@@ -7,6 +7,7 @@ import {
   getLatestTopologyGeneration,
   getLatestTopologyGenerations,
   getTopologyGeneration,
+  layoutPathsFromSnapshot,
   recordTopologyGeneration,
 } from './server-topology-records.ts'
 
@@ -58,6 +59,26 @@ async function withServerFixture(
     await db.delete(organization).where(eq(organization.id, organizationId))
   }
 }
+
+test('layoutPathsFromSnapshot reads a v6 snapshot and answers null for older or malformed ones', () => {
+  assertEquals(
+    layoutPathsFromSnapshot({
+      generation: 3,
+      paths: { backup: '/mnt/nas/backups', logs: '/var/log/turbopanel' },
+    }),
+    { backup: '/mnt/nas/backups', logs: '/var/log/turbopanel' }
+  )
+  // Pre-v6 daemon: no `paths` at all.
+  assertEquals(layoutPathsFromSnapshot({ generation: 3, hardwareSignals: [] }), null)
+  // Half a record is no record.
+  assertEquals(layoutPathsFromSnapshot({ paths: { backup: '/backup' } }), null)
+  assertEquals(
+    layoutPathsFromSnapshot({ paths: { backup: '', logs: '/var/log/turbopanel' } }),
+    null
+  )
+  assertEquals(layoutPathsFromSnapshot(null), null)
+  assertEquals(layoutPathsFromSnapshot([]), null)
+})
 
 test('getLatestTopologyGeneration returns the highest recorded generation', async () => {
   await withServerFixture(async ({ db, serverId }) => {

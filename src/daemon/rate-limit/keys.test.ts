@@ -7,6 +7,7 @@ import {
   daemonRestRateLimitKey,
   githubWebhookRateLimitKey,
   gitlabWebhookRateLimitKey,
+  stripeWebhookRateLimitKey,
 } from './keys.ts'
 import {
   createFailClosedRateLimiter,
@@ -67,6 +68,18 @@ test('daemon rate-limit keys are stable and id-scoped', () => {
     'git:webhook:gitlab:203.0.113.11',
   )
   assertEquals(gitlabWebhookRateLimitKey(''), 'git:webhook:gitlab:unknown')
+})
+
+test('the Stripe webhook key is a billing traffic class with its own bucket', () => {
+  // `billing:` rather than `git:` — the git keys are pinned above and by live
+  // counters, so a non-git kind gets a new prefix instead of a rename.
+  assertEquals(
+    stripeWebhookRateLimitKey('203.0.113.12'),
+    'billing:webhook:stripe:203.0.113.12',
+  )
+  assertEquals(stripeWebhookRateLimitKey(' 203.0.113.12 '), 'billing:webhook:stripe:203.0.113.12')
+  assertEquals(stripeWebhookRateLimitKey(''), 'billing:webhook:stripe:unknown')
+  assertEquals(stripeWebhookRateLimitKey('   '), 'billing:webhook:stripe:unknown')
 })
 
 test('noop limiter always allows and fail-closed always denies', async () => {

@@ -32,6 +32,7 @@ import {
   generateDeliveryId,
   generateRequestId,
 } from './cell/protocol.ts'
+import { PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN } from './metrics/capability-plan.ts'
 
 const INBOUND_PROJECTION_COALESCE_MS = 60_000
 
@@ -170,7 +171,8 @@ function unwrapMetadataSqlPatch(value: unknown): Record<string, unknown> | null 
  */
 function createProjectionRecordingDb(
   statusOverrides: Partial<ServerDaemonStatus> = {},
-  initialMetadata?: Record<string, unknown>
+  initialMetadata?: Record<string, unknown>,
+  capabilityPlanRows: unknown[] = []
 ): {
   db: Db
   updateCalls: Array<Record<string, unknown>>
@@ -214,7 +216,12 @@ function createProjectionRecordingDb(
   const db = {
     select: () => ({
       from: () => ({
-        where: () => ({ limit: selectLimit }),
+        where: () => ({
+          limit: selectLimit,
+          orderBy: () => ({
+            limit: () => Promise.resolve(capabilityPlanRows),
+          }),
+        }),
         // Presence-ack cache warm (server ⋈ organization) — do not count
         // toward getSelectCallCount(); that tracks daemon-status reads.
         innerJoin: () => ({
@@ -831,6 +838,34 @@ describe('DaemonCellObject', () => {
       const status = statusFromPatch(connectedPatch)
       expect(typeof status?.statusChangedAt).toEqual(expect.any(String))
     })
+
+    ws.close(1000, 'test done')
+  })
+
+  it('replays the latest recorded capability plan to a hosted daemon on reconnect', async () => {
+    const serverId = 'test-srv-capability-plan-replay'
+    const { db } = createProjectionRecordingDb({ connected: false }, undefined, [
+      {
+        generation: 4,
+        planHash: 'hash',
+        plan: PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
+        appliedAt: '2026-01-01T00:00:00.000Z',
+        serverId,
+      },
+    ])
+    setDaemonCellProjectionDbFactoryForTests(() => db)
+
+    const stub = env.DAEMON_CELL.getByName(serverId)
+    const { ws } = await openDaemonWebSocket(stub, serverId)
+    const raw = await waitForWebSocketMessage(ws)
+    const msg = JSON.parse(raw) as {
+      type: string
+      generation?: number
+      plan?: typeof PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN
+    }
+    expect(msg.type).toBe('capability-plan-update')
+    expect(msg.generation).toBe(4)
+    expect(msg.plan).toEqual(PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN)
 
     ws.close(1000, 'test done')
   })

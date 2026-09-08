@@ -86,7 +86,12 @@ test("deriveInboundOutcome maps fabric-paths-result done and failed", () => {
 });
 
 test("deriveInboundOutcome maps repo-read-result done and failed", () => {
-  const files = [{ path: "package.json", found: true, content: "{}", bytes: 2 }];
+  const files = [{
+    path: "package.json",
+    found: true,
+    content: "{}",
+    bytes: 2,
+  }];
   const entries = [{ path: ".", kind: "dir" }];
   assertEquals(
     deriveInboundOutcome({
@@ -174,6 +179,7 @@ test("deriveInboundOutcome maps ok-result kinds", () => {
       "dev-sync-result",
       "tunnel-token-result",
       "update-result",
+      "capability-plan-update-result",
     ] as const
   ) {
     assertEquals(

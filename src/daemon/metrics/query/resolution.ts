@@ -1,4 +1,4 @@
-import { AE_DEFAULT_MAX_RANGE_SECONDS } from '../backends/cloudflare/sql-api-v5.ts'
+import { AE_DEFAULT_MAX_RANGE_SECONDS } from '../backends/cloudflare/sql-api.ts'
 import { bucketFloor } from './buckets.ts'
 
 export { bucketFloor } from './buckets.ts'

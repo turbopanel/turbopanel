@@ -2,7 +2,7 @@ import { and, eq } from 'drizzle-orm'
 import { assertEquals } from '@std/assert'
 import { getDatabaseUrl } from '../../db-url.ts'
 import { createDenoDb } from '../../db.ts'
-import { license, organization } from '../../lib/db/schema.ts'
+import { license, organization, server } from '../../lib/db/schema.ts'
 import {
   createEmptyMockAuthState,
   createMockAuthDb,
@@ -106,6 +106,109 @@ test('revokeLicense is idempotent and invalidateLicense returns server ids', asy
     assertEquals(listed.some((row) => row.id === created.licenseId), false)
   } finally {
     await db.delete(license).where(and(eq(license.organizationId, organizationId)))
+    await db.delete(organization).where(eq(organization.id, organizationId))
+  }
+})
+
+test('invalidateLicense refuses while a live server is attached', async () => {
+  if (!dbUrl) {
+    console.warn('Skipping license attach test: TURBOPANEL_DATABASE_URL not set')
+    return
+  }
+
+  const db = createDenoDb()
+  const [org] = await db
+    .insert(organization)
+    .values({ name: 'License Attach Org' })
+    .returning({ id: organization.id })
+  const organizationId = org!.id
+  const now = new Date().toISOString()
+  const [bound] = await db
+    .insert(server)
+    .values({
+      createdAt: now,
+      updatedAt: now,
+      organizationId,
+      name: 'Attached host',
+    })
+    .returning({ id: server.id, name: server.name })
+  const serverId = bound!.id
+
+  try {
+    const created = await createLicense(db, { organizationId, name: 'Attached seat' })
+    await db
+      .update(license)
+      .set({ serverId, updatedAt: now })
+      .where(eq(license.id, created.licenseId))
+
+    const refused = await invalidateLicense(db, created.licenseId, organizationId)
+    assertEquals(refused.ok, false)
+    if (!refused.ok) {
+      assertEquals(refused.reason, 'attached')
+      if (refused.reason === 'attached') {
+        assertEquals(refused.boundServer.id, serverId)
+        assertEquals(refused.boundServer.name, 'Attached host')
+      }
+    }
+
+    const forced = await invalidateLicense(
+      db,
+      created.licenseId,
+      organizationId,
+      { force: true },
+    )
+    assertEquals(forced.ok, true)
+    if (forced.ok) {
+      assertEquals(forced.serverIds, [serverId])
+    }
+    assertEquals(await lookupActiveLicense(db, created.licenseId), null)
+  } finally {
+    await db.delete(license).where(eq(license.organizationId, organizationId))
+    await db.delete(server).where(eq(server.id, serverId))
+    await db.delete(organization).where(eq(organization.id, organizationId))
+  }
+})
+
+test('invalidateLicense does not treat a revoked attached row as occupied', async () => {
+  if (!dbUrl) {
+    console.warn('Skipping license revoked-attach test: TURBOPANEL_DATABASE_URL not set')
+    return
+  }
+
+  const db = createDenoDb()
+  const [org] = await db
+    .insert(organization)
+    .values({ name: 'License Revoked Attach Org' })
+    .returning({ id: organization.id })
+  const organizationId = org!.id
+  const now = new Date().toISOString()
+  const [bound] = await db
+    .insert(server)
+    .values({
+      createdAt: now,
+      updatedAt: now,
+      organizationId,
+      name: 'Stale host',
+    })
+    .returning({ id: server.id })
+  const serverId = bound!.id
+
+  try {
+    const created = await createLicense(db, { organizationId })
+    await db
+      .update(license)
+      .set({ serverId, updatedAt: now })
+      .where(eq(license.id, created.licenseId))
+    assertEquals(await revokeLicense(db, created.licenseId, organizationId), true)
+
+    const result = await invalidateLicense(db, created.licenseId, organizationId)
+    assertEquals(result.ok, false)
+    if (!result.ok) {
+      assertEquals(result.reason, 'not_found')
+    }
+  } finally {
+    await db.delete(license).where(eq(license.organizationId, organizationId))
+    await db.delete(server).where(eq(server.id, serverId))
     await db.delete(organization).where(eq(organization.id, organizationId))
   }
 })

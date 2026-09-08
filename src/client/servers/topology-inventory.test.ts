@@ -1,7 +1,11 @@
 import { assertEquals } from '@std/assert'
 import { computeSlotMapping } from './topology-slot-mapping.ts'
 import { EMPTY_TOPOLOGY_OVERRIDES, type TopologySnapshot } from './topology-types.ts'
-import { buildTopologyInventoryV5, rootFilesystemTotalBytesV5 } from './topology-inventory.ts'
+import {
+  buildTopologyInventory,
+  hardwareSignalChip,
+  rootFilesystemTotalBytes,
+} from './topology-inventory.ts'
 
 const test = Deno.test.bind(Deno)
 
@@ -85,13 +89,13 @@ function snapshot(overrides: Partial<TopologySnapshot> = {}): TopologySnapshot {
   }
 }
 
-test('buildTopologyInventoryV5: network role/slot reflects SlotMapping (nic slot n / fabric / other)', () => {
+test('buildTopologyInventory: network role/slot reflects SlotMapping (nic slot n / fabric / other)', () => {
   const snap = snapshot()
   const slotMapping = computeSlotMapping(snap, {
     ...EMPTY_TOPOLOGY_OVERRIDES,
     nicSlotDeviceIds: ['mac:b', 'mac:a'],
   })
-  const inventory = buildTopologyInventoryV5(snap, slotMapping)
+  const inventory = buildTopologyInventory(snap, slotMapping)
 
   const byId = new Map(inventory.networks.map((n) => [n.deviceId, n]))
   assertEquals(byId.get('mac:b')?.role, 'nic')
@@ -105,13 +109,13 @@ test('buildTopologyInventoryV5: network role/slot reflects SlotMapping (nic slot
   assertEquals(byId.get('mac:b')?.speedMbps, undefined)
 })
 
-test('buildTopologyInventoryV5: auto selection marks only the default-route uplink as a nic, and mirrors the defaultRoute flag', () => {
+test('buildTopologyInventory: auto selection marks only the default-route uplink as a nic, and mirrors the defaultRoute flag', () => {
   const snap = snapshot()
   snap.networks = snap.networks.map((device) =>
     device.deviceId === 'mac:c' ? { ...device, defaultRoute: true } : device
   )
   const slotMapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
-  const inventory = buildTopologyInventoryV5(snap, slotMapping)
+  const inventory = buildTopologyInventory(snap, slotMapping)
   const byId = new Map(inventory.networks.map((n) => [n.deviceId, n]))
   assertEquals(byId.get('mac:c')?.role, 'nic')
   assertEquals(byId.get('mac:c')?.slot, 1)
@@ -121,20 +125,20 @@ test('buildTopologyInventoryV5: auto selection marks only the default-route upli
   assertEquals(byId.get('mac:b')?.role, 'other')
 })
 
-test('buildTopologyInventoryV5: filesystem isRoot matches SlotMapping.rootFilesystemId', () => {
+test('buildTopologyInventory: filesystem isRoot matches SlotMapping.rootFilesystemId', () => {
   const snap = snapshot()
   const slotMapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
-  const inventory = buildTopologyInventoryV5(snap, slotMapping)
+  const inventory = buildTopologyInventory(snap, slotMapping)
 
   const byId = new Map(inventory.filesystems.map((fs) => [fs.filesystemId, fs]))
   assertEquals(byId.get('fs:root')?.isRoot, true)
   assertEquals(byId.get('fs:hosting')?.isRoot, false)
 })
 
-test('buildTopologyInventoryV5: carries block/gpu/hardwareSignal identity + labels through', () => {
+test('buildTopologyInventory: carries block/gpu/hardwareSignal identity + labels through', () => {
   const snap = snapshot()
   const slotMapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
-  const inventory = buildTopologyInventoryV5(snap, slotMapping)
+  const inventory = buildTopologyInventory(snap, slotMapping)
 
   assertEquals(inventory.blockDevices, [
     {
@@ -164,13 +168,13 @@ test('buildTopologyInventoryV5: carries block/gpu/hardwareSignal identity + labe
   ])
 })
 
-test('rootFilesystemTotalBytesV5: resolves the root filesystem totalBytes', () => {
+test('rootFilesystemTotalBytes: resolves the root filesystem totalBytes', () => {
   const snap = snapshot()
   const slotMapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
-  assertEquals(rootFilesystemTotalBytesV5(snap, slotMapping), 1000)
+  assertEquals(rootFilesystemTotalBytes(snap, slotMapping), 1000)
 })
 
-test('rootFilesystemTotalBytesV5: null when no filesystem is marked root', () => {
+test('rootFilesystemTotalBytes: null when no filesystem is marked root', () => {
   const snap = snapshot({
     filesystems: [
       {
@@ -185,5 +189,17 @@ test('rootFilesystemTotalBytesV5: null when no filesystem is marked root', () =>
     ],
   })
   const slotMapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
-  assertEquals(rootFilesystemTotalBytesV5(snap, slotMapping), null)
+  assertEquals(rootFilesystemTotalBytes(snap, slotMapping), null)
+})
+
+test('hardwareSignalChip: an hwmon-backed id yields its chip, an entity-joined id yields none', () => {
+  assertEquals(hardwareSignalChip('signal:nvme0n1:Composite'), 'nvme0n1')
+  assertEquals(hardwareSignalChip('signal:coretemp:Package id 0'), 'coretemp')
+  // Entity-joined ids carry no hwmon chip, and their opaque entity-id segment
+  // contains colons of its own — splitting one would yield the literal
+  // 'gpu'/'block' as a chip name, which no host has.
+  assertEquals(hardwareSignalChip('signal:gpu:pci:0000:01:00.0:temperature'), '')
+  assertEquals(hardwareSignalChip('signal:block:blk:nvme0n1:temperature'), '')
+  assertEquals(hardwareSignalChip('signal:cpu:hottest-core'), 'cpu')
+  assertEquals(hardwareSignalChip('not-a-signal-id'), '')
 })

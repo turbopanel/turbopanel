@@ -16,6 +16,19 @@ export type EmailJob =
       otp: string
       otpType: OtpType
     }
+  | {
+      type: 'server-tier-notice'
+      to: string
+      from: string
+      kind: 'exceeds' | 'overprovisioned'
+      serverName: string
+      organizationName: string
+      licenseTierLabel: string
+      requiredTierLabel: string
+      recommendedTierLabel: string
+      unwatched: { nics: string[]; drives: string[]; gpus: string[] }
+      consoleUrl: string
+    }
 
 export interface EmailQueue {
   enqueue(job: EmailJob): Promise<void>

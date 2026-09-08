@@ -8,9 +8,9 @@
  * it). Recent rows live in the hot DuckDB tables; completed UTC days are
  * sealed per family into immutable Parquet partitions (`parquet.ts`).
  *
- * Implements the full v5 contract (`ServerMetricsStoreV5`): ingest write
+ * Implements the full v5 contract (`ServerMetricsStore`): ingest write
  * path, `queryHostSeries`/`queryHostSummary`/`queryFleetHostSnapshot` over
- * any `host.*`/`cpuDetail.*`/`memoryDetail.*` canonical metric name, and
+ * any `host.*`/`diagnostics.*` canonical metric name, and
  * `queryStatusHistory`.
  *
  * Fail clearly when configured-but-unavailable: DuckDB/filesystem failures
@@ -19,47 +19,48 @@
  */
 
 import {
-  HOST_METRICS_METRIC_DESCRIPTORS_V5,
-  type HostMetricsMetricDescriptorV5,
-  type MetricEntityScopeV5,
-} from '../../metric-descriptors-v5.ts'
-import type { MetricEventKindV5, MetricEventSeverityV5, MetricEventV5 } from '../../contract-v5.ts'
+  DIAGNOSTICS_CPU_FIELD_NAMES,
+  HOST_METRICS_METRIC_DESCRIPTORS,
+  type HostMetricsMetricDescriptor,
+  type MetricEntityScope,
+} from '../../metric-descriptors.ts'
+import type { MetricEventKind, MetricEventSeverity, MetricEvent } from '../../contract.ts'
 import {
   AE_DEFAULT_MAX_RANGE_SECONDS,
   MAX_STATUS_EVENTS,
   resolveTruncatedStatusEvents,
-} from '../cloudflare/sql-api-v5.ts'
+} from '../cloudflare/sql-api.ts'
 import {
   computeSeriesGapCount,
   defaultExpectedSamplesPerBucket,
-  finalizeHostSeriesResultV5,
-} from '../../query/series-response-v5.ts'
+  finalizeHostSeriesResult,
+} from '../../query/series-response.ts'
 import { computeStatusUptime } from '../../query/uptime.ts'
 import type {
-  AuthenticatedMetricsSampleV5,
-  EntityIdsSeenQueryV5,
-  EntityIdsSeenResultV5,
-  EntitySeriesEntityResultV5,
-  EntitySeriesPointV5,
-  EntitySeriesQueryV5,
-  EntitySeriesResultV5,
-  FleetHostSnapshotQueryV5,
-  FleetHostSnapshotResultV5,
-  FleetHostSnapshotServerV5,
-  HostSeriesPointV5,
-  HostSeriesQueryV5,
-  HostSeriesResultV5,
-  HostSummaryQueryV5,
-  HostSummaryResultV5,
-  MetricEventsQueryV5,
-  MetricEventsResultV5,
-  PerEntityHostedFamilyV5,
-  ServerMetricsStoreV5,
+  AuthenticatedMetricsSample,
+  EntityIdsSeenQuery,
+  EntityIdsSeenResult,
+  EntitySeriesEntityResult,
+  EntitySeriesPoint,
+  EntitySeriesQuery,
+  EntitySeriesResult,
+  FleetHostSnapshotQuery,
+  FleetHostSnapshotResult,
+  FleetHostSnapshotServer,
+  HostSeriesPoint,
+  HostSeriesQuery,
+  HostSeriesResult,
+  HostSummaryQuery,
+  HostSummaryResult,
+  MetricEventsQuery,
+  MetricEventsResult,
+  PerEntityHostedFamily,
+  ServerMetricsStore,
   ServerStatusEvent,
   SlotMapping,
   StatusHistoryQuery,
   StatusHistoryResult,
-} from '../../types-v5.ts'
+} from '../../types.ts'
 import {
   type DuckDbBindValue,
   type DuckDbConnectionLike,
@@ -87,7 +88,7 @@ import {
   BLOCK_METRIC_FIELDS,
   BLOCK_SAMPLES_TABLE,
   blockSamplesInsertColumns,
-  cpuDetailHostColumnName,
+  cpuDiagnosticsHostColumnName,
   DATABASE_PROXY_METRIC_FIELDS,
   DATABASE_PROXY_SAMPLES_TABLE,
   databaseProxySamplesInsertColumns,
@@ -100,25 +101,37 @@ import {
   gpuSamplesInsertColumns,
   HARDWARE_SIGNAL_SAMPLES_TABLE,
   hardwareSignalSamplesInsertColumns,
-  HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST,
+  HOST_GLOBAL_CPU_DIAGNOSTICS_FIELDS_LIST,
   HOST_METRIC_FIELD_REFS,
   HOST_SAMPLES_TABLE,
   hostMetricColumnName,
-  type HostMetricGroupV5,
+  type HostMetricGroup,
   hostSamplesInsertColumns,
   INGRESS_METRIC_FIELDS,
   INGRESS_SAMPLES_TABLE,
   ingressSamplesInsertColumns,
-  MEMORY_DETAIL_METRIC_FIELDS,
-  MEMORY_DETAIL_SAMPLES_TABLE,
-  memoryDetailSamplesInsertColumns,
+  MEMORY_DIAGNOSTICS_METRIC_FIELDS,
+  MEMORY_DIAGNOSTICS_SAMPLES_TABLE,
+  memoryDiagnosticsSamplesInsertColumns,
   METRIC_EVENTS_TABLE,
   metricEventsInsertColumns,
   NETWORK_METRIC_FIELDS,
   NETWORK_SAMPLES_TABLE,
   networkSamplesInsertColumns,
+  DOCKER_SAMPLES_TABLE,
+  dockerSamplesInsertColumns,
+  DOCKER_USAGE_METRIC_FIELDS,
+  ROUTER_METRIC_FIELDS,
+  ROUTER_SAMPLES_TABLE,
+  routerSamplesInsertColumns,
   STATUS_EVENTS_TABLE,
+  STORAGE_FILESYSTEM_ID_COLUMNS,
+  STORAGE_ROW_VALUE_PLAN,
+  STORAGE_SAMPLES_TABLE,
+  storageSamplesInsertColumns,
+  storageSamplesMetricColumnNames,
 } from './schema.ts'
+import { STORAGE_ENGINE_FIELD_NAMES, STORAGE_ENGINE_KEYS } from '../../contract.ts'
 
 /** Flush when this many pending rows accumulate (small co-located fleet). */
 export const DUCKDB_WRITE_BATCH_MAX_ROWS = 10
@@ -178,16 +191,19 @@ type PendingRowTable =
   | 'filesystem'
   | 'block'
   | 'gpu'
-  | 'memoryDetail'
+  | 'memoryDiagnostics'
   | 'hardwareSignal'
   | 'ingress'
   | 'databaseProxy'
+  | 'router'
+  | 'storage'
+  | 'docker'
   | 'event'
   | 'status'
 
 type PendingRow = { table: PendingRowTable; values: DuckDbBindValue[] }
 
-export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
+export class DuckDbParquetServerMetricsStore implements ServerMetricsStore {
   readonly #paths: DuckDbPaths
   readonly #threads: number | undefined
   readonly #memoryLimitMb: number | undefined
@@ -267,20 +283,21 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
   /**
    * Fire-and-forget insert (batched). Fans one sample into a `host` row, one
    * row per entity in `networks`/`filesystems`/`blockDevices`/`gpus`/
-   * `hardwareSignals`/`ingressSources`/`databaseProxies`, and one row per
-   * `events` entry — all enqueued together so `#flushPending` commits the
+   * `hardwareSignals`/`ingressSources`/`databaseProxies`, one singleton row
+   * each for the presence-gated `diagnostics` memory half, `router`,
+   * `storage` and `dockerUsage`, and
+   * one row per `events` entry — all enqueued together so `#flushPending` commits the
    * entire fan-out for one sample in a single transaction (never split
    * across two batches). `slotMapping` is accepted to satisfy
-   * `ServerMetricsStoreV5` but not consulted: DuckDB has no page/slot
+   * `ServerMetricsStore` but not consulted: DuckDB has no page/slot
    * concept to resolve identity against.
    */
-  writeSample(input: AuthenticatedMetricsSampleV5, _slotMapping?: SlotMapping): Promise<void> {
+  writeSample(input: AuthenticatedMetricsSample, _slotMapping?: SlotMapping): Promise<void> {
     const common: DuckDbBindValue[] = [
       input.serverId,
       toDuckDbTimestamp(input.metadata.sampledAt),
       toDuckDbTimestamp(input.receivedAt),
       Math.round(input.metadata.intervalSeconds),
-      input.metadata.collectionMode,
       input.metadata.sequence,
       input.metadata.topologyGeneration,
       input.metadata.bootGeneration,
@@ -292,18 +309,21 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
       values: [
         ...common,
         ...HOST_METRIC_FIELD_REFS.map((ref) => numericField(input.host[ref.group], ref.field)),
-        ...HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST.map((field) =>
-          input.cpuDetail ? numericField(input.cpuDetail, field) : null
+        ...HOST_GLOBAL_CPU_DIAGNOSTICS_FIELDS_LIST.map((field) =>
+          input.diagnostics ? numericField(input.diagnostics.cpu, field) : null
         ),
       ],
     })
 
-    if (input.memoryDetail) {
+    if (input.diagnostics) {
+      const diagnosticsMemory = input.diagnostics.memory
       rows.push({
-        table: 'memoryDetail',
+        table: 'memoryDiagnostics',
         values: [
           ...common,
-          ...MEMORY_DETAIL_METRIC_FIELDS.map((field) => numericField(input.memoryDetail, field)),
+          ...MEMORY_DIAGNOSTICS_METRIC_FIELDS.map((field) =>
+            numericField(diagnosticsMemory, field)
+          ),
         ],
       })
     }
@@ -379,6 +399,61 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
           proxy.sourceId,
           proxy.sourceKind,
           ...DATABASE_PROXY_METRIC_FIELDS.map((field) => numericField(proxy, field)),
+        ],
+      })
+    }
+
+    if (input.router) {
+      const router = input.router
+      rows.push({
+        table: 'router',
+        values: [
+          ...common,
+          ...ROUTER_METRIC_FIELDS.map((field) => numericField(router, field)),
+        ],
+      })
+    }
+
+    if (input.storage) {
+      const storage = input.storage
+      const dockerUsage = input.dockerUsage
+      rows.push({
+        table: 'storage',
+        values: [
+          ...common,
+          ...STORAGE_ROW_VALUE_PLAN.leadingFlatFields.map((field) =>
+            numericField(storage, field)
+          ),
+          // Real SQL NULLs when the Docker breakdown was absent or gated off
+          // — "not reported", never zero bytes.
+          ...DOCKER_USAGE_METRIC_FIELDS.map((field) =>
+            dockerUsage ? numericField(dockerUsage, field) : null
+          ),
+          ...STORAGE_ROW_VALUE_PLAN.trailingFlatFields.map((field) =>
+            numericField(storage, field)
+          ),
+          ...STORAGE_ENGINE_KEYS.flatMap((engine) =>
+            STORAGE_ENGINE_FIELD_NAMES.map((field) =>
+              numericField(storage[engine], field)
+            )
+          ),
+          // Topology filesystem ids: nothing on the wire carries them yet —
+          // see `STORAGE_FILESYSTEM_ID_COLUMNS` in `schema.ts`.
+          null,
+          null,
+          null,
+          null,
+        ],
+      })
+    }
+
+    if (input.dockerUsage) {
+      const dockerUsage = input.dockerUsage
+      rows.push({
+        table: 'docker',
+        values: [
+          ...common,
+          ...DOCKER_USAGE_METRIC_FIELDS.map((field) => numericField(dockerUsage, field)),
         ],
       })
     }
@@ -498,22 +573,28 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
   }
 
   /**
-   * Real per-descriptor aggregation (`HOST_METRICS_METRIC_DESCRIPTORS_V5`)
-   * over any `host.*` canonical metric name. Also accepts `cpuDetail.*`/
-   * `memoryDetail.*` canonical names (host-singleton scalars, same as
-   * `host.*`): `cpuDetail` fields live on the host row itself (`cpu_detail_*`
-   * columns), so they need no join; `memoryDetail` fields live in their own
-   * singleton table (`server_memory_detail_samples`), left-joined on
+   * Real per-descriptor aggregation (`HOST_METRICS_METRIC_DESCRIPTORS`)
+   * over any `host.*` canonical metric name. Also accepts `diagnostics.*`
+   * and `router.*` / `storage.*` / `dockerUsage.*` canonical names
+   * (host-singleton scalars, same as `host.*`) — each reads its own singleton
+   * table (`server_router_samples` / `server_storage_samples` /
+   * `server_docker_samples`) through an additional `(server_id, sampled_at)`
+   * left join, exactly like the memory-diagnostics half, and resolves to a
+   * real SQL `NULL` for any sample where that family did not report. The merged
+   * v6 diagnostics family is split across two tables by which half a field
+   * belongs to, so routing is by field membership rather than by scope: its 7
+   * CPU fields live on the host row itself (`cpu_diagnostics_*` columns) and
+   * need no join, while its 12 memory fields live in the singleton
+   * `server_memory_diagnostics_samples` table, left-joined on
    * `(server_id, sampled_at)` — every sample writes its host and
-   * memoryDetail rows with the identical pair, so the join is exact, never
-   * fan-out. v5 has no per-core rehydration: `cpuDetail`'s 7 scalar fields
-   * are host-global columns on `server_host_samples`, and the busiest-core
-   * hotspot family they used to accompany no longer exists.
+   * memory-diagnostics rows with the identical pair, so the join is exact,
+   * never fan-out. v6 has no per-core rehydration: the busiest-core hotspot
+   * family the CPU scalars used to accompany no longer exists.
    */
-  async queryHostSeries(input: HostSeriesQueryV5): Promise<HostSeriesResultV5> {
+  async queryHostSeries(input: HostSeriesQuery): Promise<HostSeriesResult> {
     await this.flushWrites()
     const serverId = assertSafeServerId(input.serverId)
-    const metrics = assertHostMetricsV5(input.metrics, HOST_SERIES_EXTRA_SCOPES_V5)
+    const metrics = assertHostMetrics(input.metrics, HOST_SERIES_EXTRA_SCOPES)
     const from = assertIsoTimestamp('from', input.from)
     const to = assertIsoTimestamp('to', input.to)
     assertRange(from, to)
@@ -526,26 +607,61 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
     const fromMs = from.getTime()
     const toMs = to.getTime()
     const hostSource = await this.#familySamplesSource(parquetFamily('host'), fromMs, toMs)
-    const requiresMemoryDetail = requiresEntityScopeV5(metrics, 'memoryDetail')
-    const requiresCpuDetail = requiresEntityScopeV5(metrics, 'cpuDetail')
+    const requiresMemoryDiagnostics = metrics.some(isMemoryDiagnosticsMetric)
+    const requiresCpuDiagnostics = metrics.some(isCpuDiagnosticsMetric)
+    const requiresRouter = metrics.some(isRouterMetric)
+    const requiresStorage = metrics.some(isStorageMetric)
+    const requiresDockerUsage = metrics.some(isDockerUsageMetric)
 
-    let joinSql = ''
-    if (requiresMemoryDetail) {
-      const memoryDetailSource = await this.#familySamplesSource(
-        parquetFamily('memory-detail'),
+    const joins: string[] = []
+    if (requiresMemoryDiagnostics) {
+      const memoryDiagnosticsSource = await this.#familySamplesSource(
+        parquetFamily('memory-diagnostics'),
         fromMs,
         toMs
       )
-      joinSql = `LEFT JOIN ${memoryDetailSource} AS md ON md.server_id = h.server_id AND md.sampled_at = h.sampled_at`
+      joins.push(
+        `LEFT JOIN ${memoryDiagnosticsSource} AS md ON md.server_id = h.server_id AND md.sampled_at = h.sampled_at`
+      )
+    }
+    if (requiresRouter) {
+      const routerSource = await this.#familySamplesSource(
+        parquetFamily('router'),
+        fromMs,
+        toMs
+      )
+      joins.push(
+        `LEFT JOIN ${routerSource} AS rt ON rt.server_id = h.server_id AND rt.sampled_at = h.sampled_at`
+      )
+    }
+    if (requiresStorage) {
+      const storageSource = await this.#familySamplesSource(
+        parquetFamily('storage'),
+        fromMs,
+        toMs
+      )
+      joins.push(
+        `LEFT JOIN ${storageSource} AS st ON st.server_id = h.server_id AND st.sampled_at = h.sampled_at`
+      )
+    }
+    if (requiresDockerUsage) {
+      const dockerSource = await this.#familySamplesSource(
+        parquetFamily('docker'),
+        fromMs,
+        toMs
+      )
+      joins.push(
+        `LEFT JOIN ${dockerSource} AS dk ON dk.server_id = h.server_id AND dk.sampled_at = h.sampled_at`
+      )
     }
 
     const metricSelects = metrics.map((name) => {
-      const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[name]!
-      const column = hostSeriesColumnForDescriptorV5(descriptor)
-      // "h." metadata prefix: unambiguous even without the `md` join, and
-      // required whenever it's present (both tables carry `sampled_at`/
-      // `interval_seconds`).
-      return `${hostFieldAggregateSqlV5(descriptor, column, 'h.')} AS "${name}"`
+      const descriptor = HOST_METRICS_METRIC_DESCRIPTORS[name]!
+      const column = hostSeriesColumnForDescriptor(descriptor)
+      // "h." metadata prefix: unambiguous even without the `md`/`rt`/`st`/`dk` joins,
+      // and required whenever either is present (every singleton table
+      // carries `sampled_at`/`interval_seconds` of its own).
+      return `${hostFieldAggregateSql(descriptor, column, 'h.')} AS "${name}"`
     })
     const sql = [
       'SELECT',
@@ -555,12 +671,12 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
       `  CAST(count(*) AS DOUBLE) AS sample_count,`,
       `  CAST(avg(h.interval_seconds) AS DOUBLE) AS avg_interval_seconds,`,
       `  string_agg(DISTINCT CAST(h.topology_generation AS VARCHAR), ',') AS topology_gen_raw,`,
-      ...(requiresCpuDetail
+      ...(requiresCpuDiagnostics
         ? [`  CAST(epoch_ms(max(h.sampled_at)) AS DOUBLE) AS last_sampled_at_ms,`]
         : []),
       `  ${metricSelects.join(',\n  ')}`,
       `FROM ${hostSource} AS h`,
-      ...(joinSql ? [joinSql] : []),
+      ...joins,
       `WHERE h.server_id = CAST(? AS UUID)`,
       `  AND h.sampled_at >= CAST(? AS TIMESTAMP)`,
       `  AND h.sampled_at < CAST(? AS TIMESTAMP)`,
@@ -575,13 +691,13 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
     ])
     const rows = reader.getRowObjectsJS()
 
-    const { points, sampleCount, topologyGenerations } = parseHostSeriesRowsV5(
+    const { points, sampleCount, topologyGenerations } = parseHostSeriesRows(
       metrics,
       rows,
       bucketSeconds
     )
 
-    return finalizeHostSeriesResultV5(from.toISOString(), to.toISOString(), {
+    return finalizeHostSeriesResult(from.toISOString(), to.toISOString(), {
       kind: 'duckdb',
       available: true,
       serverId: input.serverId,
@@ -594,7 +710,7 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
     })
   }
 
-  async queryHostSummary(input: HostSummaryQueryV5): Promise<HostSummaryResultV5> {
+  async queryHostSummary(input: HostSummaryQuery): Promise<HostSummaryResult> {
     await this.flushWrites()
     const serverId = assertSafeServerId(input.serverId)
     const from = assertIsoTimestamp('from', input.from)
@@ -634,8 +750,8 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
    * Real per-descriptor aggregation over any `host.*` canonical metric name.
    */
   async queryFleetHostSnapshot(
-    input: FleetHostSnapshotQueryV5
-  ): Promise<FleetHostSnapshotResultV5> {
+    input: FleetHostSnapshotQuery
+  ): Promise<FleetHostSnapshotResult> {
     if (input.serverIds.length === 0) {
       return {
         kind: 'duckdb',
@@ -645,7 +761,7 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
       }
     }
     await this.flushWrites()
-    const metrics = assertHostMetricsV5(input.metrics)
+    const metrics = assertHostMetrics(input.metrics)
     const from = assertIsoTimestamp('from', input.from)
     const to = assertIsoTimestamp('to', input.to)
     assertRange(from, to)
@@ -658,9 +774,9 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
       to.getTime()
     )
     const metricSelects = metrics.map((name) => {
-      const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[name]!
-      const column = hostColumnForDescriptorV5(descriptor)
-      return `${hostFieldAggregateSqlV5(descriptor, column)} AS "${name}"`
+      const descriptor = HOST_METRICS_METRIC_DESCRIPTORS[name]!
+      const column = hostColumnForDescriptor(descriptor)
+      return `${hostFieldAggregateSql(descriptor, column)} AS "${name}"`
     })
     const inList = serverIds.map(() => 'CAST(? AS UUID)').join(', ')
     const sql = [
@@ -682,7 +798,7 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
       toDuckDbTimestamp(to.toISOString()),
     ])
 
-    const servers: FleetHostSnapshotServerV5[] = []
+    const servers: FleetHostSnapshotServer[] = []
     for (const row of reader.getRowObjectsJS()) {
       const serverId = typeof row.server_id === 'string' ? row.server_id.trim() : ''
       if (!serverId) continue
@@ -694,7 +810,7 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
         sampleCount,
         latestAt:
           latestAtMs === null || sampleCount <= 0 ? null : new Date(latestAtMs).toISOString(),
-        values: parseMetricValuesV5(metrics, row),
+        values: parseMetricValues(metrics, row),
         topologyGeneration: generations.length === 1 ? generations[0]! : null,
       })
     }
@@ -838,14 +954,14 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
   }
 
   /**
-   * Multi-entity, multi-metric series for one `PerEntityHostedFamilyV5` —
+   * Multi-entity, multi-metric series for one `PerEntityHostedFamily` —
    * real per-descriptor aggregation over the family's per-entity table
    * (unioned with its sealed Parquet partitions), bucketed by time and
    * grouped by entity id. `managed.ingress` / `managed.database_proxy` group
    * by `source_id` so distinct sources of the same `source_kind` stay
-   * distinct entities — see `EntitySeriesQueryV5.entityIds`'s doc comment.
+   * distinct entities — see `EntitySeriesQuery.entityIds`'s doc comment.
    */
-  async queryEntitySeries(input: EntitySeriesQueryV5): Promise<EntitySeriesResultV5> {
+  async queryEntitySeries(input: EntitySeriesQuery): Promise<EntitySeriesResult> {
     if (input.entityIds.length === 0) {
       return {
         kind: 'duckdb',
@@ -878,7 +994,7 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
     const metricSelects = fields.map((field) => {
       const descriptor = resolveEntityFieldDescriptor(input.family, config.entityScope, field)
       const column = entityMetricColumnForFamily(input.family, field)
-      return `${hostFieldAggregateSqlV5(descriptor, column)} AS "${field}"`
+      return `${hostFieldAggregateSql(descriptor, column)} AS "${field}"`
     })
     const inList = input.entityIds.map(() => '?').join(', ')
     const sql = [
@@ -919,9 +1035,9 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
 
     const fromMs = from.getTime()
     const toMs = to.getTime()
-    const entities: EntitySeriesEntityResultV5[] = input.entityIds.map((entityId) => {
+    const entities: EntitySeriesEntityResult[] = input.entityIds.map((entityId) => {
       const rows = rowsByEntity.get(entityId) ?? []
-      const points: EntitySeriesPointV5[] = []
+      const points: EntitySeriesPoint[] = []
       let sampleCount = 0
       for (const row of rows) {
         const bucketEpochSeconds = toFiniteNumber(row.bucket)
@@ -930,7 +1046,7 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
         sampleCount += rowSamples
         points.push({
           at: new Date(bucketEpochSeconds * 1000).toISOString(),
-          values: parseMetricValuesV5(fields, row),
+          values: parseMetricValues(fields, row),
           sampleCount: rowSamples,
         })
       }
@@ -961,7 +1077,7 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
    * does. `managed.ingress` / `managed.database_proxy` return `source_id`
    * values, not `source_kind` — same rule as `queryEntitySeries`.
    */
-  async queryEntityIdsSeen(input: EntityIdsSeenQueryV5): Promise<EntityIdsSeenResultV5> {
+  async queryEntityIdsSeen(input: EntityIdsSeenQuery): Promise<EntityIdsSeenResult> {
     await this.flushWrites()
     const serverId = assertSafeServerId(input.serverId)
     const config = entityFamilyConfig(input.family)
@@ -1005,7 +1121,7 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
    * unconverted column isn't a plain JS string/number, the same reason every
    * other read path in this file casts timestamps before reading them.
    */
-  async queryMetricEvents(input: MetricEventsQueryV5): Promise<MetricEventsResultV5> {
+  async queryMetricEvents(input: MetricEventsQuery): Promise<MetricEventsResult> {
     await this.flushWrites()
     const serverId = assertSafeServerId(input.serverId)
     const from = assertIsoTimestamp('from', input.from)
@@ -1042,7 +1158,7 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStoreV5 {
     const rawRows = reader.getRowObjectsJS()
     const truncated = rawRows.length > MAX_STATUS_EVENTS
     const rows = truncated ? rawRows.slice(0, MAX_STATUS_EVENTS) : rawRows
-    const events = rows.map(parseMetricEventRowV5)
+    const events = rows.map(parseMetricEventRow)
 
     return {
       kind: 'duckdb',
@@ -1163,7 +1279,6 @@ const COMMON_METADATA_TUPLE_PREFIX = [
   'CAST(? AS TIMESTAMP)',
   'CAST(? AS TIMESTAMP)',
   'CAST(? AS SMALLINT)',
-  '?',
   'CAST(? AS BIGINT)',
   'CAST(? AS INTEGER)',
   'CAST(? AS INTEGER)',
@@ -1184,7 +1299,7 @@ function entityTuple(idPlaceholders: readonly string[], metricCount: number): st
 const HOST_COLUMNS = hostSamplesInsertColumns()
 const HOST_TUPLE = entityTuple(
   [],
-  HOST_METRIC_FIELD_REFS.length + HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST.length
+  HOST_METRIC_FIELD_REFS.length + HOST_GLOBAL_CPU_DIAGNOSTICS_FIELDS_LIST.length
 )
 
 const NETWORK_COLUMNS = networkSamplesInsertColumns()
@@ -1199,8 +1314,8 @@ const BLOCK_TUPLE = entityTuple(['?'], BLOCK_METRIC_FIELDS.length)
 const GPU_COLUMNS = gpuSamplesInsertColumns()
 const GPU_TUPLE = entityTuple(['?'], GPU_METRIC_FIELDS.length)
 
-const MEMORY_DETAIL_COLUMNS = memoryDetailSamplesInsertColumns()
-const MEMORY_DETAIL_TUPLE = entityTuple([], MEMORY_DETAIL_METRIC_FIELDS.length)
+const MEMORY_DIAGNOSTICS_COLUMNS = memoryDiagnosticsSamplesInsertColumns()
+const MEMORY_DIAGNOSTICS_TUPLE = entityTuple([], MEMORY_DIAGNOSTICS_METRIC_FIELDS.length)
 
 const HARDWARE_SIGNAL_COLUMNS = hardwareSignalSamplesInsertColumns()
 const HARDWARE_SIGNAL_TUPLE = entityTuple(['?', '?'], 1)
@@ -1210,6 +1325,20 @@ const INGRESS_TUPLE = entityTuple(['?', '?'], INGRESS_METRIC_FIELDS.length)
 
 const DATABASE_PROXY_COLUMNS = databaseProxySamplesInsertColumns()
 const DATABASE_PROXY_TUPLE = entityTuple(['?', '?'], DATABASE_PROXY_METRIC_FIELDS.length)
+
+const ROUTER_COLUMNS = routerSamplesInsertColumns()
+const ROUTER_TUPLE = entityTuple([], ROUTER_METRIC_FIELDS.length)
+
+const STORAGE_COLUMNS = storageSamplesInsertColumns()
+// Four trailing VARCHAR id columns after the metric doubles — bound as plain
+// `?` placeholders like every other non-numeric column.
+const STORAGE_TUPLE = entityTuple(
+  [],
+  storageSamplesMetricColumnNames().length + STORAGE_FILESYSTEM_ID_COLUMNS.length
+)
+
+const DOCKER_COLUMNS = dockerSamplesInsertColumns()
+const DOCKER_TUPLE = entityTuple([], DOCKER_USAGE_METRIC_FIELDS.length)
 
 const EVENT_COLUMNS = metricEventsInsertColumns()
 const EVENT_TUPLE =
@@ -1264,12 +1393,12 @@ function buildInsertForTable(
         sql: buildInsertSql(GPU_SAMPLES_TABLE, GPU_COLUMNS, GPU_TUPLE, rows.length),
         values,
       }
-    case 'memoryDetail':
+    case 'memoryDiagnostics':
       return {
         sql: buildInsertSql(
-          MEMORY_DETAIL_SAMPLES_TABLE,
-          MEMORY_DETAIL_COLUMNS,
-          MEMORY_DETAIL_TUPLE,
+          MEMORY_DIAGNOSTICS_SAMPLES_TABLE,
+          MEMORY_DIAGNOSTICS_COLUMNS,
+          MEMORY_DIAGNOSTICS_TUPLE,
           rows.length
         ),
         values,
@@ -1297,6 +1426,21 @@ function buildInsertForTable(
           DATABASE_PROXY_TUPLE,
           rows.length
         ),
+        values,
+      }
+    case 'router':
+      return {
+        sql: buildInsertSql(ROUTER_SAMPLES_TABLE, ROUTER_COLUMNS, ROUTER_TUPLE, rows.length),
+        values,
+      }
+    case 'storage':
+      return {
+        sql: buildInsertSql(STORAGE_SAMPLES_TABLE, STORAGE_COLUMNS, STORAGE_TUPLE, rows.length),
+        values,
+      }
+    case 'docker':
+      return {
+        sql: buildInsertSql(DOCKER_SAMPLES_TABLE, DOCKER_COLUMNS, DOCKER_TUPLE, rows.length),
         values,
       }
     case 'event':
@@ -1396,18 +1540,18 @@ function parseHardwareProfileGenerations(raw: unknown): number[] {
 // ---------------------------------------------------------------------------
 // Query helpers (`queryHostSeries`/`queryFleetHostSnapshot`,
 // `queryEntitySeries`/`queryEntityIdsSeen`/`queryMetricEvents`) — real
-// per-descriptor aggregation over `HOST_METRICS_METRIC_DESCRIPTORS_V5`.
+// per-descriptor aggregation over `HOST_METRICS_METRIC_DESCRIPTORS`.
 // ---------------------------------------------------------------------------
 
 /**
  * Descriptor-driven bucket aggregate for one v5 canonical metric —
  * weighted-average/last/max/delta-sum per
- * `HostMetricsMetricDescriptorV5.aggregation`, over any real column (host or
+ * `HostMetricsMetricDescriptor.aggregation`, over any real column (host or
  * per-entity). Every v5 canonical name that resolves to a descriptor has a
  * real column — there is no `NULL`-literal fallback case here.
  */
-function hostFieldAggregateSqlV5(
-  descriptor: HostMetricsMetricDescriptorV5,
+function hostFieldAggregateSql(
+  descriptor: HostMetricsMetricDescriptor,
   column: string,
   /**
    * Table-alias prefix (e.g. `"h."`) for the `sampled_at`/`interval_seconds`
@@ -1432,54 +1576,111 @@ function hostFieldAggregateSqlV5(
   }
 }
 
-/** DuckDB column for a `host.*`-scoped descriptor — `entityScope` minus its `"host."` prefix is the {@link HostMetricGroupV5}. */
-function hostColumnForDescriptorV5(descriptor: HostMetricsMetricDescriptorV5): string {
-  const group = descriptor.entityScope.slice('host.'.length) as HostMetricGroupV5
+/** DuckDB column for a `host.*`-scoped descriptor — `entityScope` minus its `"host."` prefix is the {@link HostMetricGroup}. */
+function hostColumnForDescriptor(descriptor: HostMetricsMetricDescriptor): string {
+  const group = descriptor.entityScope.slice('host.'.length) as HostMetricGroup
   return hostMetricColumnName(group, descriptor.fieldName)
 }
 
 /**
- * DuckDB column reference for a `queryHostSeries` descriptor, scoped to
- * the `h`/`md` aliases that query's SQL declares. `host.*` and `cpuDetail`
- * scalars both live on the host row (`h` — `cpuDetail`'s via
- * `cpuDetailHostColumnName`'s `cpu_detail_*` columns); `memoryDetail` fields
- * live on the left-joined singleton memory-detail row (`md`).
+ * Which half of the merged `diagnostics` family a field belongs to. v6 has a
+ * single `diagnostics` entity scope but two physical homes, so the split is
+ * by field name — the two halves share no field name, and both lists are
+ * derived from the schema module rather than restated here.
  */
-function hostSeriesColumnForDescriptorV5(descriptor: HostMetricsMetricDescriptorV5): string {
-  if (descriptor.entityScope === 'cpuDetail') {
-    return `h.${cpuDetailHostColumnName(descriptor.fieldName)}`
+const CPU_DIAGNOSTICS_FIELD_SET: ReadonlySet<string> = new Set(DIAGNOSTICS_CPU_FIELD_NAMES)
+const MEMORY_DIAGNOSTICS_FIELD_SET: ReadonlySet<string> = new Set(MEMORY_DIAGNOSTICS_METRIC_FIELDS)
+
+function diagnosticsFieldName(metric: string): string | undefined {
+  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS[metric]
+  return descriptor?.entityScope === 'diagnostics' ? descriptor.fieldName : undefined
+}
+
+/** `true` when `metric` is a diagnostics field stored on the host row's `cpu_diagnostics_*` columns. */
+function isCpuDiagnosticsMetric(metric: string): boolean {
+  const field = diagnosticsFieldName(metric)
+  return field !== undefined && CPU_DIAGNOSTICS_FIELD_SET.has(field)
+}
+
+/** `true` when `metric` is a diagnostics field stored in the singleton memory-diagnostics table. */
+function isMemoryDiagnosticsMetric(metric: string): boolean {
+  const field = diagnosticsFieldName(metric)
+  return field !== undefined && MEMORY_DIAGNOSTICS_FIELD_SET.has(field)
+}
+
+/** `true` when `metric` is a `managed.router` field, stored in the singleton router table. */
+function isRouterMetric(metric: string): boolean {
+  return HOST_METRICS_METRIC_DESCRIPTORS[metric]?.entityScope === 'router'
+}
+
+/** `true` when `metric` is a `managed.storage` field, stored in the singleton storage table. */
+function isStorageMetric(metric: string): boolean {
+  return HOST_METRICS_METRIC_DESCRIPTORS[metric]?.entityScope === 'storage'
+}
+
+/** `true` when `metric` is a `managed.docker` field, stored in the singleton docker table. */
+function isDockerUsageMetric(metric: string): boolean {
+  return HOST_METRICS_METRIC_DESCRIPTORS[metric]?.entityScope === 'dockerUsage'
+}
+
+/**
+ * DuckDB column reference for a `queryHostSeries` descriptor, scoped to
+ * the `h`/`md`/`rt` aliases that query's SQL declares. `host.*` fields and
+ * the diagnostics CPU half both live on the host row (`h` — the latter via
+ * `cpuDiagnosticsHostColumnName`'s `cpu_diagnostics_*` columns); the
+ * diagnostics memory half lives on one left-joined singleton row (`md`) and
+ * the `managed.router` family on another (`rt`).
+ */
+function hostSeriesColumnForDescriptor(descriptor: HostMetricsMetricDescriptor): string {
+  if (descriptor.entityScope === 'router') {
+    return `rt.${entityMetricColumnName(descriptor.fieldName)}`
   }
-  if (descriptor.entityScope === 'memoryDetail') {
-    return `md.${entityMetricColumnName(descriptor.fieldName)}`
+  // `managed.storage`'s flattened field names (`postgresInstancesRunning`)
+  // snake_case straight to their storage-table columns; `managed.docker`
+  // resolves against its own table, whose columns are unprefixed (the
+  // `docker_*`-prefixed copies on the storage row are a convenience for
+  // single-row storage panels, not the queryable series).
+  if (descriptor.entityScope === 'storage') {
+    return `st.${entityMetricColumnName(descriptor.fieldName)}`
   }
-  return `h.${hostColumnForDescriptorV5(descriptor)}`
+  if (descriptor.entityScope === 'dockerUsage') {
+    return `dk.${entityMetricColumnName(descriptor.fieldName)}`
+  }
+  if (descriptor.entityScope === 'diagnostics') {
+    return CPU_DIAGNOSTICS_FIELD_SET.has(descriptor.fieldName)
+      ? `h.${cpuDiagnosticsHostColumnName(descriptor.fieldName)}`
+      : `md.${entityMetricColumnName(descriptor.fieldName)}`
+  }
+  return `h.${hostColumnForDescriptor(descriptor)}`
 }
 
 /** Extra host-singleton scopes `queryHostSeries` accepts beyond `host.*` — see its doc comment. */
-const HOST_SERIES_EXTRA_SCOPES_V5: ReadonlySet<MetricEntityScopeV5> = new Set([
-  'cpuDetail',
-  'memoryDetail',
+const HOST_SERIES_EXTRA_SCOPES: ReadonlySet<MetricEntityScope> = new Set([
+  'diagnostics',
+  'router',
+  'storage',
+  'dockerUsage',
 ])
 
-const NO_EXTRA_SCOPES_V5: ReadonlySet<MetricEntityScopeV5> = new Set()
+const NO_EXTRA_SCOPES: ReadonlySet<MetricEntityScope> = new Set()
 
 /**
  * Validate `metrics` as a non-empty list of v5 canonical names, each
- * resolving to a `HOST_METRICS_METRIC_DESCRIPTORS_V5` entry scoped to
+ * resolving to a `HOST_METRICS_METRIC_DESCRIPTORS` entry scoped to
  * `host.*` (the only scope `queryFleetHostSnapshot`'s v5 path reads) or, when
  * `extraScopes` is passed (`queryHostSeries` only), one of those extra
  * scopes.
  */
-function assertHostMetricsV5(
+function assertHostMetrics(
   metrics: readonly string[],
-  extraScopes: ReadonlySet<MetricEntityScopeV5> = NO_EXTRA_SCOPES_V5
+  extraScopes: ReadonlySet<MetricEntityScope> = NO_EXTRA_SCOPES
 ): string[] {
   if (metrics.length === 0) {
     throw new TypeError('metrics must be a non-empty list of v5 canonical names')
   }
   const out: string[] = []
   for (const name of metrics) {
-    const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[name]
+    const descriptor = HOST_METRICS_METRIC_DESCRIPTORS[name]
     const scopeOk =
       descriptor !== undefined &&
       (descriptor.entityScope.startsWith('host.') || extraScopes.has(descriptor.entityScope))
@@ -1491,21 +1692,16 @@ function assertHostMetricsV5(
   return out
 }
 
-/** `true` when any of `metrics` resolves to a descriptor scoped to `scope`. */
-function requiresEntityScopeV5(metrics: readonly string[], scope: MetricEntityScopeV5): boolean {
-  return metrics.some((name) => HOST_METRICS_METRIC_DESCRIPTORS_V5[name]?.entityScope === scope)
-}
-
-function parseHostSeriesRowsV5(
+function parseHostSeriesRows(
   metrics: readonly string[],
   rows: DuckDbRow[],
   resolutionSeconds: number
 ): {
-  points: HostSeriesPointV5[]
+  points: HostSeriesPoint[]
   sampleCount: number
   topologyGenerations: number[]
 } {
-  const points: HostSeriesPointV5[] = []
+  const points: HostSeriesPoint[] = []
   let sampleCount = 0
   const allGenerations = new Set<number>()
   for (const row of rows) {
@@ -1520,9 +1716,9 @@ function parseHostSeriesRowsV5(
         : defaultExpectedSamplesPerBucket(resolutionSeconds)
     const bucketGenerations = parseHardwareProfileGenerations(row.topology_gen_raw)
     for (const generation of bucketGenerations) allGenerations.add(generation)
-    const point: HostSeriesPointV5 = {
+    const point: HostSeriesPoint = {
       at: new Date(bucketEpochSeconds * 1000).toISOString(),
-      values: parseMetricValuesV5(metrics, row),
+      values: parseMetricValues(metrics, row),
       sampleCount: rowSamples,
       expectedSampleCount,
       topologyGeneration: bucketGenerations.length === 1 ? bucketGenerations[0]! : null,
@@ -1536,7 +1732,7 @@ function parseHostSeriesRowsV5(
   }
 }
 
-function parseMetricValuesV5(
+function parseMetricValues(
   metrics: readonly string[],
   row: DuckDbRow
 ): Partial<Record<string, number | null>> {
@@ -1552,16 +1748,16 @@ type EntityFamilyConfig = {
   parquetKey: ParquetFamilyKey
   /** Physical id column queried/grouped on — `source_id` (not `source_kind`) for the two managed families. */
   idColumn: string
-  entityScope: MetricEntityScopeV5
+  entityScope: MetricEntityScope
 }
 
 /**
  * Static per-family table/column/entity-scope mapping for
  * `queryEntitySeries`/`queryEntityIdsSeen` — mirrors
- * `EntitySeriesQueryV5.entityIds`'s doc comment on what "entity id" means
+ * `EntitySeriesQuery.entityIds`'s doc comment on what "entity id" means
  * per family (`source_id`, not `source_kind`, for the two managed families).
  */
-function entityFamilyConfig(family: PerEntityHostedFamilyV5): EntityFamilyConfig {
+function entityFamilyConfig(family: PerEntityHostedFamily): EntityFamilyConfig {
   switch (family) {
     case 'gpu':
       return { parquetKey: 'gpu', idColumn: 'gpu_id', entityScope: 'gpu' }
@@ -1610,11 +1806,11 @@ function entityFamilyConfig(family: PerEntityHostedFamilyV5): EntityFamilyConfig
 
 /** Resolve one requested bare field name to its descriptor, scoped to `family`'s entity scope. */
 function resolveEntityFieldDescriptor(
-  family: PerEntityHostedFamilyV5,
-  entityScope: MetricEntityScopeV5,
+  family: PerEntityHostedFamily,
+  entityScope: MetricEntityScope,
   field: string
-): HostMetricsMetricDescriptorV5 {
-  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS_V5[`${entityScope}.${field}`]
+): HostMetricsMetricDescriptor {
+  const descriptor = HOST_METRICS_METRIC_DESCRIPTORS[`${entityScope}.${field}`]
   if (!descriptor) {
     throw new TypeError(`unknown ${family} metrics field: ${field}`)
   }
@@ -1622,7 +1818,7 @@ function resolveEntityFieldDescriptor(
 }
 
 /** `hardware.physical` is long-form (one `value` column, not one column per field); every other family uses `entityMetricColumnName`. */
-function entityMetricColumnForFamily(family: PerEntityHostedFamilyV5, field: string): string {
+function entityMetricColumnForFamily(family: PerEntityHostedFamily, field: string): string {
   return family === 'hardware.physical' ? 'value' : entityMetricColumnName(field)
 }
 
@@ -1635,17 +1831,17 @@ function assertNonEmptyFields(metrics: readonly string[]): string[] {
 
 /**
  * Parse one `server_metric_events` row (see `queryMetricEvents`'s SQL) into
- * a `MetricEventV5` — omits `entityId`/`source`/`payload` entirely when
+ * a `MetricEvent` — omits `entityId`/`source`/`payload` entirely when
  * absent (never writes an `undefined` value into the object), and treats a
  * corrupt `payload` JSON string as "no payload" rather than throwing.
  */
-function parseMetricEventRowV5(row: DuckDbRow): MetricEventV5 {
+function parseMetricEventRow(row: DuckDbRow): MetricEvent {
   const atMs = toFiniteNumber(row.at_ms) ?? 0
-  const event: MetricEventV5 = {
+  const event: MetricEvent = {
     eventId: String(row.event_id ?? ''),
     at: new Date(atMs).toISOString(),
-    kind: String(row.kind ?? '') as MetricEventKindV5,
-    severity: String(row.severity ?? '') as MetricEventSeverityV5,
+    kind: String(row.kind ?? '') as MetricEventKind,
+    severity: String(row.severity ?? '') as MetricEventSeverity,
   }
   if (typeof row.entity_id === 'string' && row.entity_id.length > 0) {
     event.entityId = row.entity_id

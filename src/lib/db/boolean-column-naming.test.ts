@@ -42,7 +42,7 @@ const REQUIRED_IS_PREFIX_COLUMNS = [
   'is_read_only',
 ] as const
 
-const SCHEMA_BOOLEAN_RE = /\bboolean\(\s*'([^']+)'\s*\)/g
+const SCHEMA_BOOLEAN_RE = /\bboolean\(\s*['"]([^'"]+)['"]\s*\)/g
 
 type SnapshotColumn = {
   name?: unknown

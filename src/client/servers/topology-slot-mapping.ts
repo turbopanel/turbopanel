@@ -12,11 +12,17 @@
  * exactly one slot: the `uplink` flagged `defaultRoute`, falling back to the
  * first uplink by sorted id. Nothing else is monitored by default.
  *
+ * Filesystem page-order rule (see {@link FILESYSTEM_ROLE_PRIORITY}): every
+ * role-bearing filesystem is pinned ahead of the rest, in a fixed role
+ * priority, with an operator `hostingFilesystemId` override taking the very
+ * first slot; everything else follows sorted by id.
+ *
  * Keep in sync with the daemon source: a divergence here would let historical
  * slot reinterpretation drift between daemon generation assignment and
  * control-plane reconstruction.
  */
 import {
+  type FilesystemRole,
   MAX_NIC_SLOTS,
   type SlotMapping,
   type TopologyOverrides,
@@ -49,6 +55,60 @@ function resolveDefaultNicSlots(networks: TopologySnapshot['networks']): string[
   return sorted.length > 0 ? [sorted[0]!] : []
 }
 
+/**
+ * Role pinning order for {@link resolveFilesystemPageOrder}. Most-rendered
+ * first: `/` and the hosting root are on every storage panel, the Docker data
+ * root and the backup root are what a full-disk incident is usually about,
+ * and the log directory trails them. `application`/`custom` are deliberately
+ * absent — they are operator-labelled mounts with no fixed product meaning,
+ * so they sort with everything else rather than displacing a role the panel
+ * always shows.
+ */
+const FILESYSTEM_ROLE_PRIORITY: readonly FilesystemRole[] = [
+  'root',
+  'hosting',
+  'docker',
+  'backup',
+  'logs',
+]
+
+/**
+ * Role-bearing filesystems first (in {@link FILESYSTEM_ROLE_PRIORITY} order,
+ * ties broken by id), then everything else by id.
+ *
+ * An operator `hostingFilesystemId` override takes the very first slot when
+ * it names a filesystem this snapshot actually has — it is an explicit
+ * statement about which filesystem *is* the hosting one, so it outranks the
+ * discovered roles rather than being merged with them. One filesystem
+ * carrying several roles (a single-disk host where `/`, hosting and Docker
+ * are all the same device) still appears exactly once, at its highest role's
+ * position.
+ */
+function resolveFilesystemPageOrder(
+  filesystems: TopologySnapshot['filesystems'],
+  hostingOverride: string | null | undefined
+): string[] {
+  const allSorted = filesystems.map((fs) => fs.filesystemId).sort(byId)
+  const known = new Set(allSorted)
+  const pinned: string[] = []
+  const pin = (id: string | null | undefined): void => {
+    if (!id || !known.has(id) || pinned.includes(id)) return
+    pinned.push(id)
+  }
+
+  pin(hostingOverride)
+  for (const role of FILESYSTEM_ROLE_PRIORITY) {
+    for (const id of filesystems
+      .filter((fs) => fs.roles.includes(role))
+      .map((fs) => fs.filesystemId)
+      .sort(byId)) {
+      pin(id)
+    }
+  }
+
+  return [...pinned, ...allSorted.filter((id) => !pinned.includes(id))]
+}
+
 export function computeSlotMapping(
   snapshot: TopologySnapshot,
   overrides: TopologyOverrides
@@ -64,12 +124,10 @@ export function computeSlotMapping(
   const rootFilesystemId =
     snapshot.filesystems.find((fs) => fs.roles.includes('root'))?.filesystemId ?? null
 
-  const filesystemIdsSorted = snapshot.filesystems.map((fs) => fs.filesystemId).sort(byId)
-  const hostingOverride = overrides.hostingFilesystemId
-  const filesystemPageOrder =
-    hostingOverride && filesystemIdsSorted.includes(hostingOverride)
-      ? [hostingOverride, ...filesystemIdsSorted.filter((id) => id !== hostingOverride)]
-      : filesystemIdsSorted
+  const filesystemPageOrder = resolveFilesystemPageOrder(
+    snapshot.filesystems,
+    overrides.hostingFilesystemId
+  )
 
   const blockPageOrder = snapshot.blockDevices.map((device) => device.deviceId).sort(byId)
   const gpuPageOrder = snapshot.gpus.map((gpu) => gpu.gpuId).sort(byId)

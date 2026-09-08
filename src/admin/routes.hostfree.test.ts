@@ -539,3 +539,19 @@ test('devSurface OpenAPI and Scalar routes are registered', async () => {
   const html = await reference.text()
   assertEquals(html.includes('scalar'), true)
 })
+
+test('the tier catalogue is mounted on Workers only: self-hosted has no billing', async () => {
+  const deno = await buildApp({ runtime: 'deno' })
+  const absent = await deno.app.request(`${ADMIN_API_PREFIX}/tiers`, {
+    headers: { Cookie: deno.cookie },
+  })
+  assertEquals(absent.status, 404)
+
+  // Mounted on Workers; with no billingConfig on the context it is the
+  // route's own 503, not the aggregator's 404.
+  const workers = await buildApp({ runtime: 'workers' })
+  const mounted = await workers.app.request(`${ADMIN_API_PREFIX}/tiers`, {
+    headers: { Cookie: workers.cookie },
+  })
+  assertEquals(mounted.status, 503)
+})

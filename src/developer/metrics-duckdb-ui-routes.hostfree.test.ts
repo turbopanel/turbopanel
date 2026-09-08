@@ -6,7 +6,7 @@ import {
   resetActiveServerMetricsStoreForTests,
   setActiveServerMetricsStore,
 } from '../daemon/metrics/active-store.ts'
-import { DisabledServerMetricsStoreV5 } from '../daemon/metrics/disabled-store-v5.ts'
+import { DisabledServerMetricsStore } from '../daemon/metrics/disabled-store.ts'
 import { registerMetricsDuckDbUiRoutes } from './metrics-duckdb-ui-routes.ts'
 
 /**
@@ -25,7 +25,7 @@ function duckDbShapedStore(startUiServer: () => Promise<{ port: number }>): unkn
 
 test('POST /metrics/duckdb-ui returns 503 when the live store is not DuckDB', async () => {
   resetActiveServerMetricsStoreForTests()
-  setActiveServerMetricsStore(new DisabledServerMetricsStoreV5())
+  setActiveServerMetricsStore(new DisabledServerMetricsStore())
   try {
     const developer = new Hono()
     registerMetricsDuckDbUiRoutes(developer)
@@ -37,7 +37,7 @@ test('POST /metrics/duckdb-ui returns 503 when the live store is not DuckDB', as
       ok: false,
       error: 'DuckDB metrics store is not active (Deno runtime only)',
     })
-    assertEquals(getActiveServerMetricsStore() instanceof DisabledServerMetricsStoreV5, true)
+    assertEquals(getActiveServerMetricsStore() instanceof DisabledServerMetricsStore, true)
   } finally {
     resetActiveServerMetricsStoreForTests()
   }

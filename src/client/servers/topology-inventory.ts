@@ -27,13 +27,13 @@ import type {
  * (members, VLAN children, tunnels, container bridges, loopback — or an
  * uplink the operator hasn't added to the monitored list).
  */
-export type NetworkEntityRoleV5 = 'nic' | 'fabric' | 'other'
+export type NetworkEntityRole = 'nic' | 'fabric' | 'other'
 
-export type NetworkInventoryEntryV5 = {
+export type NetworkInventoryEntry = {
   deviceId: string
   name: string
   kind: NetworkDeviceKind
-  role: NetworkEntityRoleV5
+  role: NetworkEntityRole
   /** 1-based NIC slot when `role === 'nic'` — slots 1/2 embed in `host.io` on Cloudflare, 3+ page as `network` rows. */
   slot?: number
   speedMbps?: number
@@ -42,7 +42,7 @@ export type NetworkInventoryEntryV5 = {
   defaultRoute?: boolean
 }
 
-export type FilesystemInventoryEntryV5 = {
+export type FilesystemInventoryEntry = {
   filesystemId: string
   mountpoint: string
   roles: FilesystemRole[]
@@ -51,7 +51,7 @@ export type FilesystemInventoryEntryV5 = {
   isRoot: boolean
 }
 
-export type BlockDeviceInventoryEntryV5 = {
+export type BlockDeviceInventoryEntry = {
   deviceId: string
   kernelName: string
   model?: string
@@ -59,14 +59,14 @@ export type BlockDeviceInventoryEntryV5 = {
   isServiceDevice: boolean
 }
 
-export type GpuInventoryEntryV5 = {
+export type GpuInventoryEntry = {
   gpuId: string
   kind: GpuKind
   vendor: string
   chip: string
 }
 
-export type HardwareSignalInventoryEntryV5 = {
+export type HardwareSignalInventoryEntry = {
   signalId: string
   kind: string
   unit: string
@@ -88,24 +88,35 @@ export type HardwareSignalInventoryEntryV5 = {
   thresholds?: PhysicalSignalThresholds
 }
 
-/** The `<chip>` segment of a `signal:<chip>:<label>` id; empty when the id isn't that shape. */
-export function hardwareSignalChipV5(signalId: string): string {
+/**
+ * Prefixes of the entity-joined signal ids (`signal:gpu:<gpuId>:<kind>`,
+ * `signal:block:<deviceId>:temperature`). These carry no hwmon chip at all —
+ * a GPU's readings come from NVML/DCGM/sysfs and a drive's whole-drive
+ * temperature is derived from its probes — and the segment after the prefix
+ * is an opaque `GpuId`/`TopologyDeviceId` that may itself contain a `:`, so
+ * they must never be split apart the way an `signal:<chip>:<label>` id is.
+ */
+const ENTITY_JOINED_SIGNAL_PREFIXES = ['signal:gpu:', 'signal:block:'] as const
+
+/** The `<chip>` segment of a `signal:<chip>:<label>` id; empty when the id isn't that shape (an entity-joined id included — see {@link ENTITY_JOINED_SIGNAL_PREFIXES}). */
+export function hardwareSignalChip(signalId: string): string {
+  if (ENTITY_JOINED_SIGNAL_PREFIXES.some((prefix) => signalId.startsWith(prefix))) return ''
   const parts = signalId.split(':')
   return parts.length >= 3 && parts[0] === 'signal' ? parts[1]! : ''
 }
 
-export type TopologyInventoryV5 = {
-  networks: NetworkInventoryEntryV5[]
-  filesystems: FilesystemInventoryEntryV5[]
-  blockDevices: BlockDeviceInventoryEntryV5[]
-  gpus: GpuInventoryEntryV5[]
-  hardwareSignals: HardwareSignalInventoryEntryV5[]
+export type TopologyInventory = {
+  networks: NetworkInventoryEntry[]
+  filesystems: FilesystemInventoryEntry[]
+  blockDevices: BlockDeviceInventoryEntry[]
+  gpus: GpuInventoryEntry[]
+  hardwareSignals: HardwareSignalInventoryEntry[]
 }
 
 function networkRole(
   deviceId: string,
   slotMapping: SlotMapping
-): { role: NetworkEntityRoleV5; slot?: number } {
+): { role: NetworkEntityRole; slot?: number } {
   const slotIndex = slotMapping.normalNicSlots.indexOf(deviceId)
   if (slotIndex !== -1) return { role: 'nic', slot: slotIndex + 1 }
   if (slotMapping.fabricDeviceIds.includes(deviceId)) return { role: 'fabric' }
@@ -113,11 +124,11 @@ function networkRole(
 }
 
 /** Build every family's inventory from one topology snapshot + its slot mapping. */
-export function buildTopologyInventoryV5(
+export function buildTopologyInventory(
   snapshot: TopologySnapshot,
   slotMapping: SlotMapping
-): TopologyInventoryV5 {
-  const networks: NetworkInventoryEntryV5[] = snapshot.networks.map((device) => ({
+): TopologyInventory {
+  const networks: NetworkInventoryEntry[] = snapshot.networks.map((device) => ({
     deviceId: device.deviceId,
     name: device.name,
     kind: device.kind,
@@ -127,7 +138,7 @@ export function buildTopologyInventoryV5(
     ...(device.defaultRoute === true ? { defaultRoute: true } : {}),
   }))
 
-  const filesystems: FilesystemInventoryEntryV5[] = snapshot.filesystems.map((fs) => ({
+  const filesystems: FilesystemInventoryEntry[] = snapshot.filesystems.map((fs) => ({
     filesystemId: fs.filesystemId,
     mountpoint: fs.mountpoint,
     roles: fs.roles,
@@ -135,7 +146,7 @@ export function buildTopologyInventoryV5(
     isRoot: fs.filesystemId === slotMapping.rootFilesystemId,
   }))
 
-  const blockDevices: BlockDeviceInventoryEntryV5[] = snapshot.blockDevices.map((device) => ({
+  const blockDevices: BlockDeviceInventoryEntry[] = snapshot.blockDevices.map((device) => ({
     deviceId: device.deviceId,
     kernelName: device.kernelName,
     ...(device.model !== undefined ? { model: device.model } : {}),
@@ -143,20 +154,20 @@ export function buildTopologyInventoryV5(
     isServiceDevice: device.isServiceDevice,
   }))
 
-  const gpus: GpuInventoryEntryV5[] = snapshot.gpus.map((gpu) => ({
+  const gpus: GpuInventoryEntry[] = snapshot.gpus.map((gpu) => ({
     gpuId: gpu.gpuId,
     kind: gpu.kind,
     vendor: gpu.vendor,
     chip: gpu.chip,
   }))
 
-  const hardwareSignals: HardwareSignalInventoryEntryV5[] = snapshot.hardwareSignals.map(
+  const hardwareSignals: HardwareSignalInventoryEntry[] = snapshot.hardwareSignals.map(
     (signal) => ({
       signalId: signal.signalId,
       kind: signal.kind,
       unit: signal.unit,
       component: signal.component,
-      chip: hardwareSignalChipV5(signal.signalId),
+      chip: hardwareSignalChip(signal.signalId),
       label: signal.label,
       ...(signal.thresholds !== undefined ? { thresholds: signal.thresholds } : {}),
     })
@@ -168,9 +179,9 @@ export function buildTopologyInventoryV5(
 /**
  * The root-role filesystem's `totalBytes` per the current `SlotMapping`, or
  * `null` when no filesystem is marked root or its capacity is unknown —
- * feeds `derived-metrics-v5.ts`'s `HostCapacitiesV5.rootFilesystemTotalBytes`.
+ * feeds `derived-metrics.ts`'s `HostCapacities.rootFilesystemTotalBytes`.
  */
-export function rootFilesystemTotalBytesV5(
+export function rootFilesystemTotalBytes(
   snapshot: TopologySnapshot,
   slotMapping: SlotMapping
 ): number | null {

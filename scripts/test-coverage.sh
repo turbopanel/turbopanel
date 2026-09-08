@@ -106,6 +106,8 @@ deno test -A --coverage=coverage/deno-profile \
   src/admin/routes-helpers.hostfree.test.ts \
   src/admin/routes.hostfree.test.ts \
   src/admin/tls-trust-reconcile.hostfree.test.ts \
+  src/admin/tier-routes-helpers.hostfree.test.ts \
+  src/admin/tier-routes.hostfree.test.ts \
   src/admin/routes.test.ts \
   src/app.test.ts \
   src/client/authn/auth-rate-limit-http.test.ts \
@@ -228,6 +230,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/servers/command-dispatch.test.ts \
   src/client/servers/command-dispatch-helpers.hostfree.test.ts \
   src/client/servers/capability-plan-records.test.ts \
+  src/client/servers/capability-plan-push.test.ts \
   src/client/servers/colocated.test.ts \
   src/client/servers/delete-guards.test.ts \
   src/client/servers/metrics-routes.test.ts \
@@ -252,6 +255,10 @@ deno test -A --coverage=coverage/deno-profile \
   src/webhook/gate.hostfree.test.ts \
   src/webhook/git/github.hostfree.test.ts \
   src/webhook/git/gitlab.hostfree.test.ts \
+  src/webhook/billing/stripe.hostfree.test.ts \
+  src/webhook/billing/stripe-projection.hostfree.test.ts \
+  src/client/billing/mutations.hostfree.test.ts \
+  src/lib/billing/seat-increase.hostfree.test.ts \
   src/client/storage/serialize.test.ts \
   src/client/storage/routes-helpers.test.ts \
   src/client/storage/routes.test.ts \
@@ -312,10 +319,10 @@ deno test -A --coverage=coverage/deno-profile \
   src/daemon/cell/server-diagnostics.test.ts \
   src/daemon/cell/stateless-challenge.test.ts \
   src/daemon/metrics/backends/cloudflare/cross-backend-parity.test.ts \
-  src/daemon/metrics/backends/cloudflare/field-map-v4.test.ts \
+  src/daemon/metrics/backends/cloudflare/field-map.test.ts \
   src/daemon/metrics/backends/cloudflare/representative-row-counts.test.ts \
-  src/daemon/metrics/backends/cloudflare/sql-api-v4.test.ts \
-  src/daemon/metrics/backends/cloudflare/store-v4.test.ts \
+  src/daemon/metrics/backends/cloudflare/sql-api.test.ts \
+  src/daemon/metrics/backends/cloudflare/store.test.ts \
   src/daemon/metrics/backends/duckdb/database.test.ts \
   src/daemon/metrics/backends/duckdb/no-sentinel.test.ts \
   src/daemon/metrics/backends/duckdb/parquet.test.ts \
@@ -323,21 +330,22 @@ deno test -A --coverage=coverage/deno-profile \
   src/daemon/metrics/backends/duckdb/store.test.ts \
   src/daemon/metrics/active-store.test.ts \
   src/daemon/metrics/capability-plan.test.ts \
-  src/daemon/metrics/contract-v4.test.ts \
+  src/daemon/metrics/contract.test.ts \
   src/daemon/metrics/counter-reset-end-to-end.test.ts \
-  src/daemon/metrics/disabled-store-v4.test.ts \
+  src/daemon/metrics/disabled-store.test.ts \
   src/daemon/metrics/entity-metric-id.test.ts \
-  src/daemon/metrics/metric-descriptors-v4.test.ts \
+  src/daemon/metrics/metric-descriptors.test.ts \
   src/daemon/metrics/orphan-row-semantics.test.ts \
   src/daemon/metrics/status-events.test.ts \
   src/daemon/metrics/topology-generation-guard.test.ts \
   src/daemon/metrics/query/cache.test.ts \
-  src/daemon/metrics/query/derived-metrics-v4.test.ts \
+  src/daemon/metrics/query/derived-metrics.test.ts \
+  src/daemon/metrics/query/live-session.test.ts \
   src/daemon/metrics/query/resolution.test.ts \
-  src/daemon/metrics/query/series-response-v4.test.ts \
+  src/daemon/metrics/query/series-response.test.ts \
   src/daemon/metrics/query/uptime.test.ts \
   src/daemon/metrics/store-selection.test.ts \
-  src/daemon/metrics/validation-v4.deno.test.ts \
+  src/daemon/metrics/validation.deno.test.ts \
   src/daemon/openapi/ca.test.ts \
   src/daemon/openapi/index.test.ts \
   src/daemon/openapi/metrics.test.ts \
@@ -437,6 +445,9 @@ deno test -A --coverage=coverage/deno-profile \
   src/lib/db/tag-records.hostfree.test.ts \
   src/lib/db/task-records.hostfree.test.ts \
   src/lib/db/webhook-delivery-records.hostfree.test.ts \
+  src/lib/db/billing-records.hostfree.test.ts \
+  src/lib/db/billing-records.test.ts \
+  src/lib/db/tier-records.hostfree.test.ts \
   src/lib/db/table-naming.test.ts \
   src/lib/db/boolean-column-naming.test.ts \
   src/lib/db/primary-key.test.ts \
@@ -468,6 +479,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/lib/geo/server-geo.test.ts \
   src/lib/geo/self-hosted-geo-provider.test.ts \
   src/lib/git/ \
+  src/lib/billing/ \
   src/lib/hardware/cpu-catalog.test.ts \
   src/lib/hosting-compose-owner.test.ts \
   src/lib/hosting-options.test.ts \
@@ -506,6 +518,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/lib/settings/server-metrics-settings.hostfree.test.ts \
   src/lib/timezones.test.ts \
   src/lib/tls/ \
+  src/lib/tiers/ \
   src/lib/update/manifest.test.ts \
   src/lib/update/constants.test.ts \
   src/lib/update/prepare.test.ts \
@@ -549,6 +562,8 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/ips/routes.test.ts \
   src/client/ips/routes-pure.test.ts \
   src/client/ips/routes.hostfree.test.ts \
+  src/client/billing/routes.hostfree.test.ts \
+  src/client/licenses/routes.hostfree.test.ts \
   src/client/licenses/routes.test.ts \
   src/client/licenses/routes-helpers.test.ts \
   src/client/licenses/routes-helpers.hostfree.test.ts \

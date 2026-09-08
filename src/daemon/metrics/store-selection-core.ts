@@ -1,27 +1,27 @@
-import type { AnalyticsEngineDatasetLike } from './backends/cloudflare/store-v5.ts'
+import type { AnalyticsEngineDatasetLike } from './backends/cloudflare/store.ts'
 import {
   AE_DEFAULT_MAX_RANGE_SECONDS,
   type CloudflareAnalyticsSqlConfig,
-} from './backends/cloudflare/sql-api-v5.ts'
+} from './backends/cloudflare/sql-api.ts'
 import type {
-  AuthenticatedMetricsSampleV5,
-  EntityIdsSeenQueryV5,
-  EntityIdsSeenResultV5,
-  EntitySeriesQueryV5,
-  EntitySeriesResultV5,
-  FleetHostSnapshotQueryV5,
-  FleetHostSnapshotResultV5,
-  HostSeriesQueryV5,
-  HostSeriesResultV5,
-  HostSummaryQueryV5,
-  HostSummaryResultV5,
-  MetricEventsQueryV5,
-  MetricEventsResultV5,
-  ServerMetricsStoreV5,
+  AuthenticatedMetricsSample,
+  EntityIdsSeenQuery,
+  EntityIdsSeenResult,
+  EntitySeriesQuery,
+  EntitySeriesResult,
+  FleetHostSnapshotQuery,
+  FleetHostSnapshotResult,
+  HostSeriesQuery,
+  HostSeriesResult,
+  HostSummaryQuery,
+  HostSummaryResult,
+  MetricEventsQuery,
+  MetricEventsResult,
+  ServerMetricsStore,
   ServerStatusEvent,
   StatusHistoryQuery,
   StatusHistoryResult,
-} from './types-v5.ts'
+} from './types.ts'
 
 export type { AnalyticsEngineDatasetLike, CloudflareAnalyticsSqlConfig }
 export { AE_DEFAULT_MAX_RANGE_SECONDS }
@@ -96,14 +96,14 @@ export const parsePositiveIntEnv = parsePositiveIntegerEnvValue
  * fire-and-forget no-ops — there is nowhere to persist them and callers must
  * never be blocked by the broken backend.
  */
-export class UnavailableServerMetricsStoreV5 implements ServerMetricsStoreV5 {
+export class UnavailableServerMetricsStore implements ServerMetricsStore {
   readonly reason: string
 
   constructor(reason: string) {
     this.reason = reason
   }
 
-  writeSample(_input: AuthenticatedMetricsSampleV5): void {
+  writeSample(_input: AuthenticatedMetricsSample): void {
     // no-op: backend is down; metrics writes are fire-and-forget by contract.
   }
 
@@ -115,27 +115,27 @@ export class UnavailableServerMetricsStoreV5 implements ServerMetricsStoreV5 {
     return Promise.reject(new Error(this.reason))
   }
 
-  queryHostSeries(_input: HostSeriesQueryV5): Promise<HostSeriesResultV5> {
+  queryHostSeries(_input: HostSeriesQuery): Promise<HostSeriesResult> {
     return Promise.reject(new Error(this.reason))
   }
 
-  queryHostSummary(_input: HostSummaryQueryV5): Promise<HostSummaryResultV5> {
+  queryHostSummary(_input: HostSummaryQuery): Promise<HostSummaryResult> {
     return Promise.reject(new Error(this.reason))
   }
 
-  queryEntitySeries(_input: EntitySeriesQueryV5): Promise<EntitySeriesResultV5> {
+  queryEntitySeries(_input: EntitySeriesQuery): Promise<EntitySeriesResult> {
     return Promise.reject(new Error(this.reason))
   }
 
-  queryEntityIdsSeen(_input: EntityIdsSeenQueryV5): Promise<EntityIdsSeenResultV5> {
+  queryEntityIdsSeen(_input: EntityIdsSeenQuery): Promise<EntityIdsSeenResult> {
     return Promise.reject(new Error(this.reason))
   }
 
-  queryFleetHostSnapshot(_input: FleetHostSnapshotQueryV5): Promise<FleetHostSnapshotResultV5> {
+  queryFleetHostSnapshot(_input: FleetHostSnapshotQuery): Promise<FleetHostSnapshotResult> {
     return Promise.reject(new Error(this.reason))
   }
 
-  queryMetricEvents(_input: MetricEventsQueryV5): Promise<MetricEventsResultV5> {
+  queryMetricEvents(_input: MetricEventsQuery): Promise<MetricEventsResult> {
     return Promise.reject(new Error(this.reason))
   }
 }

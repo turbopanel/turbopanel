@@ -570,3 +570,23 @@ test("registerClientRoutes mounts tags and tasks under the client API prefix", a
   assertEquals(tasks.status, 401);
   assertEquals(await tasks.json(), { ok: false, error: "Unauthorized" });
 });
+
+test("registerClientRoutes mounts /billing on Workers only: self-hosted has no billing", async () => {
+  const secretsConfig = parseTestSecretsConfig("deno");
+  const secrets = await deriveSecretsConfig(secretsConfig, "session-signing");
+  const build = (runtime: "deno" | "workers") => {
+    const app = new Hono<AppEnv>();
+    app.use("*", (c, next) => {
+      c.set("runtime", runtime);
+      return next();
+    });
+    registerClientRoutes(app, { secrets, runtime, signupEnvOverride: undefined });
+    return app;
+  };
+
+  const deno = await build("deno").request(`${CLIENT_API_PREFIX}/billing/catalog`);
+  assertEquals(deno.status, 404);
+
+  const workers = await build("workers").request(`${CLIENT_API_PREFIX}/billing/catalog`);
+  assertEquals(workers.status, 401);
+});

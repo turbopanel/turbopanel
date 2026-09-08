@@ -21,15 +21,21 @@ test('getClientOpenApiSpec workers runtime omits install tag and paths', () => {
   assertEquals(Object.keys(spec.paths).some((path) => path.startsWith('/api/install/v1')), false)
   assertExists(spec.paths[`${CLIENT_API_PREFIX}/licenses`])
   assertExists(spec.components.schemas.LicenseRecord)
+  // Billing is hosted-only, so the Workers spec is the one that documents it.
+  assertEquals(tagNames.includes('Billing'), true)
+  assertExists(spec.paths[`${CLIENT_API_PREFIX}/billing/catalog`])
 })
 
-test('getClientOpenApiSpec deno runtime includes install surface', () => {
+test('getClientOpenApiSpec deno runtime includes install surface and omits billing', () => {
   const spec = getClientOpenApiSpec('https://localhost:8443', { runtime: 'deno' }) as {
     tags: { name: string }[]
     paths: Record<string, unknown>
   }
   assertEquals(spec.tags.some((tag) => tag.name === 'Install'), true)
   assertEquals(Object.keys(spec.paths).some((path) => path.startsWith('/api/install/v1')), true)
+  // Self-hosted has no billing surface at all — not mounted, so not documented.
+  assertEquals(spec.tags.some((tag) => tag.name === 'Billing'), false)
+  assertEquals(Object.keys(spec.paths).some((path) => path.startsWith(`${CLIENT_API_PREFIX}/billing`)), false)
 })
 
 test('getClientOpenApiSpec wires cookie auth and core resource paths', () => {

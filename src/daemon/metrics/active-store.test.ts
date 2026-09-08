@@ -4,7 +4,7 @@ import {
   resetActiveServerMetricsStoreForTests,
   setActiveServerMetricsStore,
 } from './active-store.ts'
-import { DisabledServerMetricsStoreV5 } from './disabled-store-v5.ts'
+import { DisabledServerMetricsStore } from './disabled-store.ts'
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -18,7 +18,7 @@ test('active store handle starts empty and round-trips a registered store', () =
   resetActiveServerMetricsStoreForTests()
   assertEquals(getActiveServerMetricsStore(), null)
 
-  const store = new DisabledServerMetricsStoreV5()
+  const store = new DisabledServerMetricsStore()
   setActiveServerMetricsStore(store)
   assertEquals(getActiveServerMetricsStore(), store)
 

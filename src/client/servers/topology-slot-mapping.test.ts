@@ -180,6 +180,46 @@ test('computeSlotMapping: an operator list keeps a pinned id absent from this sn
   assertEquals(mapping.normalNicSlots[1], 'mac:x0')
 })
 
+test('computeSlotMapping: every role-bearing filesystem is pinned ahead of unlabelled mounts, in role priority', () => {
+  const snap = snapshot()
+  snap.filesystems = [
+    // Ids chosen so plain id sorting would produce the opposite order — the
+    // assertion only passes if role priority actually drives the pinning.
+    { ...snap.filesystems[0], filesystemId: 'fs:z-root', roles: ['root'] },
+    { ...snap.filesystems[0], filesystemId: 'fs:y-hosting', roles: ['hosting'] },
+    { ...snap.filesystems[0], filesystemId: 'fs:x-docker', roles: ['docker'] },
+    { ...snap.filesystems[0], filesystemId: 'fs:w-backup', roles: ['backup'] },
+    { ...snap.filesystems[0], filesystemId: 'fs:v-logs', roles: ['logs'] },
+    { ...snap.filesystems[0], filesystemId: 'fs:a-scratch', roles: [] },
+    { ...snap.filesystems[0], filesystemId: 'fs:b-custom', roles: ['custom'] },
+  ]
+  const mapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
+  assertEquals(mapping.filesystemPageOrder, [
+    'fs:z-root',
+    'fs:y-hosting',
+    'fs:x-docker',
+    'fs:w-backup',
+    'fs:v-logs',
+    // `custom` is not a pinned role — it sorts with the unlabelled mounts.
+    'fs:a-scratch',
+    'fs:b-custom',
+  ])
+})
+
+test("computeSlotMapping: a filesystem carrying several roles appears once, at its highest role's position", () => {
+  const snap = snapshot()
+  snap.filesystems = [
+    {
+      ...snap.filesystems[0],
+      filesystemId: 'fs:single',
+      roles: ['root', 'hosting', 'docker', 'backup', 'logs'],
+    },
+    { ...snap.filesystems[0], filesystemId: 'fs:other', roles: [] },
+  ]
+  const mapping = computeSlotMapping(snap, EMPTY_TOPOLOGY_OVERRIDES)
+  assertEquals(mapping.filesystemPageOrder, ['fs:single', 'fs:other'])
+})
+
 test('computeSlotMapping: a hostingFilesystemId override pins that filesystem first in the page order', () => {
   const mapping = computeSlotMapping(snapshot(), {
     ...EMPTY_TOPOLOGY_OVERRIDES,

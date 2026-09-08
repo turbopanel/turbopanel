@@ -27,8 +27,13 @@ export type SignalId = string // NOSONAR typescript:S6564 — opaque stable iden
 export type NetworkDeviceKind =
   'uplink' | 'member' | 'virtual' | 'fabric' | 'container-bridge' | 'loopback'
 
-/** Mirrors the daemon's `MAX_NIC_SLOTS` — the hard ceiling on monitored NIC slots per server. */
-export const MAX_NIC_SLOTS = 8
+/**
+ * Mirrors the daemon's `MAX_NIC_SLOTS` — the hard ceiling on monitored NIC
+ * slots per server. 11 is the top of the priced ladder (S7 / SX sell 11 NIC
+ * slots — `../../lib/billing/catalogue.ts`), so the ceiling never promises
+ * fewer slots than a tier entitles.
+ */
+export const MAX_NIC_SLOTS = 11
 
 export type NetworkDeviceIdentity = {
   mac?: string
@@ -47,7 +52,19 @@ export type NetworkDeviceTopology = {
   defaultRoute?: boolean
 }
 
-export type FilesystemRole = 'root' | 'hosting' | 'docker' | 'application' | 'custom'
+/**
+ * What a discovered filesystem is *for*. Role-bearing filesystems are pinned
+ * ahead of everything else in `SlotMapping.filesystemPageOrder`
+ * (`topology-slot-mapping.ts`), so the ones a storage panel actually renders
+ * never fall off the end of a page as unrelated mounts come and go.
+ *
+ * `backup` is the managed-backup root (the daemon's `LayoutPaths.backupDir`,
+ * `/backup` by default) and `logs` its log directory — both added in v6
+ * alongside the `managed.storage` family, which reports used and free bytes
+ * for each.
+ */
+export type FilesystemRole =
+  'root' | 'hosting' | 'docker' | 'backup' | 'logs' | 'application' | 'custom'
 
 export type FilesystemTopology = {
   filesystemId: FilesystemId
@@ -123,6 +140,25 @@ export type TopologySnapshot = {
   numaNodes: NumaNodeTopology[]
   memoryTotalBytes: number | null
   swapTotalBytes: number | null
+  /**
+   * The daemon's own physical-vs-VM verdict (`physical-classifier.ts`, DMI +
+   * hypervisor marker) — the control plane prefers this over inferring from
+   * `hardwareSignals`, so a bare-metal host with nothing discoverable is
+   * still `physical`. Absent on snapshots recorded by pre-v6 daemons.
+   */
+  machineClass?: 'physical' | 'virtual'
+  /**
+   * Static layout paths from the host environment (`TURBOPANEL_BACKUP_DIR`
+   * and the log directory) — reported, never probed, so the console can show
+   * where backups land. Absent on snapshots recorded by pre-v6 daemons.
+   */
+  paths?: TopologyLayoutPaths
+}
+
+/** Host layout paths the daemon reports on its topology snapshot. */
+export type TopologyLayoutPaths = {
+  backup: string
+  logs: string
 }
 
 /** Operator overrides projected into topology identity space — mirrors the daemon's `TopologyOverrides`. */

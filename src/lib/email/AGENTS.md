@@ -6,7 +6,7 @@ Root context: `../../../AGENTS.md`.
 
 ## Email
 
-The `src/lib/email/` module defines a queue abstraction (`EmailQueue`, `EmailJob`, `getEmailQueue`) shared by both runtimes.
+The `src/lib/email/` module defines a queue abstraction (`EmailQueue`, `EmailJob`, `getEmailQueue`) shared by both runtimes. Job types: `signup-verification`, `email-otp`, and `server-tier-notice` (hosted license-tier nag from `src/lib/tiers/tier-notice-sweep.ts`). Every sender switch (`mailgun/send.ts`, `mailpit/send.ts`, `mailer/smtp-sender.ts`, `mailer/mailgun-sender.ts`, `mailer/mailpit-sender.ts`) must handle a new type or the job is dropped.
 
 ### Deno vs Workers paths
 

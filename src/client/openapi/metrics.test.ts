@@ -106,24 +106,10 @@ test('HostSeriesChartPoint documents topologyGeneration, never the retired hardw
   assertEquals('partsPresent' in (schema.properties ?? {}), false)
 })
 
-test('HostSeriesChartPoint documents the optional cpuHotspots payload returned with cpuDetail.* series buckets', () => {
+test('HostSeriesChartPoint no longer advertises the deleted per-core hotspot payload', () => {
   const schema = metricsSchemas.HostSeriesChartPoint as SchemaObject
-  const cpuHotspots = schema.properties?.cpuHotspots as
-    { type?: string; items?: { $ref?: string } } | undefined
-  assertExists(cpuHotspots)
-  assertEquals(cpuHotspots.type, 'array')
-  assertEquals(cpuHotspots.items?.$ref, '#/components/schemas/HostSeriesCpuHotspotPoint')
-  // Optional — a request with no cpuDetail.* selector never sees this field.
-  assertEquals(schema.required?.includes('cpuHotspots'), false)
-})
-
-test('HostSeriesCpuHotspotPoint requires coreId (nullable) and values', () => {
-  const schema = metricsSchemas.HostSeriesCpuHotspotPoint as SchemaObject
-  assertEquals(schema.required, ['coreId', 'values'])
-  const coreId = schema.properties?.coreId as { type?: string[] } | undefined
-  assertEquals(coreId?.type, ['string', 'null'])
-  const values = schema.properties?.values as { $ref?: string } | undefined
-  assertEquals(values?.$ref, '#/components/schemas/HostMetricValues')
+  assertEquals('cpuHotspots' in (schema.properties ?? {}), false)
+  assertEquals('HostSeriesCpuHotspotPoint' in metricsSchemas, false)
 })
 
 test('HostSeriesChartResponse bundles host/entities/inventory/topologyGeneration and drops every v3-only field', () => {
@@ -161,7 +147,7 @@ test('HostSeriesChartResponse bundles host/entities/inventory/topologyGeneration
   )
 })
 
-test('EntitySeriesResult documents every PerEntityHostedFamilyV5', () => {
+test('EntitySeriesResult documents every PerEntityHostedFamily', () => {
   const schema = metricsSchemas.EntitySeriesResult as SchemaObject
   const familySchema = schema.properties!.family as SchemaObject
   assertEquals(familySchema.enum, [
@@ -185,6 +171,26 @@ test('TopologyInventory documents every entity family except the presence-only m
     'gpus',
     'hardwareSignals',
   ])
+})
+
+test('EntitySeriesPoint documents optional ingress-only derived latency figures', () => {
+  const point = metricsSchemas.EntitySeriesPoint as SchemaObject
+  assertEquals(
+    (point.properties!.derived as SchemaObject).$ref,
+    '#/components/schemas/IngressSeriesPointDerived'
+  )
+  // Every other family omits `derived`, so it must never be required.
+  assertEquals(point.required?.includes('derived'), false)
+
+  const derived = metricsSchemas.IngressSeriesPointDerived as SchemaObject
+  assertEquals(derived.required, [
+    'errorRatePercent',
+    'averageLatencyMs',
+    'p50LatencyMs',
+    'p90LatencyMs',
+    'p99LatencyMs',
+  ])
+  assertExists(derived.properties!.p99LatencyMs)
 })
 
 test('HostSummaryChartResponse carries the envelope but not host-series-only fields', () => {

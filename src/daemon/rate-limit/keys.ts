@@ -76,6 +76,25 @@ export function gitlabWebhookRateLimitKey(peer: string): string {
 }
 
 function gitWebhookRateLimitKey(provider: string, peer: string): string {
-  const id = peer.trim().length > 0 ? peer.trim() : "unknown";
-  return `git:webhook:${provider}:${id}`;
+  return `git:webhook:${provider}:${normalizeWebhookPeer(peer)}`;
+}
+
+/**
+ * Key for the inbound Stripe webhook surface (`/webhook/stripe`).
+ *
+ * Same per-peer reasoning as the git keys — the caller has no identity until
+ * its `Stripe-Signature` verifies — but a **billing** traffic class rather
+ * than `git:`: the existing keys are domain-prefixed and pinned by live
+ * counters and `keys.test.ts`, so a new domain gets a new prefix instead of a
+ * rename. Its own bucket, so a webhook burst from Stripe (an invoice run) can
+ * never spend a git provider's budget, and vice versa.
+ */
+export function stripeWebhookRateLimitKey(peer: string): string {
+  return `billing:webhook:stripe:${normalizeWebhookPeer(peer)}`;
+}
+
+/** Blank peer → the shared `unknown` bucket (the conservative direction). */
+function normalizeWebhookPeer(peer: string): string {
+  const trimmed = peer.trim();
+  return trimmed.length > 0 ? trimmed : "unknown";
 }

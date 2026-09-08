@@ -73,7 +73,7 @@ import {
 } from '../../lib/db/webhook-delivery-records.ts'
 import {
   type AnalyticsEngineDatasetLike,
-  resolveServerMetricsStoreV5,
+  resolveServerMetricsStore,
 } from '../metrics/store-selection-workers.ts'
 import { setServerStatusEventSink } from '../metrics/status-events.ts'
 import {
@@ -103,9 +103,16 @@ import { resolveCloudflareAnalyticsSqlConfig } from '../metrics/store-selection-
 import {
   AE_LIVENESS_QUERY_TIMEOUT_MS,
   AE_LIVENESS_WINDOW_SECONDS,
-  queryRecentlyActiveServerIdsV5 as queryRecentlyActiveServerIds,
-} from '../metrics/backends/cloudflare/sql-api-v5.ts'
+  queryRecentlyActiveServerIds,
+} from '../metrics/backends/cloudflare/sql-api.ts'
 import { endOfflineSweep, tryBeginOfflineSweep } from './offline-sweep-lease.ts'
+import { resolveWorkersEmailQueue } from '../../lib/email/mailgun/workers-queue.ts'
+import { sweepTierNotices } from '../../lib/tiers/tier-notice-sweep.ts'
+import { resolveBillingConfig } from '../../lib/billing/config.ts'
+import { createStripeClient } from '../../lib/billing/client.ts'
+import { runGraceClock, shouldRunGraceClock } from '../../lib/billing/grace-clock.ts'
+import { runReconcile, shouldRunReconcile } from '../../lib/billing/reconcile.ts'
+import { projectSubscriptionById } from '../../webhook/billing/stripe-projection.ts'
 
 /** Grace beyond the daemon's ~60s idle-ping cadence before declaring a server stale. */
 export const OFFLINE_SWEEP_STALE_MS = 90_000
@@ -138,6 +145,9 @@ export const LIVENESS_RPC_TIMEOUT_MS = 5_000
 /** Execution-log R2 retention runs on this minute-modulo divisor. */
 export const EXECUTION_LOG_SWEEP_MINUTE_DIVISOR = 15
 
+/** Hosted license-tier nag — hourly on the same cron tick. */
+export const TIER_NOTICE_SWEEP_MINUTE_DIVISOR = 60
+
 export type SweepOnceStats = {
   probed: number
   stale: number
@@ -163,6 +173,11 @@ export function takeLastOfflineSweepScheduledTimeForTests(): number | undefined 
 export function shouldSweepExecutionLogs(scheduledTimeMs: number): boolean {
   const minute = Math.floor(scheduledTimeMs / 60_000)
   return minute % EXECUTION_LOG_SWEEP_MINUTE_DIVISOR === 0
+}
+
+export function shouldSweepTierNotices(scheduledTimeMs: number): boolean {
+  const minute = Math.floor(scheduledTimeMs / 60_000)
+  return minute % TIER_NOTICE_SWEEP_MINUTE_DIVISOR === 0
 }
 
 /** Format a trace field without relying on Object's default `[object Object]`. */
@@ -902,10 +917,26 @@ function capDbTimeout(deadlineMs: number): number {
   return Math.max(1, Math.min(DB_OP_TIMEOUT_MS, left))
 }
 
+function shouldRunScheduledPhase(
+  scheduledTime: number | undefined,
+  shouldRun: (scheduledTimeMs: number) => boolean
+): boolean {
+  return scheduledTime !== undefined && shouldRun(scheduledTime)
+}
+
 function optionalPhaseNames(scheduledTime: number | undefined): string[] {
   const names = ['command-dispatch', 'webhook-deliveries']
-  if (scheduledTime !== undefined && shouldSweepExecutionLogs(scheduledTime)) {
+  if (shouldRunScheduledPhase(scheduledTime, shouldSweepExecutionLogs)) {
     names.push('execution-logs')
+  }
+  if (shouldRunScheduledPhase(scheduledTime, shouldSweepTierNotices)) {
+    names.push('tier-notices')
+  }
+  if (shouldRunScheduledPhase(scheduledTime, shouldRunGraceClock)) {
+    names.push('billing-grace-clock')
+  }
+  if (shouldRunScheduledPhase(scheduledTime, shouldRunReconcile)) {
+    names.push('billing-reconcile')
   }
   names.push('reconcile')
   return names
@@ -963,6 +994,108 @@ async function runOptionalPhase(
   }
 }
 
+/**
+ * Like {@link runOptionalPhase}, but skip (and keep going) when this tick is
+ * not in the phase's schedule window.
+ */
+async function runScheduledOptionalPhase(
+  deadlineMs: number,
+  phase: string,
+  scheduledTime: number | undefined,
+  phasesSkipped: string[],
+  shouldRun: (scheduledTimeMs: number) => boolean,
+  work: () => Promise<void>
+): Promise<boolean> {
+  if (!shouldRunScheduledPhase(scheduledTime, shouldRun)) return true
+  return runOptionalPhase(deadlineMs, phase, scheduledTime, phasesSkipped, work)
+}
+
+async function sweepExecutionLogsPhase(
+  env: CloudflareBindings,
+  opts: RunOfflineSweepOpts
+): Promise<void> {
+  await sweepExpiredExecutionLogsSafely(
+    resolveExecutionLogStore({
+      runtime: 'workers',
+      r2: (env as { EXECUTION_LOGS?: R2BucketLike }).EXECUTION_LOGS,
+    }),
+    opts.executionLogRetentionDays ??
+      parseExecutionLogRetentionDays(env.TURBOPANEL_EXECUTION_LOG_RETENTION_DAYS)
+  )
+}
+
+async function sweepTierNoticesPhase(
+  env: CloudflareBindings,
+  db: Db,
+  tlsRenewal: CronTlsRenewal | null | undefined,
+  opts: RunOfflineSweepOpts
+): Promise<void> {
+  const platformEnv = env as unknown as Record<string, string | undefined>
+  const emailQueue = await resolveWorkersEmailQueue(
+    db,
+    platformEnv,
+    tlsRenewal?.dataEncryptionSecrets,
+  )
+  const publicUrls = platformEnv.TURBOPANEL_PUBLIC_URLS?.split(',')[0]?.trim()
+  await sweepTierNotices({
+    db,
+    emailQueue,
+    deployment: 'hosted',
+    ignoreElapsedGate: true,
+    nowMs: opts.nowMs,
+    consoleBaseUrl: platformEnv.TURBOPANEL_BASE_URL?.trim() || publicUrls,
+  })
+}
+
+async function runBillingOptionalPhases(
+  env: CloudflareBindings,
+  db: Db,
+  opts: RunOfflineSweepOpts,
+  deadlineMs: number,
+  phasesSkipped: string[]
+): Promise<boolean> {
+  // Billing phases: skipped wholesale when the instance has no Stripe key
+  // (`resolveBillingConfig` is the switch). They run in sequence through
+  // the optional-phase runner, so a failure in one skips the billing
+  // phases after it for that tick (they catch up on the next one). Kept
+  // that way by decision on 2026-09-08; see the v6 ledger.
+  const billingConfig = resolveBillingConfig(env as unknown as Record<string, string | undefined>)
+  if (!billingConfig) return true
+
+  if (
+    !(await runScheduledOptionalPhase(
+      deadlineMs,
+      'billing-grace-clock',
+      opts.scheduledTime,
+      phasesSkipped,
+      shouldRunGraceClock,
+      async () => {
+        const client = createStripeClient(billingConfig)
+        await runGraceClock({
+          db,
+          client,
+          nowMs: opts.nowMs,
+          reproject: (providerSubscriptionId) =>
+            projectSubscriptionById({ db, client }, providerSubscriptionId),
+        })
+      }
+    ))
+  ) {
+    return false
+  }
+
+  return runScheduledOptionalPhase(
+    deadlineMs,
+    'billing-reconcile',
+    opts.scheduledTime,
+    phasesSkipped,
+    shouldRunReconcile,
+    async () => {
+      await runReconcile({ db, nowMs: opts.nowMs })
+    }
+  )
+}
+
 async function runOptionalCronPhases(
   env: CloudflareBindings,
   db: Db,
@@ -995,26 +1128,34 @@ async function runOptionalCronPhases(
     return
   }
 
-  if (opts.scheduledTime !== undefined && shouldSweepExecutionLogs(opts.scheduledTime)) {
-    if (
-      !(await runOptionalPhase(
-        deadlineMs,
-        'execution-logs',
-        opts.scheduledTime,
-        phasesSkipped,
-        () =>
-          sweepExpiredExecutionLogsSafely(
-            resolveExecutionLogStore({
-              runtime: 'workers',
-              r2: (env as { EXECUTION_LOGS?: R2BucketLike }).EXECUTION_LOGS,
-            }),
-            opts.executionLogRetentionDays ??
-              parseExecutionLogRetentionDays(env.TURBOPANEL_EXECUTION_LOG_RETENTION_DAYS)
-          )
-      ))
-    ) {
-      return
-    }
+  if (
+    !(await runScheduledOptionalPhase(
+      deadlineMs,
+      'execution-logs',
+      opts.scheduledTime,
+      phasesSkipped,
+      shouldSweepExecutionLogs,
+      () => sweepExecutionLogsPhase(env, opts)
+    ))
+  ) {
+    return
+  }
+
+  if (
+    !(await runScheduledOptionalPhase(
+      deadlineMs,
+      'tier-notices',
+      opts.scheduledTime,
+      phasesSkipped,
+      shouldSweepTierNotices,
+      () => sweepTierNoticesPhase(env, db, tlsRenewal, opts)
+    ))
+  ) {
+    return
+  }
+
+  if (!(await runBillingOptionalPhases(env, db, opts, deadlineMs, phasesSkipped))) {
+    return
   }
 
   const commandQueue = env.TURBOPANEL_COMMAND_QUEUE
@@ -1049,10 +1190,10 @@ export async function runOfflineSweep(
   // and must not depend on that ordering. Always the v5 store so demotions /
   // self-heal status rows land in the same dataset the read side queries.
   setServerStatusEventSink(
-    resolveServerMetricsStoreV5({
+    resolveServerMetricsStore({
       runtime: 'workers',
-      analyticsEngine: (env as { SERVER_METRICS_V5?: AnalyticsEngineDatasetLike })
-        .SERVER_METRICS_V5,
+      analyticsEngine: (env as { SERVER_METRICS?: AnalyticsEngineDatasetLike })
+        .SERVER_METRICS,
     })
   )
 

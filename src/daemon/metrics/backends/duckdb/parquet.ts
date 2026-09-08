@@ -24,15 +24,18 @@ import { escapeSqlString } from './database.ts'
 import {
   BLOCK_SAMPLES_TABLE,
   DATABASE_PROXY_SAMPLES_TABLE,
+  DOCKER_SAMPLES_TABLE,
   FILESYSTEM_SAMPLES_TABLE,
   GPU_SAMPLES_TABLE,
   HARDWARE_SIGNAL_SAMPLES_TABLE,
   HOST_SAMPLES_TABLE,
   INGRESS_SAMPLES_TABLE,
-  MEMORY_DETAIL_SAMPLES_TABLE,
+  MEMORY_DIAGNOSTICS_SAMPLES_TABLE,
   METRIC_EVENTS_TABLE,
   NETWORK_SAMPLES_TABLE,
+  ROUTER_SAMPLES_TABLE,
   STATUS_EVENTS_TABLE,
+  STORAGE_SAMPLES_TABLE,
 } from './schema.ts'
 
 export const MS_PER_DAY = 24 * 60 * 60 * 1000
@@ -46,10 +49,13 @@ export type ParquetFamilyKey =
   | 'filesystem'
   | 'block'
   | 'gpu'
-  | 'memory-detail'
+  | 'memory-diagnostics'
   | 'hardware'
   | 'ingress'
   | 'database-proxy'
+  | 'router'
+  | 'storage'
+  | 'docker'
   | 'events'
 
 export type ParquetFamily = {
@@ -95,9 +101,9 @@ export const PARQUET_FAMILIES: readonly ParquetFamily[] = [
     timestampColumn: 'sampled_at',
   },
   {
-    key: 'memory-detail',
-    table: MEMORY_DETAIL_SAMPLES_TABLE,
-    subdir: 'memory-detail',
+    key: 'memory-diagnostics',
+    table: MEMORY_DIAGNOSTICS_SAMPLES_TABLE,
+    subdir: 'memory-diagnostics',
     timestampColumn: 'sampled_at',
   },
   {
@@ -116,6 +122,24 @@ export const PARQUET_FAMILIES: readonly ParquetFamily[] = [
     key: 'database-proxy',
     table: DATABASE_PROXY_SAMPLES_TABLE,
     subdir: 'database-proxy',
+    timestampColumn: 'sampled_at',
+  },
+  {
+    key: 'router',
+    table: ROUTER_SAMPLES_TABLE,
+    subdir: 'router',
+    timestampColumn: 'sampled_at',
+  },
+  {
+    key: 'storage',
+    table: STORAGE_SAMPLES_TABLE,
+    subdir: 'storage',
+    timestampColumn: 'sampled_at',
+  },
+  {
+    key: 'docker',
+    table: DOCKER_SAMPLES_TABLE,
+    subdir: 'docker',
     timestampColumn: 'sampled_at',
   },
   {

@@ -19,6 +19,7 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 import type { Db } from '../../db.ts'
 import { topologyGeneration } from '../../lib/db/schema.ts'
+import type { TopologyLayoutPaths } from './topology-types.ts'
 
 export type TopologyGenerationRecord = {
   generation: number
@@ -200,4 +201,42 @@ export async function getTopologyGenerations(
       and(eq(topologyGeneration.serverId, serverId), inArray(topologyGeneration.generation, wanted))
     )
   return new Map(rows.map((row) => [row.generation, serializeRow(row)]))
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+/**
+ * The host layout paths a v6 daemon reports on its topology snapshot
+ * (`snapshot.paths`), or `null` for a snapshot recorded by an older daemon
+ * or a malformed one. Read-only facts: the daemon takes them from its own
+ * environment (`TURBOPANEL_BACKUP_DIR`), so nothing on the control plane
+ * can set them.
+ */
+export function layoutPathsFromSnapshot(snapshot: unknown): TopologyLayoutPaths | null {
+  if (typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) return null
+  const paths = (snapshot as Record<string, unknown>).paths
+  if (typeof paths !== 'object' || paths === null || Array.isArray(paths)) return null
+  const { backup, logs } = paths as Record<string, unknown>
+  if (!nonEmptyString(backup) || !nonEmptyString(logs)) return null
+  return { backup, logs }
+}
+
+/**
+ * Latest reported layout paths per server, for the server DTOs. One
+ * `DISTINCT ON` query over the generation table; servers with no topology
+ * yet (or a pre-v6 daemon) are simply absent from the map.
+ */
+export async function loadServerLayoutPaths(
+  db: Db,
+  serverIds: readonly string[]
+): Promise<Map<string, TopologyLayoutPaths>> {
+  const out = new Map<string, TopologyLayoutPaths>()
+  const latest = await getLatestTopologyGenerations(db, serverIds)
+  for (const [serverId, record] of latest) {
+    const paths = layoutPathsFromSnapshot(record.snapshot)
+    if (paths) out.set(serverId, paths)
+  }
+  return out
 }

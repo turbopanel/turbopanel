@@ -43,14 +43,29 @@ const ROUND_TRIP_CASES: {
     id: 'host.network.tcpRetransmitPercent',
   },
   {
-    name: 'cpuDetail singleton',
-    selector: { scope: 'cpuDetail', field: 'cpuIrqPercent' },
-    id: 'cpuDetail.cpuIrqPercent',
+    name: 'diagnostics singleton (CPU half)',
+    selector: { scope: 'diagnostics', field: 'cpuIrqPercent' },
+    id: 'diagnostics.cpuIrqPercent',
   },
   {
-    name: 'memoryDetail singleton',
-    selector: { scope: 'memoryDetail', field: 'dirtyBytes' },
-    id: 'memoryDetail.dirtyBytes',
+    name: 'diagnostics singleton (memory half)',
+    selector: { scope: 'diagnostics', field: 'dirtyBytes' },
+    id: 'diagnostics.dirtyBytes',
+  },
+  {
+    name: 'router singleton (count gauge)',
+    selector: { scope: 'router', field: 'backendsUp' },
+    id: 'router.backendsUp',
+  },
+  {
+    name: 'router singleton (weighted-average gauge)',
+    selector: { scope: 'router', field: 'tlsCertSoonestExpiryDays' },
+    id: 'router.tlsCertSoonestExpiryDays',
+  },
+  {
+    name: 'router singleton (delta counter)',
+    selector: { scope: 'router', field: 'configReloads' },
+    id: 'router.configReloads',
   },
   {
     name: 'network entity',
@@ -134,6 +149,27 @@ test('formatEntityMetricId rejects entityId on a host-singleton scope', () => {
       }),
     TypeError,
     'host-singleton'
+  )
+})
+
+test('formatEntityMetricId rejects entityId on the router singleton scope', () => {
+  assertThrows(
+    () =>
+      formatEntityMetricId({
+        scope: 'router',
+        entityId: 'traefik-1',
+        field: 'backendsUp',
+      }),
+    TypeError,
+    'host-singleton'
+  )
+})
+
+test('parseEntityMetricId rejects an unknown router field', () => {
+  assertThrows(
+    () => parseEntityMetricId('router.notAField'),
+    TypeError,
+    'invalid entity metric id'
   )
 })
 

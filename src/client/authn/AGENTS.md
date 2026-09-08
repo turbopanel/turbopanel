@@ -41,6 +41,8 @@ Do-not-retry-soon mapping for enroll/session responses (daemon intent):
 | `401 Invalid license` | permanent → daemon parks (5 min–1 h backoff) |
 | `400 License already consumed or invalid` | permanent → daemon parks |
 | `400 License is inactive` | permanent → daemon parks |
+| `400 License tier below required` | permanent → daemon parks |
+| `400 License tier not assigned` | permanent → daemon parks |
 | `400 Server key is inactive` | permanent → daemon parks |
 | `403 Invalid signature` / `409 Fingerprint already exists` | permanent → daemon parks |
 | `404 Server key not found` / `400 Server key mismatch` | stale-identity → recoverable re-enroll (keeps persisted `serverId`) |

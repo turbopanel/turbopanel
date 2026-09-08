@@ -10,7 +10,8 @@
  *   - `vitest.config.ts` `test.include` -- Workers/Durable-Object suites that
  *     only run under `@cloudflare/vitest-pool-workers` (Istanbul coverage).
  *   - `SERVICE_DEPENDENT` below -- suites deliberately left out of both,
- *     because they need Redis / ClickHouse that CI does not start.
+ *     because they need Redis / ClickHouse / a live Stripe sandbox that CI
+ *     does not start.
  *
  * A hand-maintained list drifts silently: a new `*.test.ts` that nobody adds
  * to a list is never executed and never appears in `coverage/lcov.info`, so
@@ -64,6 +65,14 @@ const SERVICE_DEPENDENT = new Map([
   [
     'src/daemon/ws-handlers.test.ts',
     'Needs a live Redis (cell registry fan-out). Run locally against a dev Redis.',
+  ],
+  [
+    'scripts/billing-test-clock-harness.test.ts',
+    'Needs a live Stripe sandbox with a test-mode key, test clocks, and a catalogue entered ' +
+      'under Admin \u2192 Tiers (one active priced S3 and S5, both verifying). Run manually: ' +
+      'TURBOPANEL_STRIPE_SECRET_KEY=sk_test_... TURBOPANEL_DATABASE_URL=... ' +
+      'deno test -A scripts/billing-test-clock-harness.test.ts ' +
+      '(or `deno task billing:test-clocks`).',
   ],
 ])
 

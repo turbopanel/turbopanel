@@ -34,6 +34,7 @@ import { emptyServerIps } from "../server-addresses.ts";
 import { buildAdminScalarHtml } from "../scalar-html.ts";
 import { ADMIN_API_PREFIX } from "../surfaces.ts";
 import { getAdminOpenApiSpec } from "./openapi/index.ts";
+import { registerAdminTierRoutes } from "./tier-routes.ts";
 import {
   getPublicUrls,
   parsePublicUrlEntries,
@@ -98,6 +99,12 @@ export function registerAdminRoutes(app: Hono<AppEnv>, opts: {
 }) {
   const admin = new Hono<AppEnv>();
   admin.use("*", createAdminAccessMiddleware(opts.secrets));
+
+  // Superadmin tier catalogue (C15). Hosted (Workers) only — self-hosted has no
+  // billing, so the surface is absent there. Each route nests root-only itself.
+  if (opts.runtime === "workers") {
+    registerAdminTierRoutes(admin, { secrets: opts.secrets });
+  }
 
   admin.get("/daemon/connections", async (c) => {
     const registry = getDaemonCellRegistry(c);
@@ -784,7 +791,10 @@ export function registerAdminRoutes(app: Hono<AppEnv>, opts: {
     admin.get("/openapi.json", (c) => {
       const origin = new URL(c.req.url).origin;
       return c.json(
-        getAdminOpenApiSpec(origin, { devSurface: opts.devSurface }),
+        getAdminOpenApiSpec(origin, {
+          devSurface: opts.devSurface,
+          runtime: opts.runtime,
+        }),
       );
     });
     admin.get("/reference", (c) => {

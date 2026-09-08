@@ -2,7 +2,7 @@ import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import type { Context } from 'hono'
 import postgres from 'postgres'
 import type { DaemonCellRegistry } from './daemon/cell/contracts.ts'
-import type { ServerMetricsStoreV5 } from './daemon/metrics/types-v5.ts'
+import type { ServerMetricsStore } from './daemon/metrics/types.ts'
 import type { ExecutionLogStore } from './lib/execution-logs/types.ts'
 import type { QueryCache } from './query-cache/contracts.ts'
 import { getDatabaseUrl, resolvePostgresConnection } from './db-url.ts'
@@ -235,14 +235,14 @@ export function getQueryCache(c: Context): QueryCache | undefined {
 
 /**
  * v5 metrics store for the current request, wired by `createApp` (see
- * `app.ts`) from its `serverMetricsStoreV5` option. On Deno this is the
+ * `app.ts`) from its `serverMetricsStore` option. On Deno this is the
  * `DuckDbParquetServerMetricsStore` instance; on Workers, the entrypoint
- * passes a real `CloudflareAnalyticsEngineServerMetricsStoreV5` bound to
- * `SERVER_METRICS_V5` (or `DisabledServerMetricsStoreV5` when that binding is
+ * passes a real `CloudflareAnalyticsEngineServerMetricsStore` bound to
+ * `SERVER_METRICS` (or `DisabledServerMetricsStore` when that binding is
  * unconfigured).
  */
-export function getServerMetricsStoreV5(c: Context): ServerMetricsStoreV5 | undefined {
-  return c.get('serverMetricsStoreV5')
+export function getServerMetricsStore(c: Context): ServerMetricsStore | undefined {
+  return c.get('serverMetricsStore')
 }
 
 /**

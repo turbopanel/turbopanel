@@ -6,7 +6,7 @@
  * `finalizeHostSeriesResult` / `computeSeriesGapCount`).
  */
 
-import type { ServerStatusTransitionReason, StatusHistoryEvent } from '../types-v5.ts'
+import type { ServerStatusTransitionReason, StatusHistoryEvent } from '../types.ts'
 
 export type ComputeStatusUptimeInput = {
   fromMs: number

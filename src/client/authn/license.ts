@@ -32,9 +32,14 @@ export async function verifyLicenseToken(
   return verifyPassword(plaintext, hashed)
 }
 
+/**
+ * Mint one registration key. `tierId` binds the seat to a hosted billing
+ * tier and is billing-managed there (`src/lib/db/AGENTS.md`); self-hosted
+ * keeps it `null`.
+ */
 export async function createLicense(
   db: Db,
-  opts: { organizationId: string; name?: string },
+  opts: { organizationId: string; name?: string; tierId?: string | null },
 ): Promise<{ licenseId: string; licenseToken: string }> {
   const { plaintext, hashed } = await generateLicenseToken()
   const now = nowTs()
@@ -44,6 +49,7 @@ export async function createLicense(
     .values({
       organizationId: opts.organizationId,
       name: opts.name ?? null,
+      tierId: opts.tierId ?? null,
       token: hashed,
       createdAt: now,
       updatedAt: now,
@@ -98,18 +104,98 @@ export async function disconnectServersBoundToLicense(
   return serverIds
 }
 
+export type LicenseAttachment =
+  | { ok: false; reason: 'not_found' }
+  | { ok: true; tierId: string | null; boundServer: { id: string; name: string | null } | null }
+
+/**
+ * What `invalidateLicense` would see, without revoking anything: the
+ * license's tier and its bound server. The billing gate runs between this
+ * read and the revoke, so a refused (attached) revoke never leaves a
+ * `release-seat` intent behind.
+ */
+export async function inspectLicenseAttachment(
+  db: Db,
+  licenseId: string,
+  organizationId: string,
+): Promise<LicenseAttachment> {
+  const rows = await db
+    .select({
+      tierId: license.tierId,
+      serverId: license.serverId,
+      boundId: server.id,
+      boundName: server.name,
+    })
+    .from(license)
+    .leftJoin(server, eq(server.id, license.serverId))
+    .where(and(
+      eq(license.id, licenseId),
+      eq(license.organizationId, organizationId),
+      isNull(license.revokedAt),
+    ))
+    .limit(1)
+  const row = rows[0]
+  if (!row) return { ok: false, reason: 'not_found' }
+  const boundId = row.boundId ?? row.serverId
+  return {
+    ok: true,
+    tierId: row.tierId,
+    boundServer: boundId ? { id: boundId, name: row.boundName ?? null } : null,
+  }
+}
+
 export type InvalidateLicenseResult =
-  | { ok: false }
+  | { ok: false; reason: 'not_found' }
+  | {
+    ok: false
+    reason: 'attached'
+    boundServer: { id: string; name: string | null }
+  }
   | { ok: true; serverIds: string[] }
 
-/** Soft-invalidates a license and revokes daemon keys on bound servers. */
+/**
+ * Soft-invalidates a license. A live `server_id` attachment without `force`
+ * is refused so the console can tell the operator to delete the server first.
+ * `serverIds` is always empty on the non-force success path because attachment
+ * was refused. `revokeLicense` + `disconnectServersBoundToLicense` run only
+ * when `force` is set (or the seat is already unbound).
+ */
 export async function invalidateLicense(
   db: Db,
   licenseId: string,
   organizationId: string,
+  opts?: { force?: boolean },
 ): Promise<InvalidateLicenseResult> {
+  const rows = await db
+    .select({
+      licenseId: license.id,
+      serverId: license.serverId,
+      boundId: server.id,
+      boundName: server.name,
+    })
+    .from(license)
+    .leftJoin(server, eq(server.id, license.serverId))
+    .where(and(
+      eq(license.id, licenseId),
+      eq(license.organizationId, organizationId),
+      isNull(license.revokedAt),
+    ))
+    .limit(1)
+  const row = rows[0]
+  if (!row) return { ok: false, reason: 'not_found' }
+
+  const boundId = row.boundId ?? row.serverId
+  if (boundId && !opts?.force) {
+    return {
+      ok: false,
+      reason: 'attached',
+      boundServer: { id: boundId, name: row.boundName ?? null },
+    }
+  }
+
   const revoked = await revokeLicense(db, licenseId, organizationId)
-  if (!revoked) return { ok: false }
+  if (!revoked) return { ok: false, reason: 'not_found' }
+  if (!opts?.force) return { ok: true, serverIds: [] }
   const serverIds = await disconnectServersBoundToLicense(
     db,
     licenseId,

@@ -47,7 +47,7 @@ export default defineConfig({
       'src/client/authn/signup-validation.test.ts',
       'src/client/authn/data-encryption.test.ts',
       'src/client/authn/password.test.ts',
-      'src/daemon/metrics/validation-v5.test.ts',
+      'src/daemon/metrics/validation.test.ts',
       'mailer/rate-limiter.test.ts',
       // Hyperdrive fresh-per-request / close guards (Istanbul covers workers-bindings.ts).
       // Keep out of scripts/test-coverage.sh Deno LCOV — Workers-pool only.

@@ -2,16 +2,16 @@
  * Counter-reset end-to-end (control-plane half). Counter-reset *detection*
  * is entirely the daemon's job (`turbopaneld`'s `CounterBaselineTracker` —
  * see `collector/rates.ts` / `collector/baseline.ts`, not in this repo): by
- * the time a sample reaches `validation-v5.ts` / `contract-v5.ts` / the
+ * the time a sample reaches `validation.ts` / `contract.ts` / the
  * stores, a reset interval already reports `null` for the affected
- * rate/counter-derived fields (confirmed by reading `validation-v5.ts`,
+ * rate/counter-derived fields (confirmed by reading `validation.ts`,
  * which is a pure wire-format validator with no baseline/reset concept of
- * its own — `sanitizeFinite`/`sanitizeMetricValueV5` only ever pass a
+ * its own — `sanitizeFinite`/`sanitizeMetricValue` only ever pass a
  * missing reading through as `null`, never fabricate a value or coerce it
  * to `0`).
  *
  * This file's job is the control-plane half of that contract: push two
- * samples through `buildMetricsSampleV5` -> DuckDB `writeSample` with a
+ * samples through `buildMetricsSample` -> DuckDB `writeSample` with a
  * `bootGeneration` bump between them (simulating a reboot) where the second
  * sample's rate-derived NIC and disk-throughput fields are `null` (what the
  * daemon would emit for the reset interval) while unrelated fields keep
@@ -22,9 +22,9 @@
  */
 import { assertEquals } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { buildMetricsSampleV5, type MetricsSampleV5Input } from './contract-v5.ts'
-import type { AuthenticatedMetricsSampleV5 } from './types-v5.ts'
-import { AE_V5_MISSING_METRIC_SENTINEL } from './backends/cloudflare/field-map-v5.ts'
+import { buildMetricsSample, type MetricsSampleInput } from './contract.ts'
+import type { AuthenticatedMetricsSample } from './types.ts'
+import { AE_MISSING_METRIC_SENTINEL } from './backends/cloudflare/field-map.ts'
 import { DuckDbParquetServerMetricsStore } from './backends/duckdb/store.ts'
 
 const SERVER_ID = '11111111-2222-4333-8444-555555555555'
@@ -38,14 +38,13 @@ function inputForTick(opts: {
   topologyGeneration?: number
   diskReadBytesPerSecond: number | null
   nicReceiveBytesPerSecond: number | null
-}): MetricsSampleV5Input {
+}): MetricsSampleInput {
   return {
     metadata: {
-      version: 5,
+      version: 6,
       sampledAt: new Date(opts.atMs).toISOString(),
       intervalSeconds: INTERVAL_SECONDS,
       sequence: opts.sequence,
-      collectionMode: 'baseline',
       topologyGeneration: opts.topologyGeneration ?? 1,
       bootGeneration: opts.bootGeneration,
     },
@@ -109,8 +108,8 @@ function inputForTick(opts: {
   }
 }
 
-function authenticate(input: MetricsSampleV5Input): AuthenticatedMetricsSampleV5 {
-  const built = buildMetricsSampleV5(input)
+function authenticate(input: MetricsSampleInput): AuthenticatedMetricsSample {
+  const built = buildMetricsSample(input)
   return {
     ...built,
     serverId: SERVER_ID,
@@ -191,7 +190,7 @@ it('counter-reset end-to-end: a bootGeneration bump with null rate fields report
     // Reset interval: a real null gap, never 0, never a fabricated delta.
     assertEquals(byAt.get(tick2At)!['host.storage.diskReadBytesPerSecond'], null)
     assertEquals(
-      byAt.get(tick2At)!['host.storage.diskReadBytesPerSecond'] === AE_V5_MISSING_METRIC_SENTINEL,
+      byAt.get(tick2At)!['host.storage.diskReadBytesPerSecond'] === AE_MISSING_METRIC_SENTINEL,
       false
     )
     assertEquals(byAt.get(tick3At)!['host.storage.diskReadBytesPerSecond'], 200)
@@ -302,7 +301,7 @@ it('counter-reset end-to-end: a topologyGeneration bump with no reboot and conti
     assertEquals(byAt.get(tick1At)!['host.storage.diskReadBytesPerSecond'], 1000)
     assertEquals(byAt.get(tick2At)!['host.storage.diskReadBytesPerSecond'], 1200)
     assertEquals(
-      byAt.get(tick2At)!['host.storage.diskReadBytesPerSecond'] === AE_V5_MISSING_METRIC_SENTINEL,
+      byAt.get(tick2At)!['host.storage.diskReadBytesPerSecond'] === AE_MISSING_METRIC_SENTINEL,
       false
     )
     assertEquals(byAt.get(tick3At)!['host.storage.diskReadBytesPerSecond'], 1400)

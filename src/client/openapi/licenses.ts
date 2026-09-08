@@ -44,6 +44,12 @@ export function buildLicenseSchemas(installCommandDescription: string) {
       type: 'object',
       properties: {
         name: { type: 'string' },
+        tierId: {
+          type: 'string',
+          format: 'uuid',
+          description:
+            'Hosted billing only — required when billing is configured; the seat is minted against a free seat at this tier (`409 no_free_seat` otherwise). Ignored on self-hosted.',
+        },
         installBaseUrl: {
           type: 'string',
           description:
@@ -71,6 +77,21 @@ export function buildLicenseSchemas(installCommandDescription: string) {
       required: ['ok'],
       properties: {
         ok: { type: 'boolean', const: true },
+      },
+    },
+    LicenseHasAttachedServerError: {
+      type: 'object',
+      required: ['error', 'server'],
+      properties: {
+        error: { type: 'string', const: 'license_has_attached_server' },
+        server: {
+          type: 'object',
+          required: ['id'],
+          properties: {
+            id: { type: 'string' },
+            name: { type: ['string', 'null'] },
+          },
+        },
       },
     },
   }
@@ -208,7 +229,7 @@ export function buildLicensePaths(_installCommandDescription: string): Record<st
         tags: ['Licenses'],
         summary: 'Invalidate a license',
         description:
-          'Soft-invalidates the license (sets revoked_at) and revokes daemon keys on bound servers so they cannot reconnect.',
+          'Soft-invalidates the license (sets revoked_at) when no live server is attached. A bound server must be deleted first (409). Force-revoke of daemon keys happens only on the colocated rotation path.',
         security: [{ cookieAuth: [] }],
         parameters: [
           {
@@ -259,6 +280,17 @@ export function buildLicensePaths(_installCommandDescription: string): Record<st
                   type: 'object',
                   required: ['error'],
                   properties: { error: { type: 'string' } },
+                },
+              },
+            },
+          },
+          '409': {
+            description:
+              'License is still attached to a server — delete the server first',
+            content: {
+              'application/json': {
+                schema: {
+                  $ref: '#/components/schemas/LicenseHasAttachedServerError',
                 },
               },
             },

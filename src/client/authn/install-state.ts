@@ -493,13 +493,22 @@ export async function getInstallStatus(
   };
 }
 
-export type DenoClientPublicStatus = InstallStatus & {
+/**
+ * Whether this instance holds a Stripe key. Presence-only — the key itself is
+ * never exposed. The console hides the billing area wholesale when false, so
+ * self-hosted needs no second probe.
+ */
+type BillingPresence = {
+  billingEnabled: boolean;
+};
+
+export type DenoClientPublicStatus = InstallStatus & BillingPresence & {
   ok: true;
   /** Control-plane runtime — UI uses this for self-hosted (green) vs HA (blue) auth chrome. */
   runtime: "deno";
 };
 
-export type WorkersClientPublicStatus = {
+export type WorkersClientPublicStatus = BillingPresence & {
   ok: true;
   runtime: "workers";
   isSignupEnabled: boolean;
@@ -516,6 +525,8 @@ export async function getClientPublicStatus(
   runtime: "deno" | "workers",
   envOverride?: SignupEnvOverride,
   platformEnv: Record<string, string | undefined> = {},
+  /** `c.get('billingConfig') !== undefined` at the route; false in tests that omit it. */
+  billingEnabled = false,
 ): Promise<ClientPublicStatus | null> {
   if (runtime === "workers") {
     return {
@@ -531,6 +542,7 @@ export async function getClientPublicStatus(
         db,
         platformEnv,
       ),
+      billingEnabled,
     };
   }
 
@@ -543,7 +555,7 @@ export async function getClientPublicStatus(
     envOverride,
     platformEnv,
   );
-  return { ok: true, runtime: "deno", ...status };
+  return { ok: true, runtime: "deno", ...status, billingEnabled };
 }
 
 export function validateOrganizationName(name: string): string | null {
@@ -1268,7 +1280,7 @@ async function revokeActiveColocatedLicenses(
     ));
 
   for (const row of active) {
-    await invalidateLicense(db, row.id, organizationId);
+    await invalidateLicense(db, row.id, organizationId, { force: true });
   }
 }
 

@@ -27,7 +27,7 @@ import {
   resetTrunkManifestCacheForTests,
   seedTrunkManifestCacheForTests,
 } from '../../lib/update/manifest.ts'
-import type { ServerStatusEvent } from '../metrics/types-v5.ts'
+import type { ServerStatusEvent } from '../metrics/types.ts'
 import {
   resetServerStatusEventSinkForTests,
   setServerStatusEventSink,

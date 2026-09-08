@@ -1,15 +1,17 @@
 import {
-  HOST_METRICS_METRIC_DESCRIPTORS_V5,
-  type MetricEntityScopeV5,
-} from '../metrics/metric-descriptors-v5.ts'
-import { METRIC_EVENT_KINDS_V5, METRICS_SCHEMA_VERSION_V5 } from '../metrics/contract-v5.ts'
+  DIAGNOSTICS_CPU_FIELD_NAMES,
+  DIAGNOSTICS_MEMORY_FIELD_NAMES,
+  HOST_METRICS_METRIC_DESCRIPTORS,
+  type MetricEntityScope,
+} from '../metrics/metric-descriptors.ts'
+import { METRIC_EVENT_KINDS, METRICS_SCHEMA_VERSION } from '../metrics/contract.ts'
 
-/** Every descriptor-backed numeric field for `scope`, keyed by `fieldName` — the same grouping `field-map-v5.ts` uses to pack physical storage. */
+/** Every descriptor-backed numeric field for `scope`, keyed by `fieldName` — the same grouping `field-map.ts` uses to pack physical storage. */
 function numericPropertiesForScope(
-  scope: MetricEntityScopeV5
+  scope: MetricEntityScope
 ): Record<string, { type: readonly ['number', 'null'] }> {
   const properties: Record<string, { type: readonly ['number', 'null'] }> = {}
-  for (const descriptor of Object.values(HOST_METRICS_METRIC_DESCRIPTORS_V5)) {
+  for (const descriptor of Object.values(HOST_METRICS_METRIC_DESCRIPTORS)) {
     if (descriptor.entityScope === scope) {
       properties[descriptor.fieldName] = { type: ['number', 'null'] as const }
     }
@@ -17,7 +19,7 @@ function numericPropertiesForScope(
   return properties
 }
 
-function hostGroupSchema(scope: MetricEntityScopeV5) {
+function hostGroupSchema(scope: MetricEntityScope) {
   return {
     type: 'object',
     properties: numericPropertiesForScope(scope),
@@ -25,26 +27,24 @@ function hostGroupSchema(scope: MetricEntityScopeV5) {
   }
 }
 
-/**
- * `cpuDetail`'s schema: its 7 host-wide scalar fields plus the required
- * `hotspots` array (the daemon's up-to-4 busiest logical cores this
- * interval) — unlike `memoryDetail`, `cpuDetail` isn't a flat
- * {@link hostGroupSchema} because `hotspots` isn't itself a numeric
- * descriptor field.
- */
-function cpuDetailSchema() {
+/** A nullable-number property map for an explicit `fieldName` subset of one scope. */
+function numericPropertiesForFields(fields: readonly string[]) {
+  return Object.fromEntries(
+    fields.map((field) => [field, { type: ['number', 'null'] as const }])
+  )
+}
+
+/** One half of the nested `diagnostics` object — `cpu` or `memory`. */
+function diagnosticsHalfSchema(fields: readonly string[]) {
   return {
     type: 'object',
-    required: ['hotspots'],
-    properties: {
-      ...numericPropertiesForScope('cpuDetail'),
-    },
+    properties: numericPropertiesForFields(fields),
     additionalProperties: false,
   }
 }
 
 /** A per-entity array item schema: `idFields` (string identity/discriminator columns) plus every descriptor-backed numeric field for `scope`. */
-function entityArraySchema(scope: MetricEntityScopeV5, idFields: readonly string[]) {
+function entityArraySchema(scope: MetricEntityScope, idFields: readonly string[]) {
   const idProperties = Object.fromEntries(
     idFields.map((field) => [field, { type: 'string' as const }])
   )
@@ -57,7 +57,7 @@ function entityArraySchema(scope: MetricEntityScopeV5, idFields: readonly string
 }
 
 export const metricsSchemas = {
-  DaemonMetricsSampleV5: {
+  DaemonMetricsSample: {
     type: 'object',
     required: [
       'type',
@@ -81,16 +81,14 @@ export const metricsSchemas = {
           'sampledAt',
           'intervalSeconds',
           'sequence',
-          'collectionMode',
           'topologyGeneration',
           'bootGeneration',
         ],
         properties: {
-          version: { type: 'integer', const: METRICS_SCHEMA_VERSION_V5 },
+          version: { type: 'integer', const: METRICS_SCHEMA_VERSION },
           sampledAt: { type: 'string', format: 'date-time' },
           intervalSeconds: { type: 'number' },
           sequence: { type: 'integer' },
-          collectionMode: { type: 'string', enum: ['baseline', 'live'] },
           topologyGeneration: {
             type: 'integer',
             description:
@@ -136,13 +134,13 @@ export const metricsSchemas = {
       hardwareSignals: {
         type: 'array',
         description:
-          'Conservative physical sensor readings (CPU package temp/power, storage temp, board temps, plus synthetic hottest-core/thermal-throttled CPU signals) — dynamic count per host, never fan RPM or GPU temp/power (GPU rides `gpus` instead).',
+          'Conservative physical sensor readings — dynamic count per host. Covers CPU package temp/power, raw storage-probe temps, board temps, the synthetic hottest-core/thermal-throttled CPU signals, and the entity-joined signals: per-GPU temperature, GPU memory temperature and GPU power, plus one temperature per service drive. Every physical reading rides this array: GPU temp/power and drive temp are `hardwareSignals`, never `gpus`/`blockDevices` fields. Never fan RPM — fan tachometers have no sampled-telemetry family at all (fan fault/alarm still arrives via `events`).',
         items: entityArraySchema('hardwareSignal', ['signalId', 'kind']),
       },
       ingressSources: {
         type: 'array',
         description:
-          'One entry per distinct ingress-adapter source instance, keyed by `sourceId` — two sources sharing the same `sourceKind` (e.g. two Caddy instances) are still distinct entities.',
+          'One entry per distinct ingress-adapter source instance, keyed by `sourceId` — two sources sharing the same `sourceKind` (e.g. two Caddy instances) are still distinct entities. Latency is reported as a raw per-interval duration sum plus six cumulative-`le` bucket counters (`bucket10ms`..`bucket5s`, each counting every request at or under its bound); averages and percentiles are derived from those at read time and never sent pre-computed, because neither aggregates across time windows. The shared-hosting router reports separately as `router`, not as an entry here.',
         items: entityArraySchema('ingress', ['sourceId', 'sourceKind']),
       },
       databaseProxies: {
@@ -155,36 +153,36 @@ export const metricsSchemas = {
         type: 'array',
         description:
           'Discrete state-change/fault signals distinct from the continuous numeric metrics above.',
-        items: { $ref: '#/components/schemas/DaemonMetricEventV5' },
+        items: { $ref: '#/components/schemas/DaemonMetricEvent' },
       },
-      cpuDetail: cpuDetailSchema(),
-      memoryDetail: hostGroupSchema('memoryDetail'),
-      numaNodes: {
-        type: 'array',
-        description: 'Reserved conceptual family — not yet populated by any collector.',
-        items: {
-          type: 'object',
-          required: ['nodeId'],
-          properties: {
-            nodeId: { type: 'string' },
-            freeBytes: { type: ['number', 'null'] },
-            totalBytes: { type: ['number', 'null'] },
-            localAllocationsPerSecond: { type: ['number', 'null'] },
-            foreignAllocationsPerSecond: { type: ['number', 'null'] },
-          },
-          additionalProperties: false,
+      diagnostics: {
+        type: 'object',
+        description:
+          'Merged always-on depth family: host-wide CPU frequency/scheduling counters and the memory-subsystem meminfo/vmstat breakdown. Optional only because a non-Linux or degraded collector may not produce it.',
+        required: ['cpu', 'memory'],
+        properties: {
+          cpu: diagnosticsHalfSchema(DIAGNOSTICS_CPU_FIELD_NAMES),
+          memory: diagnosticsHalfSchema(DIAGNOSTICS_MEMORY_FIELD_NAMES),
         },
+        additionalProperties: false,
+      },
+      router: {
+        type: 'object',
+        description:
+          "The host's one shared HTTP ingress router (Traefik) — host-wide and singleton, so it carries no entity id, unlike `ingressSources`. Optional: absent entirely when no router is reporting this tick, never an all-`null` placeholder.",
+        properties: numericPropertiesForScope('router'),
+        additionalProperties: false,
       },
     },
     additionalProperties: false,
   },
-  DaemonMetricEventV5: {
+  DaemonMetricEvent: {
     type: 'object',
     required: ['eventId', 'at', 'kind', 'severity'],
     properties: {
       eventId: { type: 'string' },
       at: { type: 'string', format: 'date-time' },
-      kind: { type: 'string', enum: [...METRIC_EVENT_KINDS_V5] },
+      kind: { type: 'string', enum: [...METRIC_EVENT_KINDS] },
       severity: { type: 'string', enum: ['info', 'warning', 'critical'] },
       entityId: { type: 'string' },
       source: { type: 'string' },
@@ -210,7 +208,7 @@ export const metricsPaths: Record<string, unknown> = {
       tags: ['Daemon'],
       summary: 'Ingest host metrics sample',
       description:
-        'Authenticated daemon posts a v5 entity-scoped metrics sample. ' +
+        'Authenticated daemon posts a v6 entity-scoped metrics sample. ' +
         'serverId is taken from the JWT `sub` — never from the body. ' +
         'Writes are fire-and-forget to Analytics Engine / DuckDB; ' +
         'never wakes the Durable Object.',
@@ -219,7 +217,7 @@ export const metricsPaths: Record<string, unknown> = {
         required: true,
         content: {
           'application/json': {
-            schema: { $ref: '#/components/schemas/DaemonMetricsSampleV5' },
+            schema: { $ref: '#/components/schemas/DaemonMetricsSample' },
           },
         },
       },

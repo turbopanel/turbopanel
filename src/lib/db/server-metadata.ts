@@ -16,8 +16,9 @@ import {
   resolveCpuCatalogEntry,
 } from "../hardware/cpu-catalog.ts";
 import {
-  type MetricsCapabilityPlanOverrideV5,
-  type MetricsCapabilityPlanV5,
+  type MetricsCapabilityPlan,
+  type MetricsCapabilityPlanOverride,
+  type MetricsCapabilityTierEntitlements,
   type MetricsDeploymentKind,
   parseServerMetricsCapabilityPlanOverride,
   resolveMetricsCapabilityPlan,
@@ -365,7 +366,7 @@ export type ServerOptions = {
    * `organization.options.metricsCapabilityPlan` field it sets — see
    * {@link resolveEffectiveMetricsCapabilityPlan}.
    */
-  metricsCapabilityPlan?: MetricsCapabilityPlanOverrideV5;
+  metricsCapabilityPlan?: MetricsCapabilityPlanOverride;
 };
 
 const OS_FAMILIES = new Set<ServerOsFamily>([
@@ -1723,11 +1724,17 @@ export function resolveEffectiveCpuThermalLimits(
 
 /**
  * Resolve the effective v5 metrics capability plan for a server:
- * `machineClass`-scoped platform default → org-wide
- * `organization.options.metricsCapabilityPlan` → per-server
- * `server.options.metricsCapabilityPlan`, field by field. Unlike
+ * (optional) license-tier entitlements or `machineClass`-scoped platform
+ * default → org-wide `organization.options.metricsCapabilityPlan` →
+ * per-server `server.options.metricsCapabilityPlan`, field by field. Unlike
  * {@link resolveEffectiveCpuThermalLimits}, plan fields aren't independently
  * sourced-labeled — a single resolved object is sufficient here.
+ *
+ * `tier` is the already-joined `license.tier_id → tier` entitlement set.
+ * When present it replaces the platform default as the base; when absent
+ * (self-hosted, or a hosted license with no tier yet) the historical
+ * platform-default path is unchanged. Org/server jsonb overrides still win
+ * on top of either base.
  *
  * `machineClass` is required so a virtual server can never resolve the
  * physical `physicalHardwareSignalSlots` default (see
@@ -1741,12 +1748,14 @@ export function resolveEffectiveMetricsCapabilityPlan(
   orgOptions: OrganizationOptions | undefined,
   serverOptions: ServerOptions | undefined,
   deployment: MetricsDeploymentKind,
-): MetricsCapabilityPlanV5 {
+  tier?: MetricsCapabilityTierEntitlements,
+): MetricsCapabilityPlan {
   return resolveMetricsCapabilityPlan(
     machineClass,
     orgOptions?.metricsCapabilityPlan,
     serverOptions?.metricsCapabilityPlan,
     deployment,
+    tier,
   );
 }
 

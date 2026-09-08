@@ -12,10 +12,10 @@
  */
 
 import { stripLogInjection } from '../../log-compat.ts'
-import type { ServerMetricsStoreV5, ServerStatusEvent } from './types-v5.ts'
-import { rateLimitedMetricsLog } from './validation-v5.ts'
+import type { ServerMetricsStore, ServerStatusEvent } from './types.ts'
+import { rateLimitedMetricsLog } from './validation.ts'
 
-export type ServerStatusEventSink = Pick<ServerMetricsStoreV5, 'writeStatusEvent'>
+export type ServerStatusEventSink = Pick<ServerMetricsStore, 'writeStatusEvent'>
 
 let registeredSink: ServerStatusEventSink | null = null
 

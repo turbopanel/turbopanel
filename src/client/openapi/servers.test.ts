@@ -26,3 +26,26 @@ test('ServerDeleteBlockersConflict kind enum includes network and container', ()
     ['network', 'container'],
   )
 })
+
+test('ServerRow documents tierPlacement against ServerTierPlacement', () => {
+  const row = serverSchemas.ServerRow as {
+    properties: {
+      tierPlacement: { oneOf: Array<{ $ref?: string; type?: string }> }
+    }
+  }
+  const placement = serverSchemas.ServerTierPlacement as {
+    required: string[]
+  }
+  assertEquals(placement.required, [
+    'licenseTier',
+    'requiredTier',
+    'recommendedTier',
+    'unwatched',
+  ])
+  assertEquals(
+    row.properties.tierPlacement.oneOf.some(
+      (entry) => entry.$ref === '#/components/schemas/ServerTierPlacement',
+    ),
+    true,
+  )
+})

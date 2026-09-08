@@ -3,12 +3,172 @@ import { ADMIN_API_PREFIX } from "../../surfaces.ts";
 
 const cookieSecurity = [{ cookieAuth: [] }] as const;
 
+/**
+ * Tier catalogue paths. Hosted (Workers) only: the routes are not mounted on
+ * self-hosted Deno (`registerAdminRoutes` gates them on runtime), so the spec
+ * omits them there too.
+ */
+const TIER_PATHS = {
+  [`${ADMIN_API_PREFIX}/tiers`]: {
+    get: {
+      tags: ["Tiers"],
+      summary: "List every tier row, active and inactive",
+      description:
+        "Generation then rank order. Each row carries its reference counts " +
+        "(licenses and seats) and `entitlementsEditable`, which is false once " +
+        "anything points at the row — from then on only `isActive` and " +
+        "`successorId` may change.",
+      security: [...cookieSecurity],
+      responses: {
+        "200": { description: "Every tier row" },
+        "401": { description: "Unauthorized" },
+        "403": { description: "Superadmin access required" },
+        "503": {
+          description: "Database unavailable, or billing is not configured",
+        },
+      },
+    },
+    post: {
+      tags: ["Tiers"],
+      summary: "Add one tier row",
+      description:
+        "Validates the shape, refuses a duplicate `(generation, label)`, then " +
+        "runs the read-only Stripe price verification and refuses on any " +
+        "failure — a wrong price id is silent downstream, because the " +
+        "projection skips items whose price maps to no tier. Advisory " +
+        "warnings (a rank undercutting its placement band, a non-monotonic " +
+        "ladder) are returned alongside the created row, not blocking.",
+      security: [...cookieSecurity],
+      responses: {
+        "201": { description: "Created, with the verification result and any warnings" },
+        "400": {
+          description:
+            "Invalid body, a shape refusal, or the price failed verification",
+        },
+        "401": { description: "Unauthorized" },
+        "403": { description: "Superadmin access required" },
+        "409": {
+          description:
+            "That generation already has this label, rank, or Stripe price id",
+        },
+        "503": {
+          description: "Database unavailable, or billing is not configured",
+        },
+      },
+    },
+  },
+  [`${ADMIN_API_PREFIX}/tiers/defaults`]: {
+    get: {
+      tags: ["Tiers"],
+      summary: "The shipped S1…S7 + SX ladder the form prefills",
+      description:
+        "Defaults, placement bands and slot ceilings, so the console never " +
+        "hardcodes the ladder. This is what \"Add from defaults\" reads: it " +
+        "fills every field except the one nothing can derive, the Stripe price id.",
+      security: [...cookieSecurity],
+      responses: {
+        "200": { description: "Ladder defaults and validation bounds" },
+        "401": { description: "Unauthorized" },
+        "403": { description: "Superadmin access required" },
+        "503": {
+          description: "Database unavailable, or billing is not configured",
+        },
+      },
+    },
+  },
+  [`${ADMIN_API_PREFIX}/tiers/verify`]: {
+    post: {
+      tags: ["Tiers"],
+      summary: "Verify every priced row against Stripe",
+      description:
+        "The \"Verify all\" button. Read-only: one `GET /v1/prices/:id` per " +
+        "priced row, no writes on either side, safe to run as often as you like.",
+      security: [...cookieSecurity],
+      responses: {
+        "200": { description: "One verification result per priced row" },
+        "401": { description: "Unauthorized" },
+        "403": { description: "Superadmin access required" },
+        "503": {
+          description: "Database unavailable, or billing is not configured",
+        },
+      },
+    },
+  },
+  [`${ADMIN_API_PREFIX}/tiers/{id}`]: {
+    patch: {
+      tags: ["Tiers"],
+      summary: "Change one tier row",
+      description:
+        "`generation` and `label` are identity and never patchable — a " +
+        "re-label is a new row. Once any license or seat references the row " +
+        "only `isActive` and `successorId` are accepted, answering 409 with " +
+        "the offending keys otherwise. The price is re-verified only when the " +
+        "price id or the amount it is checked against actually moved.",
+      security: [...cookieSecurity],
+      responses: {
+        "200": { description: "The updated row, with any warnings" },
+        "400": { description: "Invalid body, a shape refusal, or verification failed" },
+        "401": { description: "Unauthorized" },
+        "403": { description: "Superadmin access required" },
+        "404": { description: "No such tier" },
+        "409": {
+          description:
+            "The row is referenced; only isActive and successorId may change",
+        },
+        "503": {
+          description: "Database unavailable, or billing is not configured",
+        },
+      },
+    },
+  },
+  [`${ADMIN_API_PREFIX}/tiers/{id}/deactivate`]: {
+    post: {
+      tags: ["Tiers"],
+      summary: "Retire a tier row, optionally naming its successor",
+      description:
+        "Tiers are deactivated, never deleted: an inactive row cannot be " +
+        "bought into but stays readable for the licenses that still hold it.",
+      security: [...cookieSecurity],
+      responses: {
+        "200": { description: "The deactivated row" },
+        "400": { description: "Unknown successor, or a tier naming itself" },
+        "401": { description: "Unauthorized" },
+        "403": { description: "Superadmin access required" },
+        "404": { description: "No such tier" },
+        "503": {
+          description: "Database unavailable, or billing is not configured",
+        },
+      },
+    },
+  },
+  [`${ADMIN_API_PREFIX}/tiers/{id}/verify`]: {
+    post: {
+      tags: ["Tiers"],
+      summary: "Verify one row's Stripe price",
+      description: "Read-only. A custom row has no price to verify and answers 400.",
+      security: [...cookieSecurity],
+      responses: {
+        "200": { description: "The verification result" },
+        "400": { description: "Verification failed, or the row has no price" },
+        "401": { description: "Unauthorized" },
+        "403": { description: "Superadmin access required" },
+        "404": { description: "No such tier" },
+        "503": {
+          description: "Database unavailable, or billing is not configured",
+        },
+      },
+    },
+  },
+};
+
 /** Hand-authored OpenAPI 3.1 spec for documented admin REST routes. */
 export function getAdminOpenApiSpec(
   serverUrl: string,
-  _opts?: { devSurface?: boolean },
+  opts?: { devSurface?: boolean; runtime?: "deno" | "workers" },
 ): object {
   const sessionCookieName = resolveSessionCookieNameFromUrl(serverUrl);
+  // Billing is hosted-only; the self-hosted spec has no tier surface to show.
+  const includeTiers = opts?.runtime === "workers";
 
   return {
     openapi: "3.1.0",
@@ -21,10 +181,21 @@ export function getAdminOpenApiSpec(
       { name: "Instance", description: "Control-plane instance configuration" },
       { name: "Settings", description: "System settings (email, etc.)" },
       { name: "Daemon Fleet", description: "Fleet-wide daemon management" },
+      ...(includeTiers
+        ? [{
+          name: "Tiers",
+          description:
+            "The billing tier catalogue (hosted only). Superadmin only, and 503 " +
+            "when billing is off. Nothing seeds these rows: the owner creates the " +
+            "Product and Price in the Stripe Dashboard and a superadmin enters the " +
+            "row here, which is verified against Stripe before it is written.",
+        }]
+        : []),
     ],
     "x-tagGroups": [
       { name: "Instance", tags: ["Instance", "Settings"] },
       { name: "Fleet", tags: ["Daemon Fleet"] },
+      ...(includeTiers ? [{ name: "Billing", tags: ["Tiers"] }] : []),
     ],
     components: {
       securitySchemes: {
@@ -406,6 +577,7 @@ export function getAdminOpenApiSpec(
       },
     },
     paths: {
+      ...(includeTiers ? TIER_PATHS : {}),
       [`${ADMIN_API_PREFIX}/instance/public-urls`]: {
         get: {
           tags: ["Instance"],

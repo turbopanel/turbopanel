@@ -1,6 +1,6 @@
 /**
  * DuckDB never leaks the Cloudflare Analytics Engine v5 missing-metric
- * sentinel (`AE_V5_MISSING_METRIC_SENTINEL`, `-1e308`) through its query
+ * sentinel (`AE_MISSING_METRIC_SENTINEL`, `-1e308`) through its query
  * surface — a value absent from a written sample must come back as a real
  * SQL `NULL` (JS `null`), never AE's positional-packing placeholder. DuckDB
  * has no positional slot layout at all (`schema.ts`'s doc comment), so this
@@ -15,15 +15,16 @@
  */
 import { assertEquals } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { buildMetricsSampleV5 } from '../../contract-v5.ts'
-import { truncateSampleToCapabilityPlanV5 } from '../../capability-plan.ts'
-import type { AuthenticatedMetricsSampleV5 } from '../../types-v5.ts'
+import { buildMetricsSample } from '../../contract.ts'
+import { truncateSampleToCapabilityPlan } from '../../capability-plan.ts'
+import type { AuthenticatedMetricsSample } from '../../types.ts'
 import { representativeMachineFixtures } from '../../testing/representative-machines.ts'
 import {
-  AE_V5_MISSING_METRIC_SENTINEL,
-  PER_ENTITY_FIELD_ORDER_V5,
-  SINGLE_ROW_FIELD_ORDER_V5,
-} from '../cloudflare/field-map-v5.ts'
+  AE_MISSING_METRIC_SENTINEL,
+  PER_ENTITY_FIELD_ORDER,
+  SINGLE_ROW_FIELD_ORDER,
+} from '../cloudflare/field-map.ts'
+import { ROUTER_FIELD_NAMES } from '../../metric-descriptors.ts'
 import { HOST_METRIC_FIELD_REFS } from './schema.ts'
 import { DuckDbParquetServerMetricsStore } from './store.ts'
 
@@ -54,9 +55,9 @@ async function withStore(
 }
 
 function authenticate(
-  built: ReturnType<typeof buildMetricsSampleV5>,
+  built: ReturnType<typeof buildMetricsSample>,
   atMs: number
-): AuthenticatedMetricsSampleV5 {
+): AuthenticatedMetricsSample {
   return {
     ...built,
     serverId: SERVER_ID,
@@ -65,7 +66,7 @@ function authenticate(
 }
 
 function assertNoSentinel(value: unknown, label: string): void {
-  assertEquals(value === AE_V5_MISSING_METRIC_SENTINEL, false, label)
+  assertEquals(value === AE_MISSING_METRIC_SENTINEL, false, label)
 }
 
 // A handful of shapes covering every per-entity family plus a fixture with
@@ -83,10 +84,10 @@ const FIXTURES_TO_CHECK = [
 for (const name of FIXTURES_TO_CHECK) {
   const fixture = representativeMachineFixtures().find((f) => f.name === name)!
 
-  it(`no-sentinel: "${fixture.name}" host series + entity series never surface AE_V5_MISSING_METRIC_SENTINEL`, async () => {
+  it(`no-sentinel: "${fixture.name}" host series + entity series never surface AE_MISSING_METRIC_SENTINEL`, async () => {
     await withStore(async (store) => {
-      const built = buildMetricsSampleV5(fixture.input)
-      const truncated = truncateSampleToCapabilityPlanV5(built, fixture.plan)
+      const built = buildMetricsSample(fixture.input)
+      const truncated = truncateSampleToCapabilityPlan(built, fixture.plan)
       await store.writeSample(authenticate(truncated, FROM_MS + 60_000))
 
       const hostResult = await store.queryHostSeries({
@@ -115,7 +116,7 @@ for (const name of FIXTURES_TO_CHECK) {
           serverId: SERVER_ID,
           family,
           entityIds,
-          metrics: PER_ENTITY_FIELD_ORDER_V5[family],
+          metrics: PER_ENTITY_FIELD_ORDER[family],
           from: new Date(FROM_MS).toISOString(),
           to: new Date(TO_MS).toISOString(),
           resolutionSeconds: 3600,
@@ -125,6 +126,21 @@ for (const name of FIXTURES_TO_CHECK) {
             for (const [key, value] of Object.entries(point.values)) {
               assertNoSentinel(value, `${fixture.name}: ${family}.${key}`)
             }
+          }
+        }
+      }
+
+      if (truncated.router) {
+        const routerResult = await store.queryHostSeries({
+          serverId: SERVER_ID,
+          metrics: ROUTER_FIELD_NAMES.map((field) => `router.${field}`),
+          from: new Date(FROM_MS).toISOString(),
+          to: new Date(TO_MS).toISOString(),
+          resolutionSeconds: 3600,
+        })
+        for (const point of routerResult.points) {
+          for (const [key, value] of Object.entries(point.values)) {
+            assertNoSentinel(value, `${fixture.name}: ${key}`)
           }
         }
       }
@@ -139,7 +155,10 @@ for (const name of FIXTURES_TO_CHECK) {
           serverId: SERVER_ID,
           family,
           entityIds,
-          metrics: SINGLE_ROW_FIELD_ORDER_V5[family],
+          // Spares (`null` slots) are reserved layout, not queryable fields.
+          metrics: SINGLE_ROW_FIELD_ORDER[family].filter(
+            (field): field is string => field !== null
+          ),
           from: new Date(FROM_MS).toISOString(),
           to: new Date(TO_MS).toISOString(),
           resolutionSeconds: 3600,
@@ -157,7 +176,7 @@ for (const name of FIXTURES_TO_CHECK) {
 }
 
 function entityIdsForFamily(
-  sample: ReturnType<typeof buildMetricsSampleV5>,
+  sample: ReturnType<typeof buildMetricsSample>,
   family: 'gpu' | 'network' | 'filesystem' | 'block' | 'hardware.physical'
 ): string[] {
   switch (family) {
@@ -212,13 +231,12 @@ it('no-sentinel: a sample with every host metric explicitly null never surfaces 
       },
       network: { tcpRetransmitPercent: null, softnetDropsPerSecond: null },
     }
-    const built = buildMetricsSampleV5({
+    const built = buildMetricsSample({
       metadata: {
-        version: 5,
+        version: 6,
         sampledAt: new Date(FROM_MS + 60_000).toISOString(),
         intervalSeconds: 60,
         sequence: 1,
-        collectionMode: 'baseline',
         topologyGeneration: 1,
         bootGeneration: 1,
       },

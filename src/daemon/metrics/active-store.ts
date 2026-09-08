@@ -7,15 +7,15 @@
  * module-scoped sink pattern (and its safety rationale).
  */
 
-import type { ServerMetricsStoreV5 } from './types-v5.ts'
+import type { ServerMetricsStore } from './types.ts'
 
-let activeStore: ServerMetricsStoreV5 | null = null
+let activeStore: ServerMetricsStore | null = null
 
-export function setActiveServerMetricsStore(store: ServerMetricsStoreV5 | null): void {
+export function setActiveServerMetricsStore(store: ServerMetricsStore | null): void {
   activeStore = store
 }
 
-export function getActiveServerMetricsStore(): ServerMetricsStoreV5 | null {
+export function getActiveServerMetricsStore(): ServerMetricsStore | null {
   return activeStore
 }
 

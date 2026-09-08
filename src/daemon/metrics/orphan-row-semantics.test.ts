@@ -14,9 +14,9 @@
  * reflects only the real sample.
  *
  * AE half: writes the orphan row via `dataset.writeDataPoint` directly
- * (bypassing `CloudflareAnalyticsEngineServerMetricsStoreV5.writeSample`
- * entirely) into `createFakeAnalyticsEngineV5`'s in-memory DuckDB-backed AE
- * dataset (`testing/fake-analytics-engine-v5.ts`), then queries back through
+ * (bypassing `CloudflareAnalyticsEngineServerMetricsStore.writeSample`
+ * entirely) into `createFakeAnalyticsEngine`'s in-memory DuckDB-backed AE
+ * dataset (`testing/fake-analytics-engine.ts`), then queries back through
  * the real `queryHostSummary`/`queryHostSeries` SQL — an executed check, not
  * a structural one, so it actually proves the aggregate never leaks. A cheap
  * structural predicate-level test stays at the bottom of this file too,
@@ -24,24 +24,24 @@
  */
 import { assertEquals } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { buildMetricsSampleV5 } from './contract-v5.ts'
-import type { AuthenticatedMetricsSampleV5, SlotMapping } from './types-v5.ts'
+import { buildMetricsSample } from './contract.ts'
+import type { AuthenticatedMetricsSample, SlotMapping } from './types.ts'
 import {
-  AE_V5_BLOB_FAMILY_INDEX,
-  AE_V5_FAMILY_HOST_IO,
-  AE_V5_FAMILY_HOST_SYSTEM,
-  AE_V5_FAMILY_NETWORK,
-  buildMetricsDataPointsV5,
-} from './backends/cloudflare/field-map-v5.ts'
+  AE_BLOB_FAMILY_INDEX,
+  AE_FAMILY_HOST_IO,
+  AE_FAMILY_HOST_SYSTEM,
+  AE_FAMILY_NETWORK,
+  buildMetricsDataPoints,
+} from './backends/cloudflare/field-map.ts'
 import {
-  familyPredicateV5,
-  hostMetricsV5DiscriminatorPredicates,
-} from './backends/cloudflare/sql-api-v5.ts'
-import { CloudflareAnalyticsEngineServerMetricsStoreV5 } from './backends/cloudflare/store-v5.ts'
+  familyPredicate,
+  hostMetricsDiscriminatorPredicates,
+} from './backends/cloudflare/sql-api.ts'
+import { CloudflareAnalyticsEngineServerMetricsStore } from './backends/cloudflare/store.ts'
 import {
-  createFakeAnalyticsEngineV5,
-  type FakeAnalyticsEngineV5,
-} from './testing/fake-analytics-engine-v5.ts'
+  createFakeAnalyticsEngine,
+  type FakeAnalyticsEngine,
+} from './testing/fake-analytics-engine.ts'
 import { openDuckDb, resolveDuckDbPaths } from './backends/duckdb/database.ts'
 import { NETWORK_SAMPLES_TABLE, networkSamplesInsertColumns } from './backends/duckdb/schema.ts'
 import { DuckDbParquetServerMetricsStore } from './backends/duckdb/store.ts'
@@ -98,9 +98,9 @@ const EMPTY_SLOT_MAPPING: SlotMapping = {
 }
 
 function authenticate(
-  built: ReturnType<typeof buildMetricsSampleV5>,
+  built: ReturnType<typeof buildMetricsSample>,
   atMs: number
-): AuthenticatedMetricsSampleV5 {
+): AuthenticatedMetricsSample {
   return {
     ...built,
     serverId: SERVER_ID,
@@ -108,14 +108,13 @@ function authenticate(
   }
 }
 
-function realHostSample(atMs: number): AuthenticatedMetricsSampleV5 {
-  const built = buildMetricsSampleV5({
+function realHostSample(atMs: number): AuthenticatedMetricsSample {
+  const built = buildMetricsSample({
     metadata: {
-      version: 5,
+      version: 6,
       sampledAt: new Date(atMs).toISOString(),
       intervalSeconds: 60,
       sequence: 1,
-      collectionMode: 'baseline',
       topologyGeneration: 1,
       bootGeneration: 1,
     },
@@ -148,23 +147,21 @@ async function insertOrphanNetworkRow(metricsDir: string, atMs: number): Promise
   try {
     const columns = networkSamplesInsertColumns()
     // COMMON_METADATA_COLUMNS: server_id, sampled_at, received_at,
-    // interval_seconds, collection_mode, sequence, topology_generation,
-    // boot_generation — then device_id, then every NETWORK_METRIC_FIELDS
-    // column (left NULL).
+    // interval_seconds, sequence, topology_generation, boot_generation —
+    // then device_id, then every NETWORK_METRIC_FIELDS column (left NULL).
     const metricPlaceholders = columns
-      .slice(9)
+      .slice(8)
       .map(() => 'NULL')
       .join(', ')
     const sql =
       `INSERT INTO ${NETWORK_SAMPLES_TABLE} (${columns.join(', ')}) VALUES (` +
       `CAST(? AS UUID), CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), CAST(? AS SMALLINT), ` +
-      `?, CAST(? AS BIGINT), CAST(? AS INTEGER), CAST(? AS INTEGER), ?, ${metricPlaceholders})`
+      `CAST(? AS BIGINT), CAST(? AS INTEGER), CAST(? AS INTEGER), ?, ${metricPlaceholders})`
     await handle.connection.run(sql, [
       SERVER_ID,
       toDuckDbTimestamp(atMs),
       toDuckDbTimestamp(atMs),
       60,
-      'baseline',
       1,
       1,
       1,
@@ -273,25 +270,24 @@ it('orphan network row (DuckDB): an orphan row with no real sample in range yiel
 
 /**
  * Write one `network`-family AE row directly via `dataset.writeDataPoint`
- * (bypassing `CloudflareAnalyticsEngineServerMetricsStoreV5.writeSample`
+ * (bypassing `CloudflareAnalyticsEngineServerMetricsStore.writeSample`
  * entirely, so no `host.system`/`host.io` row exists for this timestamp) —
  * the AE analogue of `insertOrphanNetworkRow`'s direct DuckDB table insert.
- * Built via the real `buildMetricsDataPointsV5` packer (on a sample that
+ * Built via the real `buildMetricsDataPoints` packer (on a sample that
  * declares one NIC not assigned to the first two `normalNicSlots` — a NIC
  * in either of those slots gets embedded directly into the `host.io` row
  * instead of paging as its own `network`-family row, per this module's doc
  * comment) so the row's blob/double layout is exactly what production would
  * emit; only the network-family point is kept.
  */
-function writeOrphanNetworkRowV5(fakeAe: FakeAnalyticsEngineV5, atMs: number): void {
+function writeOrphanNetworkRow(fakeAe: FakeAnalyticsEngine, atMs: number): void {
   const sample = authenticate(
-    buildMetricsSampleV5({
+    buildMetricsSample({
       metadata: {
-        version: 5,
+        version: 6,
         sampledAt: new Date(atMs).toISOString(),
         intervalSeconds: 60,
         sequence: 1,
-        collectionMode: 'baseline',
         topologyGeneration: 1,
         bootGeneration: 1,
       },
@@ -317,9 +313,9 @@ function writeOrphanNetworkRowV5(fakeAe: FakeAnalyticsEngineV5, atMs: number): v
     }),
     atMs
   )
-  const points = buildMetricsDataPointsV5(sample, EMPTY_SLOT_MAPPING)
+  const points = buildMetricsDataPoints(sample, EMPTY_SLOT_MAPPING)
   const orphanPoints = points.filter(
-    (p) => p.blobs[AE_V5_BLOB_FAMILY_INDEX] === AE_V5_FAMILY_NETWORK
+    (p) => p.blobs[AE_BLOB_FAMILY_INDEX] === AE_FAMILY_NETWORK
   )
   assertEquals(orphanPoints.length > 0, true, 'fixture must actually produce a network-family row')
   fakeAe.setNow(atMs)
@@ -327,12 +323,12 @@ function writeOrphanNetworkRowV5(fakeAe: FakeAnalyticsEngineV5, atMs: number): v
 }
 
 it('orphan network row (AE, executed): queryHostSummary/queryHostSeries reflect only the real host sample', async () => {
-  const fakeAe = await createFakeAnalyticsEngineV5()
-  const store = new CloudflareAnalyticsEngineServerMetricsStoreV5(fakeAe.dataset, {
+  const fakeAe = await createFakeAnalyticsEngine()
+  const store = new CloudflareAnalyticsEngineServerMetricsStore(fakeAe.dataset, {
     sql: fakeAe.sqlConfig,
   })
   try {
-    writeOrphanNetworkRowV5(fakeAe, FROM_MS + 30_000)
+    writeOrphanNetworkRow(fakeAe, FROM_MS + 30_000)
 
     fakeAe.setNow(FROM_MS + 90_000)
     store.writeSample(realHostSample(FROM_MS + 90_000), EMPTY_SLOT_MAPPING)
@@ -366,12 +362,12 @@ it('orphan network row (AE, executed): queryHostSummary/queryHostSeries reflect 
 })
 
 it('orphan network row (AE, executed): an orphan row with no real sample in range yields an empty host summary/series', async () => {
-  const fakeAe = await createFakeAnalyticsEngineV5()
-  const store = new CloudflareAnalyticsEngineServerMetricsStoreV5(fakeAe.dataset, {
+  const fakeAe = await createFakeAnalyticsEngine()
+  const store = new CloudflareAnalyticsEngineServerMetricsStore(fakeAe.dataset, {
     sql: fakeAe.sqlConfig,
   })
   try {
-    writeOrphanNetworkRowV5(fakeAe, FROM_MS + 30_000)
+    writeOrphanNetworkRow(fakeAe, FROM_MS + 30_000)
 
     const summary = await store.queryHostSummary({
       serverId: SERVER_ID,
@@ -401,7 +397,7 @@ it('orphan network row (AE, executed): an orphan row with no real sample in rang
 })
 
 it('orphan row (structural, AE): a network-family row can never satisfy a host-scoped predicate', () => {
-  // `hostFamilyScopePredicateV5` (private to sql-api-v5.ts) composes every
+  // `hostFamilyScopePredicate` (private to sql-api.ts) composes every
   // host query's WHERE clause as
   // `(blob2 = 'host.system' OR blob2 = 'host.io' [...])` from exactly these
   // exported building blocks — see its doc comment. `blob2` carries exactly
@@ -409,9 +405,9 @@ it('orphan row (structural, AE): a network-family row can never satisfy a host-s
   // mutually exclusive with both host predicates by construction. The
   // executed tests above prove this end to end; this keeps the cheap
   // predicate-level invariant pinned too.
-  const hostSystemPredicate = familyPredicateV5(AE_V5_FAMILY_HOST_SYSTEM)
-  const hostIoPredicate = familyPredicateV5(AE_V5_FAMILY_HOST_IO)
-  const networkPredicate = familyPredicateV5(AE_V5_FAMILY_NETWORK)
+  const hostSystemPredicate = familyPredicate(AE_FAMILY_HOST_SYSTEM)
+  const hostIoPredicate = familyPredicate(AE_FAMILY_HOST_IO)
+  const networkPredicate = familyPredicate(AE_FAMILY_NETWORK)
 
   assertEquals(hostSystemPredicate, `blob2 = 'host.system'`)
   assertEquals(hostIoPredicate, `blob2 = 'host.io'`)
@@ -422,5 +418,5 @@ it('orphan row (structural, AE): a network-family row can never satisfy a host-s
   // Every host query also requires the shared metrics-row discriminator —
   // an orphan row written through any other path still has to satisfy this
   // too, and blob2's family value alone already rules it out above.
-  assertEquals(hostMetricsV5DiscriminatorPredicates(), [`blob1 = 'metrics'`, `blob3 = '5'`])
+  assertEquals(hostMetricsDiscriminatorPredicates(), [`blob1 = 'metrics'`, `blob3 = '6'`])
 })

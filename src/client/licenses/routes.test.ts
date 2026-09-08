@@ -4,7 +4,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../../app.ts'
 import { getDatabaseUrl } from '../../db-url.ts'
 import { createDenoDb } from '../../db.ts'
-import type { DaemonCellRegistry } from '../../daemon/cell/contracts.ts'
+import type { DaemonCell, DaemonCellRegistry } from '../../daemon/cell/contracts.ts'
 import {
   buildSignedCookie,
   HTTP_SESSION_COOKIE_NAME,
@@ -30,11 +30,23 @@ import {
 import { DISPLAY_NAME_MAX_LENGTH } from '../../lib/display-name-format.ts'
 import { ensureSelfHostSystemHierarchy } from '../system/hierarchy.ts'
 import { registerLicenseRoutes } from './routes.ts'
+import { registerServerRoutes } from '../servers/routes.ts'
 import { ORG_ID_HEADER } from '../org-context.ts'
 
 import { parseTestSecretsConfig } from '../../test-fixtures/secrets.ts'
 
 const dbUrl = getDatabaseUrl()
+
+function createPermissiveRegistry(): DaemonCellRegistry {
+  const noop = async () => {}
+  const cell = { purge: noop } as unknown as DaemonCell
+  return {
+    getCell: () => cell,
+    listOnlineServerIds: () => Promise.resolve([]),
+    getSnapshots: () => Promise.resolve(new Map()),
+    purge: noop,
+  }
+}
 
 function createOnlineRegistry(serverIds: string[]): DaemonCellRegistry {
   return {
@@ -60,6 +72,7 @@ async function createLicenseTestApp(
     return next()
   })
   registerLicenseRoutes(app, { secrets, runtime: 'deno', signupEnvOverride: undefined })
+  registerServerRoutes(app, { secrets, runtime: 'deno', signupEnvOverride: undefined })
   return { app, secrets }
 }
 
@@ -683,4 +696,68 @@ test('POST /licenses returns 409 when org server capacity is exhausted', async (
       throw new Error('capacity rejection must not create a license row')
     }
   })
+})
+
+test('DELETE /licenses/:id returns 409 while a server is attached', async () => {
+  await withOwnerFixtures(
+    async ({ db, app, secrets, ownerId, organizationId }) => {
+      const now = new Date().toISOString()
+      const [insertedServer] = await db
+        .insert(server)
+        .values({
+          createdAt: now,
+          updatedAt: now,
+          organizationId,
+          name: 'Bound host',
+        })
+        .returning({ id: server.id })
+      const serverId = insertedServer!.id
+
+      const [insertedLicense] = await db
+        .insert(license)
+        .values({
+          organizationId,
+          serverId,
+          name: 'bound-seat',
+          token: `bound-hash-${crypto.randomUUID()}`,
+        })
+        .returning({ id: license.id })
+      const licenseId = insertedLicense!.id
+
+      try {
+        const cookie = await sessionCookie(db, secrets, ownerId)
+        const attached = await app.request(`/licenses/${licenseId}`, {
+          method: 'DELETE',
+          headers: orgRequestHeaders(cookie, organizationId),
+        })
+        assertEquals(attached.status, 409)
+        const attachedBody = await attached.json() as {
+          error?: string
+          server?: { id: string; name: string | null }
+        }
+        assertEquals(attachedBody.error, 'license_has_attached_server')
+        assertEquals(attachedBody.server?.id, serverId)
+        assertEquals(attachedBody.server?.name, 'Bound host')
+
+        const deletedServer = await app.request(`/servers/${serverId}`, {
+          method: 'DELETE',
+          headers: {
+            Cookie: cookie,
+            [ORG_ID_HEADER]: organizationId,
+          },
+        })
+        assertEquals(deletedServer.status, 200)
+
+        const after = await app.request(`/licenses/${licenseId}`, {
+          method: 'DELETE',
+          headers: orgRequestHeaders(cookie, organizationId),
+        })
+        assertEquals(after.status, 404)
+      } finally {
+        await db.delete(license).where(eq(license.id, licenseId))
+        await db.delete(server).where(eq(server.id, serverId))
+      }
+    },
+    { registry: createPermissiveRegistry() },
+  )
 })

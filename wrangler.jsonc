@@ -56,7 +56,8 @@
     ]
   },
   // Daemon WS-upgrade / REST / metrics / container-log rate limits, plus the
-  // inbound GitHub webhook throttle — distinct namespace_ids per env (account-global counters).
+  // inbound webhook throttles (GitHub / GitLab / Stripe) — distinct
+  // namespace_ids per env (account-global counters).
   "ratelimits": [
     {
       "name": "DAEMON_CONNECT_RATE_LIMITER",
@@ -100,6 +101,13 @@
       "name": "GITLAB_WEBHOOK_RATE_LIMITER",
       "namespace_id": "1007",
       "simple": { "limit": 120, "period": 60 }
+    },
+    {
+      // Inbound Stripe events (`/webhook/stripe`). Same gate, its own bucket,
+      // and a modest budget — Stripe delivery volume is far below a push fan-out.
+      "name": "STRIPE_WEBHOOK_RATE_LIMITER",
+      "namespace_id": "1009",
+      "simple": { "limit": 60, "period": 60 }
     }
   ],
   // Offline sweep (see src/daemon/cell/offline-sweep.ts) — 1 minute is Cloudflare's
@@ -112,8 +120,8 @@
   // host.system row, one always-present host.io row, plus presence-gated pages
   // for gpu/network/filesystem/block/hardware.physical and one row per
   // managed.ingress/managed.database_proxy entry and per event — see
-  // backends/cloudflare/field-map-v5.ts. `workers.ts` wires this binding
-  // straight into a real `CloudflareAnalyticsEngineServerMetricsStoreV5` for
+  // backends/cloudflare/field-map.ts. `workers.ts` wires this binding
+  // straight into a real `CloudflareAnalyticsEngineServerMetricsStore` for
   // both writes and reads — metric samples, status transitions, and metric
   // events all land here directly.
   // SQL API reads need secrets: TURBOPANEL_ANALYTICS_ENGINE_API_TOKEN
@@ -121,8 +129,8 @@
   // Optional: TURBOPANEL_SERVER_METRICS_AE_MAX_RANGE_SECONDS (default = 90-day AE retention).
   "analytics_engine_datasets": [
     {
-      "binding": "SERVER_METRICS_V5",
-      "dataset": "turbopanel_server_metrics_v5"
+      "binding": "SERVER_METRICS",
+      "dataset": "turbopanel_server_metrics_v6"
     }
   ],
   // Command execution logs (transcripts). Buckets are NOT auto-created — create
@@ -211,13 +219,20 @@
           "name": "GITLAB_WEBHOOK_RATE_LIMITER",
           "namespace_id": "2007",
           "simple": { "limit": 120, "period": 60 }
+        },
+        {
+          // Inbound Stripe events (`/webhook/stripe`). Same gate, its own bucket,
+          // and a modest budget — Stripe delivery volume is far below a push fan-out.
+          "name": "STRIPE_WEBHOOK_RATE_LIMITER",
+          "namespace_id": "2009",
+          "simple": { "limit": 60, "period": 60 }
         }
       ],
       "triggers": { "crons": ["* * * * *"] },
       "analytics_engine_datasets": [
         {
-          "binding": "SERVER_METRICS_V5",
-          "dataset": "turbopanel_server_metrics_v5"
+          "binding": "SERVER_METRICS",
+          "dataset": "turbopanel_server_metrics_v6"
         }
       ],
       "r2_buckets": [
@@ -321,13 +336,20 @@
           "name": "GITLAB_WEBHOOK_RATE_LIMITER",
           "namespace_id": "3007",
           "simple": { "limit": 120, "period": 60 }
+        },
+        {
+          // Inbound Stripe events (`/webhook/stripe`). Same gate, its own bucket,
+          // and a modest budget — Stripe delivery volume is far below a push fan-out.
+          "name": "STRIPE_WEBHOOK_RATE_LIMITER",
+          "namespace_id": "3009",
+          "simple": { "limit": 60, "period": 60 }
         }
       ],
       "triggers": { "crons": ["* * * * *"] },
       "analytics_engine_datasets": [
         {
-          "binding": "SERVER_METRICS_V5",
-          "dataset": "turbopanel_server_metrics_v5"
+          "binding": "SERVER_METRICS",
+          "dataset": "turbopanel_server_metrics_v6"
         }
       ],
       "r2_buckets": [

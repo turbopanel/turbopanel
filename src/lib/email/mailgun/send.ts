@@ -1,4 +1,8 @@
-import { createEmailOtpEmail, createEmailVerificationLinkEmail } from '../templates.ts'
+import {
+  createEmailOtpEmail,
+  createEmailVerificationLinkEmail,
+  createServerTierNoticeEmail,
+} from '../templates.ts'
 import type { EmailJob } from '../types.ts'
 
 export type MailgunSendConfig = {
@@ -23,6 +27,9 @@ function resolveMailgunTemplate(job: EmailJob) {
   }
   if (job.type === 'email-otp') {
     return createEmailOtpEmail(job.to, job.otp, job.otpType)
+  }
+  if (job.type === 'server-tier-notice') {
+    return createServerTierNoticeEmail(job)
   }
   return null
 }

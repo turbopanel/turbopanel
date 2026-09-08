@@ -3,9 +3,9 @@
  * Workers entrypoints and Vitest pool suites must import from here, not
  * `store-selection.ts`, so workerd never loads `@duckdb/node-api`.
  */
-import { CloudflareAnalyticsEngineServerMetricsStoreV5 } from './backends/cloudflare/store-v5.ts'
-import { DisabledServerMetricsStoreV5 } from './disabled-store-v5.ts'
-import type { ServerMetricsStoreV5 } from './types-v5.ts'
+import { CloudflareAnalyticsEngineServerMetricsStore } from './backends/cloudflare/store.ts'
+import { DisabledServerMetricsStore } from './disabled-store.ts'
+import type { ServerMetricsStore } from './types.ts'
 import {
   type ResolveServerMetricsStoreInput,
   warnMetricsStoreSelectionOnce,
@@ -27,25 +27,25 @@ export {
 } from './store-selection-core.ts'
 
 /**
- * Select the v5 metrics store for Cloudflare Workers (Analytics Engine),
- * scoped to the v5 dataset/binding (`SERVER_METRICS_V5`) — see
- * `backends/cloudflare/store-v5.ts`. Deno callers must use
- * `resolveServerMetricsStoreV5` from `store-selection.ts`.
+ * Select the metrics store for Cloudflare Workers (Analytics Engine),
+ * scoped to the current dataset/binding (`SERVER_METRICS`) — see
+ * `backends/cloudflare/store.ts`. Deno callers must use
+ * `resolveServerMetricsStore` from `store-selection.ts`.
  */
-export function resolveServerMetricsStoreV5(
+export function resolveServerMetricsStore(
   input: ResolveServerMetricsStoreInput
-): ServerMetricsStoreV5 {
+): ServerMetricsStore {
   if (input.runtime !== 'workers') {
     throw new TypeError('Workers metrics store selection requires runtime: workers')
   }
   if (input.analyticsEngine) {
-    return new CloudflareAnalyticsEngineServerMetricsStoreV5(input.analyticsEngine, {
+    return new CloudflareAnalyticsEngineServerMetricsStore(input.analyticsEngine, {
       sql: input.analyticsEngineSql ?? undefined,
     })
   }
   warnMetricsStoreSelectionOnce(
-    'workers-missing-ae-v5',
-    'server metrics v5 on Workers but SERVER_METRICS_V5 binding missing; using disabled store'
+    'workers-missing-ae',
+    'server metrics on Workers but SERVER_METRICS binding missing; using disabled store'
   )
-  return new DisabledServerMetricsStoreV5()
+  return new DisabledServerMetricsStore()
 }

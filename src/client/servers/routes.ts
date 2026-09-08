@@ -19,6 +19,9 @@ import {
   redactServerOptions,
   type ServerOptions,
 } from '../../lib/db/server-metadata.ts'
+import { metricsDeploymentKindForRuntime } from '../../daemon/metrics/capability-plan.ts'
+import { loadTierPlacementsForServers } from '../../lib/tiers/tier-enforcement.ts'
+import { loadServerLayoutPaths } from './server-topology-records.ts'
 import { isActiveContainerStatus } from '../../lib/db/project-delete.ts'
 import { cachedServerDetailReadModel } from '../../query-cache/read-models/server-detail.ts'
 import { listServerLabels } from '../../lib/db/label-records.ts'
@@ -638,6 +641,12 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
       db,
       distinctNonEmptyIds(membershipDcIds),
     )
+    const layoutPathsByServer = await loadServerLayoutPaths(db, serverIds)
+    const placementByServer = await loadTierPlacementsForServers(db, serverIds, {
+      deployment: metricsDeploymentKindForRuntime(opts.runtime),
+      orgOptions,
+      unwatched: 'counts',
+    })
 
     return c.json({
       servers: display.rows.map((row) => {
@@ -674,6 +683,8 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
           ...timezoneFields,
           ...hostDefaultsFields,
           licenseId: row.licenseId ?? null,
+          tierPlacement: placementByServer.get(row.id) ?? null,
+          layoutPaths: layoutPathsByServer.get(row.id) ?? null,
         }
       }),
     })
@@ -1140,6 +1151,12 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
       orgOptions,
       dcOptions,
     )
+    const layoutPathsByServer = await loadServerLayoutPaths(db, [id])
+    const placementByServer = await loadTierPlacementsForServers(db, [id], {
+      deployment: metricsDeploymentKindForRuntime(opts.runtime),
+      orgOptions,
+      unwatched: 'ids',
+    })
 
     return c.json({
       ok: true,
@@ -1158,6 +1175,8 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
         datacenterEnforceServerTimezone:
           dcOptions?.enforceServerTimezone ?? false,
         licenseId: display.row.licenseId ?? null,
+        tierPlacement: placementByServer.get(id) ?? null,
+        layoutPaths: layoutPathsByServer.get(id) ?? null,
         labels: labelRows.map((row) => ({ key: row.key, value: row.value })),
       },
     })

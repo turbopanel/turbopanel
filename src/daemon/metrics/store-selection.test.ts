@@ -1,31 +1,31 @@
 import { assertEquals, assertInstanceOf, assertRejects, assertStringIncludes } from '@std/assert'
-import { CloudflareAnalyticsEngineServerMetricsStoreV5 } from './backends/cloudflare/store-v5.ts'
-import { AE_DEFAULT_MAX_RANGE_SECONDS } from './backends/cloudflare/sql-api-v5.ts'
+import { CloudflareAnalyticsEngineServerMetricsStore } from './backends/cloudflare/store.ts'
+import { AE_DEFAULT_MAX_RANGE_SECONDS } from './backends/cloudflare/sql-api.ts'
 import { DuckDbParquetServerMetricsStore } from './backends/duckdb/store.ts'
-import { buildMetricsSampleV5 } from './contract-v5.ts'
-import type { AuthenticatedMetricsSampleV5 } from './types-v5.ts'
-import { DisabledServerMetricsStoreV5 } from './disabled-store-v5.ts'
+import { buildMetricsSample } from './contract.ts'
+import type { AuthenticatedMetricsSample } from './types.ts'
+import { DisabledServerMetricsStore } from './disabled-store.ts'
 import { it } from '@std/testing/bdd'
 import {
   parseAnalyticsEngineMaxRangeSeconds,
   parseMetricsRetentionDays,
   resetMetricsStoreSelectionWarningsForTests,
   resolveCloudflareAnalyticsSqlConfig,
-  resolveServerMetricsStoreV5,
-  UnavailableServerMetricsStoreV5,
+  resolveServerMetricsStore,
+  UnavailableServerMetricsStore,
 } from './store-selection.ts'
-import { resolveServerMetricsStoreV5 as resolveWorkersServerMetricsStoreV5 } from './store-selection-workers.ts'
+import { resolveServerMetricsStore as resolveWorkersServerMetricsStore } from './store-selection-workers.ts'
 
-it('resolveServerMetricsStoreV5 workers + AE → AnalyticsEngine store', () => {
+it('resolveServerMetricsStore workers + AE → AnalyticsEngine store', () => {
   resetMetricsStoreSelectionWarningsForTests()
-  const store = resolveServerMetricsStoreV5({
+  const store = resolveServerMetricsStore({
     runtime: 'workers',
     analyticsEngine: { writeDataPoint() {} },
   })
-  assertInstanceOf(store, CloudflareAnalyticsEngineServerMetricsStoreV5)
+  assertInstanceOf(store, CloudflareAnalyticsEngineServerMetricsStore)
 })
 
-it('resolveServerMetricsStoreV5 workers without AE → unconfigured store', () => {
+it('resolveServerMetricsStore workers without AE → unconfigured store', () => {
   resetMetricsStoreSelectionWarningsForTests()
   const warnings: string[] = []
   const originalWarn = console.warn
@@ -33,21 +33,21 @@ it('resolveServerMetricsStoreV5 workers without AE → unconfigured store', () =
     warnings.push(String(msg))
   }
   try {
-    const store = resolveServerMetricsStoreV5({
+    const store = resolveServerMetricsStore({
       runtime: 'workers',
     })
-    assertInstanceOf(store, DisabledServerMetricsStoreV5)
+    assertInstanceOf(store, DisabledServerMetricsStore)
     assertEquals(warnings.length, 1)
   } finally {
     console.warn = originalWarn
   }
 })
 
-it('resolveServerMetricsStoreV5 deno → DuckDB store', () => {
+it('resolveServerMetricsStore deno → DuckDB store', () => {
   resetMetricsStoreSelectionWarningsForTests()
   const metricsDir = Deno.makeTempDirSync({ prefix: 'tp-metrics-select-' })
   try {
-    const store = resolveServerMetricsStoreV5({
+    const store = resolveServerMetricsStore({
       runtime: 'deno',
       duckdb: { metricsDir },
     })
@@ -57,7 +57,7 @@ it('resolveServerMetricsStoreV5 deno → DuckDB store', () => {
   }
 })
 
-it('resolveServerMetricsStoreV5 deno construction failure → reads reject as unavailable', async () => {
+it('resolveServerMetricsStore deno construction failure → reads reject as unavailable', async () => {
   resetMetricsStoreSelectionWarningsForTests()
   // A regular file where the metrics directory should be makes mkdir fail.
   const blocker = Deno.makeTempFileSync({ prefix: 'tp-metrics-blocker-' })
@@ -67,13 +67,13 @@ it('resolveServerMetricsStoreV5 deno construction failure → reads reject as un
     warnings.push(String(msg))
   }
   try {
-    const store = resolveServerMetricsStoreV5({
+    const store = resolveServerMetricsStore({
       runtime: 'deno',
       duckdb: { metricsDir: `${blocker}/metrics` },
     })
     // A real DuckDB outage must never degrade to the disabled store — reads
     // reject so metrics routes return 503 metrics_backend_unavailable.
-    assertInstanceOf(store, UnavailableServerMetricsStoreV5)
+    assertInstanceOf(store, UnavailableServerMetricsStore)
     assertEquals(warnings.length, 1)
     assertStringIncludes(warnings[0]!, 'DuckDB store failed to open')
 
@@ -123,7 +123,7 @@ it('resolveServerMetricsStoreV5 deno construction failure → reads reject as un
 it('Workers store selection rejects a non-workers runtime', () => {
   resetMetricsStoreSelectionWarningsForTests()
   try {
-    resolveWorkersServerMetricsStoreV5({ runtime: 'deno' })
+    resolveWorkersServerMetricsStore({ runtime: 'deno' })
     throw new TypeError('expected Workers store selection to reject deno runtime')
   } catch (error) {
     assertInstanceOf(error, TypeError)
@@ -184,11 +184,11 @@ it('parseMetricsRetentionDays accepts positive integers only', () => {
   assertEquals(parseMetricsRetentionDays('bad'), undefined)
 })
 
-it('resolveServerMetricsStoreV5 deno DuckDB honors retentionDays override', () => {
+it('resolveServerMetricsStore deno DuckDB honors retentionDays override', () => {
   resetMetricsStoreSelectionWarningsForTests()
   const metricsDir = Deno.makeTempDirSync({ prefix: 'tp-metrics-retention-' })
   try {
-    const store = resolveServerMetricsStoreV5({
+    const store = resolveServerMetricsStore({
       runtime: 'deno',
       duckdb: { metricsDir, retentionDays: 30 },
     })
@@ -198,7 +198,7 @@ it('resolveServerMetricsStoreV5 deno DuckDB honors retentionDays override', () =
   }
 })
 
-it('resolveServerMetricsStoreV5 warns only once per missing-backend key', () => {
+it('resolveServerMetricsStore warns only once per missing-backend key', () => {
   resetMetricsStoreSelectionWarningsForTests()
   const warnings: string[] = []
   const originalWarn = console.warn
@@ -206,8 +206,8 @@ it('resolveServerMetricsStoreV5 warns only once per missing-backend key', () => 
     warnings.push(String(msg))
   }
   try {
-    resolveServerMetricsStoreV5({ runtime: 'workers' })
-    resolveServerMetricsStoreV5({ runtime: 'workers' })
+    resolveServerMetricsStore({ runtime: 'workers' })
+    resolveServerMetricsStore({ runtime: 'workers' })
     assertEquals(warnings.length, 1)
   } finally {
     console.warn = originalWarn
@@ -216,19 +216,18 @@ it('resolveServerMetricsStoreV5 warns only once per missing-backend key', () => 
 
 const INTEGRATION_SERVER_ID = '11111111-2222-4333-8444-555555555555'
 
-function buildV5HostSample(overrides: {
+function buildHostSample(overrides: {
   atMs: number
   cpuUserPercent: number
   memoryAvailableBytes: number
-}): AuthenticatedMetricsSampleV5 {
+}): AuthenticatedMetricsSample {
   const at = new Date(overrides.atMs).toISOString()
-  const sample = buildMetricsSampleV5({
+  const sample = buildMetricsSample({
     metadata: {
-      version: 5,
+      version: 6,
       sampledAt: at,
       intervalSeconds: 60,
       sequence: 1,
-      collectionMode: 'baseline',
       topologyGeneration: 1,
       bootGeneration: 1,
     },
@@ -280,14 +279,14 @@ function buildV5HostSample(overrides: {
   return { ...sample, serverId: INTEGRATION_SERVER_ID, receivedAt: at }
 }
 
-it('resolveServerMetricsStoreV5 deno: real v5 ingest lands data the series/summary/fleet-snapshot routes can read back', async () => {
+it('resolveServerMetricsStore deno: real v5 ingest lands data the series/summary/fleet-snapshot routes can read back', async () => {
   resetMetricsStoreSelectionWarningsForTests()
   const metricsDir = Deno.makeTempDirSync({
     prefix: 'tp-metrics-integration-',
   })
   let store: DuckDbParquetServerMetricsStore | undefined
   try {
-    const resolved = resolveServerMetricsStoreV5({
+    const resolved = resolveServerMetricsStore({
       runtime: 'deno',
       duckdb: { metricsDir },
     })
@@ -296,9 +295,9 @@ it('resolveServerMetricsStoreV5 deno: real v5 ingest lands data the series/summa
 
     const sampledAtMs = Date.UTC(2026, 5, 2, 12, 0, 0)
     // The real Deno ingest write path (`POST /api/daemon/v1/metrics` calls
-    // this on `serverMetricsStoreV5` directly).
+    // this on `serverMetricsStore` directly).
     await store.writeSample(
-      buildV5HostSample({
+      buildHostSample({
         atMs: sampledAtMs,
         cpuUserPercent: 12.5,
         memoryAvailableBytes: 1_000_000,

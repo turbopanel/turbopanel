@@ -66,7 +66,11 @@ export class MailerMailgunSender {
     try {
       const config = await this.resolveMailgunConfig()
       validateEmailAddress(config.from, 'from')
-      if (job.type === 'signup-verification' || job.type === 'email-otp') {
+      if (
+        job.type === 'signup-verification' ||
+        job.type === 'email-otp' ||
+        job.type === 'server-tier-notice'
+      ) {
         validateEmailAddress(job.to, 'recipient')
       }
 

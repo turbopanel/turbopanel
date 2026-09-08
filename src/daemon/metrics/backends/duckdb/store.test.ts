@@ -1,23 +1,22 @@
 import { assertEquals, assertExists } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { buildMetricsSampleV5 } from '../../contract-v5.ts'
+import { buildMetricsSample } from '../../contract.ts'
 import type {
-  CpuDetailSampleV5,
-  DatabaseProxySampleV5,
-  IngressSourceSampleV5,
-  MemoryDetailSampleV5,
-  MetricEventV5,
-  NetworkDeviceSampleV5,
-} from '../../contract-v5.ts'
-import type { AuthenticatedMetricsSampleV5, ServerStatusEvent } from '../../types-v5.ts'
-import { AE_V5_MISSING_METRIC_SENTINEL } from '../cloudflare/field-map-v5.ts'
-import { MAX_STATUS_EVENTS } from '../cloudflare/sql-api-v5.ts'
+  DiagnosticsSample,
+  DatabaseProxySample,
+  IngressSourceSample,
+  MetricEvent,
+  NetworkDeviceSample,
+} from '../../contract.ts'
+import type { AuthenticatedMetricsSample, ServerStatusEvent } from '../../types.ts'
+import { AE_MISSING_METRIC_SENTINEL } from '../cloudflare/field-map.ts'
+import { MAX_STATUS_EVENTS } from '../cloudflare/sql-api.ts'
 import { type DuckDbConnectionLike, openDuckDb, resolveDuckDbPaths } from './database.ts'
 import { MS_PER_DAY, partitionFileForDay } from './parquet.ts'
 import {
   GPU_SAMPLES_TABLE,
   HOST_SAMPLES_TABLE,
-  MEMORY_DETAIL_SAMPLES_TABLE,
+  MEMORY_DIAGNOSTICS_SAMPLES_TABLE,
   METRIC_EVENTS_TABLE,
   NETWORK_SAMPLES_TABLE,
 } from './schema.ts'
@@ -54,7 +53,7 @@ async function withStore(
   }
 }
 
-function sampleV5(overrides: {
+function sample(overrides: {
   serverId?: string
   atMs: number
   intervalSeconds?: number
@@ -64,29 +63,25 @@ function sampleV5(overrides: {
   cpuBusyPercent?: number | null
   gpuCount?: number
   networkCount?: number
-  networks?: NetworkDeviceSampleV5[]
-  ingressSources?: IngressSourceSampleV5[]
-  databaseProxies?: DatabaseProxySampleV5[]
-  events?: MetricEventV5[]
-  collectionMode?: 'baseline' | 'live'
-  cpuDetail?: CpuDetailSampleV5
-  memoryDetail?: MemoryDetailSampleV5
-}): AuthenticatedMetricsSampleV5 {
+  networks?: NetworkDeviceSample[]
+  ingressSources?: IngressSourceSample[]
+  databaseProxies?: DatabaseProxySample[]
+  events?: MetricEvent[]
+  diagnostics?: DiagnosticsSample
+}): AuthenticatedMetricsSample {
   const at = new Date(overrides.atMs).toISOString()
   const gpuCount = overrides.gpuCount ?? 0
   const networkCount = overrides.networkCount ?? 0
-  const sample = buildMetricsSampleV5({
+  const sample = buildMetricsSample({
     metadata: {
-      version: 5,
+      version: 6,
       sampledAt: at,
       intervalSeconds: overrides.intervalSeconds ?? 60,
       sequence: overrides.sequence ?? 1,
-      collectionMode: overrides.collectionMode ?? 'baseline',
       topologyGeneration: overrides.topologyGeneration ?? 1,
       bootGeneration: overrides.bootGeneration ?? 1,
     },
-    cpuDetail: overrides.cpuDetail,
-    memoryDetail: overrides.memoryDetail,
+    diagnostics: overrides.diagnostics,
     host: {
       cpu: {
         busyPercent: overrides.cpuBusyPercent ?? null,
@@ -141,9 +136,6 @@ function sampleV5(overrides: {
       utilizationPercent: i,
       memoryUsedBytes: null,
       memoryActivityPercent: null,
-      temperatureCelsius: null,
-      memoryTemperatureCelsius: null,
-      powerWatts: null,
       pcieReceiveBytesPerSecond: null,
       pcieTransmitBytesPerSecond: null,
       throttlePercent: null,
@@ -185,7 +177,7 @@ it('writeSample persists the host row and every entity row with real NULLs, neve
   try {
     const store = makeStore(metricsDir)
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START + 60_000,
         cpuBusyPercent: 42,
         networkCount: 1,
@@ -204,7 +196,7 @@ it('writeSample persists the host row and every entity row with real NULLs, neve
       assertEquals(hostRow.cpu_busy_percent, 42)
       // Never-set metric is a real SQL NULL — never the AE sentinel.
       assertEquals(hostRow.cpu_user_percent, null)
-      assertEquals(hostRow.cpu_user_percent === AE_V5_MISSING_METRIC_SENTINEL, false)
+      assertEquals(hostRow.cpu_user_percent === AE_MISSING_METRIC_SENTINEL, false)
       assertEquals(hostRow.sequence, 1)
       assertEquals(hostRow.topology_generation, 1)
       assertEquals(hostRow.boot_generation, 1)
@@ -231,7 +223,7 @@ it('arbitrary entity cardinality: 16 GPUs and 24 network devices land as that ma
   try {
     const store = makeStore(metricsDir)
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START + 60_000,
         gpuCount: 16,
         networkCount: 24,
@@ -256,7 +248,7 @@ it('events land in server_metric_events with server-scoped payload/entity fields
   try {
     const store = makeStore(metricsDir)
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START + 60_000,
         events: [
           {
@@ -314,7 +306,7 @@ it("writeSample's row fan-out lands inside a single BEGIN/COMMIT transaction", a
   )
   try {
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START + 60_000,
         gpuCount: 3,
         networkCount: 2,
@@ -348,7 +340,7 @@ it('rows persist across close + reopen at the same path', async () => {
   const metricsDir = await Deno.makeTempDir({ prefix: 'tp-duckdb-restart-' })
   try {
     const first = makeStore(metricsDir)
-    await first.writeSample(sampleV5({ atMs: DAY_START + 60_000, cpuBusyPercent: 10 }))
+    await first.writeSample(sample({ atMs: DAY_START + 60_000, cpuBusyPercent: 10 }))
     await first.close()
 
     const handle = await openDuckDb({ paths: resolveDuckDbPaths(metricsDir) })
@@ -380,7 +372,7 @@ it('sparse writes arm a short flush timer (a few seconds, never minutes)', async
   try {
     // Default batch size (10) — a single sparse sample stays pending and
     // must arm the age timer at the short default.
-    await store.writeSample(sampleV5({ atMs: DAY_START + 60_000, cpuBusyPercent: 10 }))
+    await store.writeSample(sample({ atMs: DAY_START + 60_000, cpuBusyPercent: 10 }))
     assertEquals(capturedDelay, DUCKDB_WRITE_BATCH_MAX_AGE_MS)
     assertEquals(DUCKDB_WRITE_BATCH_MAX_AGE_MS, 5_000)
 
@@ -398,7 +390,7 @@ it('close() persists pending batched writes (graceful shutdown)', async () => {
     // Default batching — one accepted sample sits in the pending buffer
     // (below the row threshold, age timer not yet fired) when close() runs.
     const first = new DuckDbParquetServerMetricsStore({ metricsDir })
-    await first.writeSample(sampleV5({ atMs: DAY_START + 60_000, cpuBusyPercent: 10 }))
+    await first.writeSample(sample({ atMs: DAY_START + 60_000, cpuBusyPercent: 10 }))
     await first.close()
 
     const handle = await openDuckDb({ paths: resolveDuckDbPaths(metricsDir) })
@@ -416,7 +408,7 @@ it('daily archive seals every family independently into its own Parquet subdir',
   await withStore(async (store) => {
     const yesterday = DAY_START - MS_PER_DAY
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: yesterday + 60_000,
         cpuBusyPercent: 10,
         gpuCount: 2,
@@ -456,8 +448,8 @@ it('retention prunes rows and partitions older than retentionDays across every f
     async (store) => {
       const oldDay = DAY_START - 10 * MS_PER_DAY
       const yesterday = DAY_START - MS_PER_DAY
-      await store.writeSample(sampleV5({ atMs: oldDay + 60_000, cpuBusyPercent: 10, gpuCount: 1 }))
-      await store.writeSample(sampleV5({ atMs: yesterday + 3600_000, cpuBusyPercent: 20 }))
+      await store.writeSample(sample({ atMs: oldDay + 60_000, cpuBusyPercent: 10, gpuCount: 1 }))
+      await store.writeSample(sample({ atMs: yesterday + 3600_000, cpuBusyPercent: 20 }))
 
       await store.runDailyArchiveOnce(DAY_START + 3600_000)
 
@@ -505,11 +497,11 @@ it('retention prunes rows and partitions older than retentionDays across every f
 it('late sample for an already archived day merges on the next archive tick', async () => {
   await withStore(async (store) => {
     const yesterday = DAY_START - MS_PER_DAY
-    await store.writeSample(sampleV5({ atMs: yesterday + 60_000, cpuBusyPercent: 10 }))
+    await store.writeSample(sample({ atMs: yesterday + 60_000, cpuBusyPercent: 10 }))
     await store.runDailyArchiveOnce(DAY_START + 3600_000)
 
     // Late arrival for the already sealed day, then a second archive pass.
-    await store.writeSample(sampleV5({ atMs: yesterday + 120_000, cpuBusyPercent: 20 }))
+    await store.writeSample(sample({ atMs: yesterday + 120_000, cpuBusyPercent: 20 }))
     await store.runDailyArchiveOnce(DAY_START + 7200_000)
 
     const partition = partitionFileForDay(store.paths.parquetRoot, 'host', yesterday)
@@ -604,7 +596,7 @@ it('resource caps default to threads=2 / memory_limit=128MiB (duckdb_settings)',
 it('stray tmp export from a crash is swept and never double-deletes hot rows', async () => {
   await withStore(async (store) => {
     const yesterday = DAY_START - MS_PER_DAY
-    await store.writeSample(sampleV5({ atMs: yesterday + 60_000, cpuBusyPercent: 10 }))
+    await store.writeSample(sample({ atMs: yesterday + 60_000, cpuBusyPercent: 10 }))
     const strayPath = `${store.paths.tmpDir}/host-crashed.parquet`
     await Deno.writeTextFile(strayPath, 'interrupted export')
 
@@ -638,7 +630,7 @@ it('stray tmp export from a crash is swept and never double-deletes hot rows', a
 it('v5 queryHostSeries: weighted-average math, real NULL for an unpopulated metric, mixed-generation bucket is null, generations union sorted', async () => {
   await withStore(async (store) => {
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START,
         intervalSeconds: 60,
         cpuBusyPercent: 10,
@@ -646,7 +638,7 @@ it('v5 queryHostSeries: weighted-average math, real NULL for an unpopulated metr
       })
     )
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START + 300_000,
         sequence: 2,
         intervalSeconds: 60,
@@ -680,14 +672,14 @@ it('v5 queryHostSeries: weighted-average math, real NULL for an unpopulated metr
 it("v5 queryHostSeries: topologyGeneration is the shared generation when a bucket's samples agree", async () => {
   await withStore(async (store) => {
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START,
         cpuBusyPercent: 10,
         topologyGeneration: 3,
       })
     )
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START + 60_000,
         sequence: 2,
         cpuBusyPercent: 20,
@@ -709,17 +701,17 @@ it("v5 queryHostSeries: topologyGeneration is the shared generation when a bucke
   })
 })
 
-it('v5 queryHostSeries: memoryDetail.* fields resolve via the left-joined memory-detail table, real NULL for a bucket sample missing memoryDetail', async () => {
+it('v6 queryHostSeries: diagnostics memory fields resolve via the left-joined memory-diagnostics table, real NULL for a bucket sample missing diagnostics', async () => {
   await withStore(async (store) => {
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START,
-        memoryDetail: MEMORY_DETAIL_FIXTURE,
+        diagnostics: DIAGNOSTICS_FIXTURE,
       })
     )
     await store.writeSample(
-      sampleV5({
-        // No memoryDetail this tick — the left join must not drop the host row.
+      sample({
+        // No diagnostics this tick — the left join must not drop the host row.
         atMs: DAY_START + 60_000,
         sequence: 2,
       })
@@ -727,7 +719,7 @@ it('v5 queryHostSeries: memoryDetail.* fields resolve via the left-joined memory
 
     const result = await store.queryHostSeries({
       serverId: SERVER_A,
-      metrics: ['memoryDetail.memoryFreeBytes', 'memoryDetail.pageScanDirectPerSecond'],
+      metrics: ['diagnostics.memoryFreeBytes', 'diagnostics.pageScanDirectPerSecond'],
       from: new Date(DAY_START).toISOString(),
       to: new Date(DAY_START + 600_000).toISOString(),
       resolutionSeconds: 600,
@@ -735,30 +727,29 @@ it('v5 queryHostSeries: memoryDetail.* fields resolve via the left-joined memory
 
     assertEquals(result.points.length, 1)
     const point = result.points[0]!
-    // Only one of the two rows in the bucket carries a memoryDetail row —
+    // Only one of the two rows in the bucket carries a memory-diagnostics row —
     // the weighted average/last-value aggregates ignore the NULL row rather
     // than averaging it in as 0.
     assertEquals(
-      point.values['memoryDetail.memoryFreeBytes'],
-      MEMORY_DETAIL_FIXTURE.memoryFreeBytes
+      point.values['diagnostics.memoryFreeBytes'],
+      DIAGNOSTICS_FIXTURE.memory.memoryFreeBytes
     )
     assertEquals(
-      point.values['memoryDetail.pageScanDirectPerSecond'],
-      MEMORY_DETAIL_FIXTURE.pageScanDirectPerSecond
+      point.values['diagnostics.pageScanDirectPerSecond'],
+      DIAGNOSTICS_FIXTURE.memory.pageScanDirectPerSecond
     )
     // sample_count/topologyGeneration still reflect both host rows, not just the joined one.
     assertEquals(result.sampleCount, 2)
   })
 })
 
-it('v5 queryHostSeries: combining host.*, cpuDetail.*, and memoryDetail.* selectors in one request resolves all three', async () => {
+it('v6 queryHostSeries: combining host.* with both diagnostics halves in one request resolves all three', async () => {
   await withStore(async (store) => {
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START,
         cpuBusyPercent: 42,
-        cpuDetail: CPU_DETAIL_FIXTURE,
-        memoryDetail: MEMORY_DETAIL_FIXTURE,
+        diagnostics: DIAGNOSTICS_FIXTURE,
       })
     )
 
@@ -766,8 +757,8 @@ it('v5 queryHostSeries: combining host.*, cpuDetail.*, and memoryDetail.* select
       serverId: SERVER_A,
       metrics: [
         'host.cpu.busyPercent',
-        'cpuDetail.averageFrequencyMHz',
-        'memoryDetail.memoryFreeBytes',
+        'diagnostics.averageFrequencyMHz',
+        'diagnostics.memoryFreeBytes',
       ],
       from: new Date(DAY_START).toISOString(),
       to: new Date(DAY_START + 600_000).toISOString(),
@@ -777,10 +768,10 @@ it('v5 queryHostSeries: combining host.*, cpuDetail.*, and memoryDetail.* select
     assertEquals(result.points.length, 1)
     const point = result.points[0]!
     assertEquals(point.values['host.cpu.busyPercent'], 42)
-    assertEquals(point.values['cpuDetail.averageFrequencyMHz'], 3200)
+    assertEquals(point.values['diagnostics.averageFrequencyMHz'], 3200)
     assertEquals(
-      point.values['memoryDetail.memoryFreeBytes'],
-      MEMORY_DETAIL_FIXTURE.memoryFreeBytes
+      point.values['diagnostics.memoryFreeBytes'],
+      DIAGNOSTICS_FIXTURE.memory.memoryFreeBytes
     )
   })
 })
@@ -798,8 +789,8 @@ it('v5 queryHostSummary: sample count + latestAt, zero samples means null latest
     assertEquals(empty.sampleCount, 0)
     assertEquals(empty.latestAt, null)
 
-    await store.writeSample(sampleV5({ atMs: from + 60_000, cpuBusyPercent: 10 }))
-    await store.writeSample(sampleV5({ atMs: from + 120_000, sequence: 2, cpuBusyPercent: 20 }))
+    await store.writeSample(sample({ atMs: from + 60_000, cpuBusyPercent: 10 }))
+    await store.writeSample(sample({ atMs: from + 120_000, sequence: 2, cpuBusyPercent: 20 }))
 
     const summary = await store.queryHostSummary({
       serverId: SERVER_A,
@@ -815,8 +806,8 @@ it('v5 queryFleetHostSnapshot: multiple servers, values map, a requested-but-abs
   await withStore(async (store) => {
     const serverB = '22222222-3333-4444-8555-666666666666'
     const serverC = '33333333-4444-5555-8666-777777777777'
-    await store.writeSample(sampleV5({ serverId: SERVER_A, atMs: DAY_START, cpuBusyPercent: 10 }))
-    await store.writeSample(sampleV5({ serverId: serverB, atMs: DAY_START, cpuBusyPercent: 50 }))
+    await store.writeSample(sample({ serverId: SERVER_A, atMs: DAY_START, cpuBusyPercent: 10 }))
+    await store.writeSample(sample({ serverId: serverB, atMs: DAY_START, cpuBusyPercent: 50 }))
 
     const result = await store.queryFleetHostSnapshot({
       serverIds: [SERVER_A, serverB, serverC],
@@ -837,7 +828,7 @@ it('v5 queryEntitySeries: network family — per-entity buckets, missing entity 
   await withStore(async (store) => {
     const from = DAY_START
     const to = DAY_START + 600_000
-    const networkRow = (deviceId: string, rx: number): NetworkDeviceSampleV5 => ({
+    const networkRow = (deviceId: string, rx: number): NetworkDeviceSample => ({
       deviceId,
       receiveBytesPerSecond: rx,
       transmitBytesPerSecond: null,
@@ -847,7 +838,7 @@ it('v5 queryEntitySeries: network family — per-entity buckets, missing entity 
       transmitDropsPerSecond: null,
     })
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: from + 60_000,
         networks: [networkRow('eth0', 100), networkRow('eth1', 200)],
       })
@@ -883,7 +874,7 @@ it('v5 queryEntitySeries: managed.ingress groups by source_id, keeping distinct 
   await withStore(async (store) => {
     const from = DAY_START
     const to = DAY_START + 600_000
-    const ingressRow = (sourceId: string, rps: number): IngressSourceSampleV5 => ({
+    const ingressRow = (sourceId: string, rps: number): IngressSourceSample => ({
       sourceId,
       sourceKind: 'caddy',
       requests: rps,
@@ -894,18 +885,20 @@ it('v5 queryEntitySeries: managed.ingress groups by source_id, keeping distinct 
       requestErrors: null,
       requestBytes: null,
       responseBytes: null,
-      requestDurationSecondsAvg: null,
-      requestsUnder100ms: null,
-      requestsUnder500ms: null,
-      requestsUnder1s: null,
-      requestsUnder5s: null,
+      requestDurationSecondsSum: null,
+      bucket10ms: null,
+      bucket50ms: null,
+      bucket100ms: null,
+      bucket500ms: null,
+      bucket1s: null,
+      bucket5s: null,
       requestsInFlight: null,
       upstreamsHealthy: null,
       upstreamsTotal: null,
       retries: null,
     })
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: from + 60_000,
         ingressSources: [ingressRow('caddy-1', 10), ingressRow('caddy-2', 30)],
       })
@@ -935,7 +928,7 @@ it('v5 queryEntitySeries: managed.ingress groups by source_id, keeping distinct 
 
 it('v5 queryEntityIdsSeen: returns exactly the observed entity ids for a per-device family', async () => {
   await withStore(async (store) => {
-    const networkRow = (deviceId: string): NetworkDeviceSampleV5 => ({
+    const networkRow = (deviceId: string): NetworkDeviceSample => ({
       deviceId,
       receiveBytesPerSecond: 1,
       transmitBytesPerSecond: null,
@@ -945,7 +938,7 @@ it('v5 queryEntityIdsSeen: returns exactly the observed entity ids for a per-dev
       transmitDropsPerSecond: null,
     })
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START + 60_000,
         networks: [networkRow('eth0'), networkRow('eth1')],
       })
@@ -963,18 +956,29 @@ it('v5 queryEntityIdsSeen: returns exactly the observed entity ids for a per-dev
 
 it('v5 queryEntityIdsSeen: managed.database_proxy returns source_id values, keeping distinct sources of the same source_kind separate', async () => {
   await withStore(async (store) => {
-    const proxyRow = (sourceId: string, sourceKind: string): DatabaseProxySampleV5 => ({
+    const proxyRow = (sourceId: string, sourceKind: string): DatabaseProxySample => ({
       sourceId,
       sourceKind,
       queries: 1,
       slowQueries: null,
-      connectionErrors: null,
+      queryLatencyMsAvg: null,
+      backendLatencyMsAvg: null,
+      activeTransactions: null,
       clientConnections: null,
+      clientConnectionsCreated: null,
+      clientConnectionsAborted: null,
+      connectionsRejectedMaxConns: null,
       backendConnections: null,
+      backendConnectionsCreated: null,
+      backendConnectionsAborted: null,
+      connectionErrors: null,
       backendsUp: null,
+      backendsTotal: null,
+      bytesFromBackends: null,
+      bytesToBackends: null,
     })
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START + 60_000,
         databaseProxies: [proxyRow('proxysql-1', 'proxysql'), proxyRow('proxysql-2', 'proxysql')],
       })
@@ -993,7 +997,7 @@ it('v5 queryEntityIdsSeen: managed.database_proxy returns source_id values, keep
 it('v5 queryMetricEvents: parses entityId/source/payload when present and omits them entirely when absent', async () => {
   await withStore(async (store) => {
     await store.writeSample(
-      sampleV5({
+      sample({
         atMs: DAY_START + 60_000,
         events: [
           {
@@ -1038,20 +1042,20 @@ it('v5 queryMetricEvents: parses entityId/source/payload when present and omits 
 it('v5 queryMetricEvents: truncates at MAX_STATUS_EVENTS and reports truncated: true', async () => {
   await withStore(async (store) => {
     const total = MAX_STATUS_EVENTS + 1
-    const allEvents: MetricEventV5[] = Array.from({ length: total }, (_, i) => ({
+    const allEvents: MetricEvent[] = Array.from({ length: total }, (_, i) => ({
       eventId: `evt-${i}`,
       at: new Date(DAY_START + i * 1000).toISOString(),
       kind: 'oom_kill',
       severity: 'info',
     }))
-    // `buildMetricsSampleV5` caps events per sample at 128 — split across
+    // `buildMetricsSample` caps events per sample at 128 — split across
     // several `writeSample` calls (each call still fans its own events out
     // inside a single transaction; the cap is per-sample, not per-store).
     const CHUNK = 100
     for (let offset = 0; offset < allEvents.length; offset += CHUNK) {
       const chunk = allEvents.slice(offset, offset + CHUNK)
       await store.writeSample(
-        sampleV5({
+        sample({
           atMs: DAY_START + offset * 1000,
           sequence: offset + 1,
           events: chunk,
@@ -1071,63 +1075,65 @@ it('v5 queryMetricEvents: truncates at MAX_STATUS_EVENTS and reports truncated: 
   })
 })
 
-const CPU_DETAIL_FIXTURE: CpuDetailSampleV5 = {
-  averageFrequencyMHz: 3200,
-  minimumFrequencyMHz: 800,
-  maximumFrequencyMHz: 4500,
-  contextSwitchesPerSecond: 12000,
-  interruptsPerSecond: 4000,
-  forksPerSecond: 15,
-  cpuIrqPercent: 2.5,
+const DIAGNOSTICS_FIXTURE: DiagnosticsSample = {
+  cpu: {
+    averageFrequencyMHz: 3200,
+    minimumFrequencyMHz: 800,
+    maximumFrequencyMHz: 4500,
+    contextSwitchesPerSecond: 12000,
+    interruptsPerSecond: 4000,
+    forksPerSecond: 15,
+    cpuIrqPercent: 2.5,
+  },
+  memory: {
+    memoryFreeBytes: 1_000_000,
+    cachedBytes: 2_000_000,
+    anonPagesBytes: 3_000_000,
+    slabReclaimableBytes: 400_000,
+    slabUnreclaimableBytes: 100_000,
+    dirtyBytes: 5000,
+    writebackBytes: 0,
+    shmemBytes: 60_000,
+    committedAsBytes: 9_000_000,
+    pageScanDirectPerSecond: 10,
+    pageScanKswapdPerSecond: 5,
+    compactionStallsPerSecond: 1,
+  },
 }
 
-const MEMORY_DETAIL_FIXTURE: MemoryDetailSampleV5 = {
-  memoryFreeBytes: 1_000_000,
-  cachedBytes: 2_000_000,
-  anonPagesBytes: 3_000_000,
-  slabReclaimableBytes: 400_000,
-  slabUnreclaimableBytes: 100_000,
-  dirtyBytes: 5000,
-  writebackBytes: 0,
-  shmemBytes: 60_000,
-  pageTablesBytes: 70_000,
-  kernelStackBytes: 8000,
-  committedAsBytes: 9_000_000,
-  commitLimitBytes: 16_000_000,
-  activeAnonBytes: 2_500_000,
-  inactiveAnonBytes: 500_000,
-  activeFileBytes: 1_500_000,
-  inactiveFileBytes: 500_000,
-  pageScanDirectPerSecond: 10,
-  pageScanKswapdPerSecond: 5,
-  compactionStallsPerSecond: 1,
-}
-
-it('writeSample fans memoryDetail into a single server_memory_detail_samples row (19 real fields, no row when absent)', async () => {
+it("writeSample splits diagnostics across the host row's cpu_diagnostics_* columns and a single server_memory_diagnostics_samples row (no row when absent)", async () => {
   await withStore(async (store, metricsDir) => {
-    await store.writeSample(sampleV5({ atMs: DAY_START, memoryDetail: MEMORY_DETAIL_FIXTURE }))
+    await store.writeSample(sample({ atMs: DAY_START, diagnostics: DIAGNOSTICS_FIXTURE }))
     await store.close()
 
     const handle = await openDuckDb({ paths: resolveDuckDbPaths(metricsDir) })
     try {
-      assertEquals(await rowCount(handle.connection, MEMORY_DETAIL_SAMPLES_TABLE), 1)
+      assertEquals(await rowCount(handle.connection, MEMORY_DIAGNOSTICS_SAMPLES_TABLE), 1)
       const reader = await handle.connection.runAndReadAll(
-        `SELECT memory_free_bytes, compaction_stalls_per_second FROM ${MEMORY_DETAIL_SAMPLES_TABLE}`
+        `SELECT memory_free_bytes, compaction_stalls_per_second FROM ${MEMORY_DIAGNOSTICS_SAMPLES_TABLE}`
       )
       const row = reader.getRowObjectsJS()[0]!
       assertEquals(row.memory_free_bytes, 1_000_000)
       assertEquals(row.compaction_stalls_per_second, 1)
+
+      // The CPU half rides the host row itself — no second table, no join.
+      const hostReader = await handle.connection.runAndReadAll(
+        `SELECT cpu_diagnostics_average_frequency_m_hz, cpu_diagnostics_cpu_irq_percent FROM ${HOST_SAMPLES_TABLE}`
+      )
+      const hostRow = hostReader.getRowObjectsJS()[0]!
+      assertEquals(hostRow.cpu_diagnostics_average_frequency_m_hz, 3200)
+      assertEquals(hostRow.cpu_diagnostics_cpu_irq_percent, 2.5)
     } finally {
       handle.close()
     }
   })
 
   await withStore(async (store, metricsDir) => {
-    await store.writeSample(sampleV5({ atMs: DAY_START, cpuBusyPercent: 5 }))
+    await store.writeSample(sample({ atMs: DAY_START, cpuBusyPercent: 5 }))
     await store.close()
     const handle = await openDuckDb({ paths: resolveDuckDbPaths(metricsDir) })
     try {
-      assertEquals(await rowCount(handle.connection, MEMORY_DETAIL_SAMPLES_TABLE), 0)
+      assertEquals(await rowCount(handle.connection, MEMORY_DIAGNOSTICS_SAMPLES_TABLE), 0)
     } finally {
       handle.close()
     }

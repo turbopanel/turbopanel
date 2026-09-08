@@ -129,7 +129,15 @@ it("getClientPublicStatus returns workers shape without install fields", async (
     runtime: "workers",
     isSignupEnabled: false,
     isSignupEmailVerificationEnabled: false,
+    billingEnabled: false,
   });
+});
+
+it("getClientPublicStatus reports billing presence only", async () => {
+  const status = await getClientPublicStatus(undefined, "workers", "0", {}, true);
+  assertEquals(status?.billingEnabled, true);
+  // Never the key — the payload has no field that could carry it.
+  assertEquals(Object.keys(status ?? {}).some((k) => /secret|key/i.test(k)), false);
 });
 
 it("getSignupSettingMeta reports env force and db value", async () => {

@@ -1,8 +1,8 @@
 import nodemailer from 'nodemailer'
-import type { Transporter } from 'nodemailer'
 import {
   createEmailOtpEmail,
   createEmailVerificationLinkEmail,
+  createServerTierNoticeEmail,
 } from '../src/lib/email/templates.ts'
 import { resolveEmailSettings, type ResolvedEmailSettings } from '../src/lib/settings/email-settings.ts'
 import type { DerivedSecretsConfig } from '../src/client/authn/secrets.ts'
@@ -12,6 +12,8 @@ import { PermanentSendError, validateEmailAddress } from '../src/lib/email/valid
 import type { Db } from './db.ts'
 import { logError } from '../src/logger.ts'
 import type { SmtpConfig } from '../src/lib/email/smtp/smtp-resolve.ts'
+
+type Transporter = ReturnType<typeof nodemailer.createTransport>
 
 const POOL_OPTS = { pool: true, maxConnections: 5, maxMessages: 100 }
 
@@ -221,6 +223,21 @@ export class MailerSmtpSender {
             job.otp,
             job.otpType,
           )
+          const transporter = await this.transporterForCurrentSmtp()
+          await transporter.sendMail({
+            from,
+            to: job.to,
+            subject,
+            html,
+            text: text ?? this.stripHtml(html),
+          })
+          return { success: true }
+        }
+        case 'server-tier-notice': {
+          const from = await this.resolveFromAddress()
+          validateEmailAddress(from, 'from')
+          validateEmailAddress(job.to, 'recipient')
+          const { subject, html, text } = createServerTierNoticeEmail(job)
           const transporter = await this.transporterForCurrentSmtp()
           await transporter.sendMail({
             from,

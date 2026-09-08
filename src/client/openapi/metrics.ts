@@ -134,19 +134,6 @@ export const metricsSchemas = {
       rootFilesystemUsedPercent: { type: ['number', 'null'] },
     },
   },
-  HostSeriesCpuHotspotPoint: {
-    type: 'object',
-    description: 'One `cpu.detail` embedded hotspot slot’s last-observed values within a bucket.',
-    required: ['coreId', 'values'],
-    properties: {
-      coreId: {
-        type: ['string', 'null'],
-        description:
-          'The core this slot was reporting for at the last-observed sample in the bucket — can legitimately change bucket-to-bucket (the daemon re-selects the busiest cores every interval). `null` means the slot had no hotspot at that observation.',
-      },
-      values: { $ref: '#/components/schemas/HostMetricValues' },
-    },
-  },
   HostSeriesChartPoint: {
     type: 'object',
     required: ['at', 'values', 'derived', 'sampleCount'],
@@ -160,12 +147,6 @@ export const metricsSchemas = {
         type: ['integer', 'null'],
         description:
           'Topology generation shared by every contributing sample in this bucket — `null` means unknown or the bucket spans a topology reassignment (mixed generations). Omitted when the backend doesn’t track generations.',
-      },
-      cpuHotspots: {
-        type: 'array',
-        items: { $ref: '#/components/schemas/HostSeriesCpuHotspotPoint' },
-        description:
-          '`cpu.detail`’s up-to-4 embedded busiest-core hotspot slots for this bucket — present only when the request’s `metrics` selector included a `cpuDetail.*` id and a `cpu.detail` row exists in this bucket.',
       },
     },
   },
@@ -210,6 +191,32 @@ export const metricsSchemas = {
       },
     },
   },
+  IngressSeriesPointDerived: {
+    type: 'object',
+    description:
+      'Server-computed `managed.ingress` derivations so an ingress consumer never reimplements the histogram math. Present only on `managed.ingress` points — every other family omits `derived`. Latency percentiles are a `histogram_quantile`-style estimate interpolated from the six cumulative `le` bucket counters (10ms/50ms/100ms/500ms/1s/5s); a rank beyond the last finite bucket reports 5000 rather than extrapolating into `+Inf`, and p999 is deliberately not offered at this bucket resolution. Each figure is computed from the point’s own `values`, so it is `null` when an input field wasn’t part of the request’s `metrics` selection (or when the request count for the bucket is missing/zero).',
+    required: [
+      'errorRatePercent',
+      'averageLatencyMs',
+      'p50LatencyMs',
+      'p90LatencyMs',
+      'p99LatencyMs',
+    ],
+    properties: {
+      errorRatePercent: {
+        type: ['number', 'null'],
+        description: '`(responses4xx + responses5xx) / requests × 100`.',
+      },
+      averageLatencyMs: {
+        type: ['number', 'null'],
+        description:
+          'Window mean: `requestDurationSecondsSum / requests × 1000`. Derived rather than stored because an average of per-interval averages is not the window average.',
+      },
+      p50LatencyMs: { type: ['number', 'null'] },
+      p90LatencyMs: { type: ['number', 'null'] },
+      p99LatencyMs: { type: ['number', 'null'] },
+    },
+  },
   EntitySeriesPoint: {
     type: 'object',
     required: ['at', 'values', 'sampleCount'],
@@ -218,6 +225,7 @@ export const metricsSchemas = {
       values: { $ref: '#/components/schemas/HostMetricValues' },
       sampleCount: { type: 'integer' },
       expectedSampleCount: { type: 'integer' },
+      derived: { $ref: '#/components/schemas/IngressSeriesPointDerived' },
     },
   },
   EntitySeriesEntity: {
@@ -589,7 +597,7 @@ export const metricsPaths: Record<string, unknown> = {
           required: false,
           schema: { type: 'string' },
           description:
-            'Comma-separated entity-metric-id list — a host-singleton canonical name (`host.cpu.busyPercent`) or an entity-scoped id (`<family alias>:<entityId>.<field>`, e.g. `network:eth0.receiveBytesPerSecond`, `hardware:psu1.value`, `ingress:caddy-1.requests`). Omit for every `host.*` canonical metric. A `network` entity id that is a TurboFabric mesh device per the current topology is rejected with 400 — see `inventory`. A NIC in a normal slot is queryable like any other `network` entity, but only `receiveBytesPerSecond`/`transmitBytesPerSecond` resolve on the Cloudflare backend; every other `network` field is `null` for it there (DuckDB always resolves the full field set).',
+            'Comma-separated entity-metric-id list — a host-singleton canonical name (`host.cpu.busyPercent`, and the explicit-only `diagnostics.averageFrequencyMHz` / `router.backendsUp` / `storage.hostingUsedBytes` / `dockerUsage.layersBytes` — the shared HTTP router, the host storage picture and the Docker daemon are each host-wide and singleton, so they carry no source id) or an entity-scoped id (`<family alias>:<entityId>.<field>`, e.g. `network:eth0.receiveBytesPerSecond`, `hardware:psu1.value`, `ingress:caddy-1.requests`). Omit for every `host.*` canonical metric; the explicit-only singleton scopes are never in that default. A `network` entity id that is a TurboFabric mesh device per the current topology is rejected with 400 — see `inventory`. A NIC in a normal slot is queryable like any other `network` entity, but only `receiveBytesPerSecond`/`transmitBytesPerSecond` resolve on the Cloudflare backend; every other `network` field is `null` for it there (DuckDB always resolves the full field set).',
         },
         {
           name: 'resolution',
@@ -642,7 +650,7 @@ export const metricsPaths: Record<string, unknown> = {
       tags: ['Servers'],
       summary: 'Get one fleet-wide host usage snapshot for the org servers overview',
       description:
-        'CPU stack + memory/swap for every server visible to the caller, in one query — never N per-server calls. Authorization is server-side via listVisible; no serverIds are ever accepted from the client. Carries no per-server cpuLimits (unlike /series and /summary) — see FLEET_HOST_METRICS_V5’s doc comment.',
+        'CPU stack + memory/swap for every server visible to the caller, in one query — never N per-server calls. Authorization is server-side via listVisible; no serverIds are ever accepted from the client. Carries no per-server cpuLimits (unlike /series and /summary) — see FLEET_HOST_METRICS’s doc comment.',
       security: [{ cookieAuth: [] }],
       parameters: [
         {

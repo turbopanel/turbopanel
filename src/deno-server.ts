@@ -41,9 +41,9 @@ import { registerDaemonWebSocket } from './daemon/deno-ws.ts'
 import {
   parseMetricsRetentionDays,
   parsePositiveIntEnv,
-  resolveServerMetricsStoreV5,
+  resolveServerMetricsStore,
 } from './daemon/metrics/store-selection.ts'
-import type { ServerMetricsStoreV5 } from './daemon/metrics/types-v5.ts'
+import type { ServerMetricsStore } from './daemon/metrics/types.ts'
 import { setServerStatusEventSink } from './daemon/metrics/status-events.ts'
 import { setActiveServerMetricsStore } from './daemon/metrics/active-store.ts'
 import {
@@ -178,8 +178,8 @@ async function startOptionalCommandConsumer(opts: {
  * Arm the DuckDB store's daily Parquet-archive timer. No-ops for stores
  * without one (e.g. the disabled fallback store) so boot stays backend-neutral.
  */
-function startMetricsDailyArchiveIfSupported(store: ServerMetricsStoreV5): void {
-  const candidate = store as ServerMetricsStoreV5 & {
+function startMetricsDailyArchiveIfSupported(store: ServerMetricsStore): void {
+  const candidate = store as ServerMetricsStore & {
     startDailyArchiveTimer?: () => void
   }
   candidate.startDailyArchiveTimer?.()
@@ -190,8 +190,8 @@ function startMetricsDailyArchiveIfSupported(store: ServerMetricsStoreV5): void 
  * accepted samples are persisted before the process exits. No-ops for stores
  * without a close() (e.g. the disabled fallback store).
  */
-async function closeMetricsStoreIfSupported(store: ServerMetricsStoreV5): Promise<void> {
-  const candidate = store as ServerMetricsStoreV5 & {
+async function closeMetricsStoreIfSupported(store: ServerMetricsStore): Promise<void> {
+  const candidate = store as ServerMetricsStore & {
     close?: () => Promise<void>
   }
   try {
@@ -210,6 +210,28 @@ function resolveCommandAmqpUrl(): string | null {
     return envUrl.trim()
   }
   return DEFAULT_AMQP_URL
+}
+
+/** Isolate one cleanup phase so a failure cannot abort the rest of the tick. */
+async function runCleanupPhase(label: string, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn()
+  } catch (err) {
+    logWarn('daemon-cell', `${label} error: ${String(err)}`)
+  }
+}
+
+async function sweepStaleCommandsPhase(db: Db): Promise<void> {
+  const swept = await sweepStaleCommands(db)
+  const released = await releaseStuckManagedApplying(db)
+  if (swept > 0 || released.length > 0) {
+    logWarn(
+      'daemon-cell',
+      `stale command sweep: timed out ${swept}, released managed ${
+        released.join(',') || 'none'
+      }`
+    )
+  }
 }
 
 export async function startDenoServer(options: StartDenoServerOptions = {}): Promise<void> {
@@ -251,7 +273,7 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
   })
   // Metrics directory itself stays unconfigured here — `resolveMetricsDir()`
   // already reads TURBOPANEL_METRICS_DIR inside the DuckDB store.
-  const serverMetricsStoreV5 = resolveServerMetricsStoreV5({
+  const serverMetricsStore = resolveServerMetricsStore({
     runtime: 'deno',
     duckdb: {
       retentionDays: parseMetricsRetentionDays(
@@ -263,9 +285,9 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
       ),
     },
   })
-  setServerStatusEventSink(serverMetricsStoreV5)
-  setActiveServerMetricsStore(serverMetricsStoreV5)
-  startMetricsDailyArchiveIfSupported(serverMetricsStoreV5)
+  setServerStatusEventSink(serverMetricsStore)
+  setActiveServerMetricsStore(serverMetricsStore)
+  startMetricsDailyArchiveIfSupported(serverMetricsStore)
   const executionLogRetentionDays = parseExecutionLogRetentionDays(
     Deno.env.get('TURBOPANEL_EXECUTION_LOG_RETENTION_DAYS')
   )
@@ -365,7 +387,7 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
     baseUrl: Deno.env.get('TURBOPANEL_BASE_URL') ?? undefined,
     daemonCellRegistry,
     queryCache,
-    serverMetricsStoreV5,
+    serverMetricsStore,
     executionLogStore,
     dataEncryptionSecrets,
     secretsConfig,
@@ -398,7 +420,9 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
   })
   // Unversioned, session-free surface: mounted on the top-level app next to the
   // daemon API rather than under CLIENT_API_PREFIX, and authenticating itself.
-  // One call for every webhook kind — see `src/webhook/AGENTS.md`.
+  // One call for every webhook kind — see `src/webhook/AGENTS.md`. Billing
+  // (`/webhook/stripe`) is hosted-only: the registrar does not mount it for
+  // the Deno runtime, so there is no Stripe bucket here.
   registerWebhookRoutes(app, {
     runtime: 'deno',
     github: githubWebhookLimiter,
@@ -463,49 +487,26 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
     async runCleanup() {
       // Workers parity (offline-sweep cron): bounded cleanup of expired
       // `dispatch` failure-retention payloads on the process-long db.
-      try {
-        await sweepExpiredCommandDispatch(db, {
-          limit: COMMAND_DISPATCH_SWEEP_LIMIT,
-        })
-      } catch (err) {
-        logWarn('daemon-cell', `command dispatch sweep error: ${String(err)}`)
-      }
+      await runCleanupPhase('command dispatch sweep', () =>
+        sweepExpiredCommandDispatch(db, { limit: COMMAND_DISPATCH_SWEEP_LIMIT })
+      )
       // Recover commands stranded non-terminal by a mid-run restart (the
       // consumer's timeout lives only in memory), then unwedge managed rows
       // stuck at 'applying' with no live command left.
-      try {
-        const swept = await sweepStaleCommands(db)
-        const released = await releaseStuckManagedApplying(db)
-        if (swept > 0 || released.length > 0) {
-          logWarn(
-            'daemon-cell',
-            `stale command sweep: timed out ${swept}, released managed ${
-              released.join(',') || 'none'
-            }`
-          )
-        }
-      } catch (err) {
-        logWarn('daemon-cell', `stale command sweep error: ${String(err)}`)
-      }
+      await runCleanupPhase('stale command sweep', () => sweepStaleCommandsPhase(db))
       // Workers parity (offline-sweep cron): drop webhook delivery ids past the
       // replay-protection retention window.
-      try {
-        await sweepExpiredWebhookDeliveries(db, {
-          limit: WEBHOOK_DELIVERY_SWEEP_LIMIT,
-        })
-      } catch (err) {
-        logWarn('daemon-cell', `webhook delivery sweep error: ${String(err)}`)
-      }
+      await runCleanupPhase('webhook delivery sweep', () =>
+        sweepExpiredWebhookDeliveries(db, { limit: WEBHOOK_DELIVERY_SWEEP_LIMIT })
+      )
       // Workers parity (offline-sweep cron): bounded removal of command
       // transcripts past retention. Object/filesystem only — no db involved.
-      try {
-        await executionLogStore.sweepExpired({
+      await runCleanupPhase('execution log sweep', () =>
+        executionLogStore.sweepExpired({
           retentionDays: executionLogRetentionDays,
           limit: EXECUTION_LOG_SWEEP_LIMIT,
         })
-      } catch (err) {
-        logWarn('daemon-cell', `execution log sweep error: ${String(err)}`)
-      }
+      )
       runSystemReconcileSweepTick()
     },
   })
@@ -549,7 +550,7 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
       await daemonCellRegistry.close()
       // Persist any pending batched metrics rows before tearing the process
       // down — accepted (202) samples must survive a normal SIGINT/SIGTERM.
-      await closeMetricsStoreIfSupported(serverMetricsStoreV5)
+      await closeMetricsStoreIfSupported(serverMetricsStore)
       abort.abort()
     })
   }

@@ -1,13 +1,15 @@
 # Webhook ingress — AGENTS.md
 
-The inbound webhook surface. Today that is **GitHub** and **GitLab**; the
-directory is shaped so a third kind is an adapter, not a third copy of the gate.
+The inbound webhook surface: **GitHub**, **GitLab**, and **Stripe**. The
+directory is shaped so each kind is an adapter, not a copy of the gate — and
+Stripe, the first non-git kind, was added exactly that way.
 
 ```
 src/webhook/
-├── gate.ts     the six ordered steps, written once
-├── routes.ts   registerWebhookRoutes — the one call each entrypoint makes
-└── git/        github.ts, gitlab.ts — what makes each provider itself
+├── gate.ts       the six ordered steps, written once
+├── routes.ts     registerWebhookRoutes — the one call each entrypoint makes
+├── git/          github.ts, gitlab.ts — what makes each provider itself
+└── billing/      stripe.ts (the gate), stripe-projection.ts (the deferred task)
 ```
 
 An instance may hold **more than one** GitHub App or GitLab OAuth application —
@@ -40,7 +42,10 @@ object to thread through `registerWebhookRoutes` for no behaviour.
 
 Registration happens in the entrypoints (`src/deno-server.ts`, `src/workers.ts`)
 next to `registerDaemonApiRoutes`, through the single `registerWebhookRoutes`
-call — **not** inside `registerClientRoutes`.
+call — **not** inside `registerClientRoutes`. The git kinds mount on both
+runtimes; the billing kind mounts on **Workers only** (`registerWebhookRoutes`
+gates it on `opts.runtime`), because self-hosted has no billing at all — a
+Deno instance answers `404` on `/webhook/stripe`, not `503`.
 
 **Every layer in front of the instance has to know `/webhook`.** `Caddyfile`,
 `dev/orchestration/Caddyfile` (both listener blocks), and the `routes` patterns
@@ -51,7 +56,24 @@ provider reads as a delivered webhook and never retries. That is silent,
 unrecoverable loss of every push, and it is why `src/surfaces.test.ts` pins
 these strings.
 
-## The two surfaces, and the one difference that matters
+## The three surfaces
+
+| Path | Kind | Credential | Delivery id | Dispatch key |
+| --- | --- | --- | --- | --- |
+| `/webhook/github`, `/webhook/github/:ref` | git | HMAC-SHA256 over the raw body (`X-Hub-Signature-256`) | `X-GitHub-Delivery` | `X-GitHub-Event` |
+| `/webhook/gitlab`, `/webhook/gitlab/:ref` | git | static token in `X-Gitlab-Token` | `X-Gitlab-Event-UUID`, else a body digest | payload `object_kind` |
+| `/webhook/stripe` | **billing** | HMAC-SHA256 over `${t}.${raw body}` (`Stripe-Signature`, every `v1`, 300 s tolerance) | payload `id` (`evt_…`) | payload `type` |
+
+Stripe shares the traffic class for the same reason the git kinds have it: no
+session, no daemon JWT, no `Origin`, an event rather than a call. It has **no
+tenant in the URL and no `:ref` path** — one instance holds one Stripe account
+and one signing secret, so there is nothing to disambiguate; the customer is
+named in the payload and only read after a refetch. Everything that follows
+for the git kinds — the gate order, the ledger, the retry contract — applies
+to it unchanged. What is specific to it is in "Acknowledge immediately" below
+and in `src/lib/billing/AGENTS.md`.
+
+## The two git surfaces, and the one difference that matters
 
 GitLab **does not sign deliveries.** GitHub MACs the exact bytes it sent
 (`X-Hub-Signature-256`); GitLab echoes the configured secret back verbatim in
@@ -89,6 +111,10 @@ All of them register the same handler; the ref is simply absent on the bare
 path. `webhookPathFor` in `src/lib/git/webhook-reachability.ts` decides which
 shape an app is *told* about, from its `base_url`.
 
+Stripe has neither: `/webhook/stripe` only. Local forwarding must use that
+exact path — `stripe listen --forward-to <instance>/webhook/stripe` — because
+`/webhooks/stripe` (plural) would fall through to the SPA catch-all.
+
 ## The gate, in order
 
 `gate.ts` runs this sequence for **every** kind, and the order is load-bearing —
@@ -96,8 +122,8 @@ three of the six steps are security properties rather than tidiness. It used to
 be written out twice, once per provider, with nothing keeping the two in step;
 that is exactly the duplication a third kind would have inherited.
 
-1. **Rate limit** (`GITHUB_WEBHOOK_RATE_LIMITER` / `GITLAB_WEBHOOK_RATE_LIMITER`,
-   or the Deno Redis limiters). Cheapest check first — it is what protects the
+1. **Rate limit** (`GITHUB_WEBHOOK_RATE_LIMITER` / `GITLAB_WEBHOOK_RATE_LIMITER` /
+   `STRIPE_WEBHOOK_RATE_LIMITER`, or the Deno Redis limiters). Cheapest check first — it is what protects the
    verification below. Keyed per peer address, the one place in
    `src/daemon/rate-limit/keys.ts` that does so, because the caller has no
    identity until step 3 succeeds. **Separate buckets per provider**, so a
@@ -106,6 +132,10 @@ that is exactly the duplication a third kind would have inherited.
    Selection only — nothing is trusted yet; see "Which app sent this?" below.
    Nothing resolves → `401`, never an unauthenticated accept. Every candidate
    missing its webhook secret → `503`, because that gap is on this side.
+   Stripe's resolve is one candidate holding `c.get('billingConfig')` — no DB
+   read, no tenant — and "billing off" or "no signing secret" is that same
+   `503` (`stripe_webhook_not_configured`). Only `workers.ts` ever sets that
+   variable; on Deno the route is not mounted.
 3. **Raw bytes** — `c.req.arrayBuffer()`, never `c.req.json()`. GitHub's
    signature covers the exact bytes it sent; parsing and re-encoding changes key
    order and escapes and breaks the MAC. GitLab reads the same bytes at the same
@@ -161,27 +191,66 @@ Two escape hatches exist for senders that do not look like GitHub. `verify` and
 that signs *fields* (Mailgun MACs `timestamp + token`) or names its event in the
 body can parse them itself without moving the parse ahead of verification.
 
-Worth knowing before you start — the surface is generic, but three things around
-it are still git-shaped and would need widening:
+The three things around the gate that used to be git-shaped were widened
+when Stripe landed, so a fourth kind inherits them:
 
-- `delivery.provider` is `CHECK (provider IN ('github','gitlab'))`
-  (`src/lib/db/schema.ts`, `migrations/0000_init.sql`). The claim in step 5
-  writes it, so a new kind throws on insert until this is widened.
-- `WebhookDeliveryProvider` is aliased to `WebhookGitProviderName`
-  (`src/lib/db/webhook-delivery-records.ts`) — which is `src/lib/db/`'s only
-  dependency on `src/lib/git/`. Decoupling it is the natural moment to break
-  that.
-- Rate-limit keys are `git:webhook:<provider>:<peer>`
-  (`src/daemon/rate-limit/keys.ts`) — domain-prefixed rather than
-  traffic-class-prefixed. `webhook:<kind>:<peer>` generalises, but it is a
-  breaking change to live counters and `rate-limit/keys.test.ts` pins the
-  current strings.
+- `delivery.provider` is `CHECK (provider IN ('github','gitlab','stripe'))`
+  (`src/lib/db/schema.ts`, `migrations/0003_billing_projection.sql`). The
+  claim in step 5 writes it, so a new kind still needs one forward migration
+  to add its value.
+- `WebhookDeliveryProvider` is its own literal union
+  (`src/lib/db/webhook-delivery-records.ts`), no longer an alias of
+  `WebhookGitProviderName` — that alias was `src/lib/db/`'s only dependency
+  on `src/lib/git/`, and it is gone. The git names are pinned as assignable
+  to it in `webhook-delivery-records.hostfree.test.ts`.
+- Rate-limit keys are prefixed by **domain**: `git:webhook:<provider>:<peer>`
+  for the git kinds (unchanged; live counters and `rate-limit/keys.test.ts`
+  pin them) and `billing:webhook:stripe:<peer>` for Stripe
+  (`stripeWebhookRateLimitKey`). A new domain gets a new prefix, not a rename.
 - Cloudflare needs a rate-limiter binding in **three** places in
   `wrangler.jsonc` (default, `env.testing`, `env.live`), each with its own
-  `namespace_id`.
+  `namespace_id`, plus the `resolveWorkers…RateLimiter` / `warnIf…Missing`
+  pair in `src/workers-bindings.ts` and a `resolve…RateLimit` for the Deno
+  Redis limiter.
 
-The URL plumbing, though, is free: `/webhook/*` is already forwarded by every
-fronting layer, so `/webhook/<kind>` inherits it.
+The URL plumbing is free: `/webhook/*` is already forwarded by every fronting
+layer, so `/webhook/<kind>` inherits it. The SPA-catch-all trap is closed for
+this prefix — `src/surfaces.test.ts` checks the `Caddyfile`, the dev
+orchestration `Caddyfile` (when the sibling checkout is present) and every
+`routes` block in `wrangler.jsonc`.
+
+### Acknowledge immediately
+
+A kind whose sender penalises slow handlers must not do its work inline.
+Stripe is one: a slow `invoice.created` handler delays finalising **every**
+automatic-collection invoice on the account for up to 72 hours. The Stripe
+gate's `dispatch` therefore schedules the projection and answers
+`accepted({ scheduled: true })` at once; the work runs after the response
+(`runAfterResponse` in `src/lib/http/after-response.ts` — `waitUntil` on
+Workers, a detached promise on Deno).
+
+Two rules come with that:
+
+- **The deferred task opens its own DB client and closes it in `finally`.**
+  `src/workers.ts` ends the per-request client in its own `waitUntil`; a
+  second `waitUntil` that keeps using `c.get('db')` races that close and dies
+  with `write CONNECTION_ENDED` — the hard rule in `AGENTS.md`. The task
+  builds a client from `c.get('postgresConnectionString')` via
+  `createWorkersDb` and `endDbConnection`s it. (The gate keeps a `getDb(c)`
+  branch for the `deno` runtime label, used only by its host-free tests —
+  the Stripe kind is never mounted on Deno.) Everything
+  the task needs is captured before `dispatch` returns; nothing reads the
+  context afterwards.
+- **Never trust the payload.** Delivery is at-least-once and unordered. The
+  task reads only the object id and type from the event, refetches the
+  object from Stripe, and upserts through `src/lib/db/billing-records.ts`
+  from current state. Unknown types are a logged no-op after the `200`.
+
+**Residual risk, stated plainly:** the delivery claim (step 5) is taken
+*before* the async work, so a crash mid-task leaves the ledger claimed and a
+Stripe retry would `204`. Recovery is the reconciliation sweep
+(`src/lib/billing/reconcile.ts`), not the ledger. The task is kept small and idempotent so the window is
+narrow.
 
 ## Events
 
@@ -207,6 +276,23 @@ There is deliberately **no installation case**. GitLab has no
 installation-lifecycle webhook: an operator revoking the OAuth grant surfaces as
 a failing token refresh at deploy time (a `source_ref_unresolved` prepare error),
 not as a delivery this surface could record.
+
+Stripe's table, this phase (`src/webhook/billing/stripe-projection.ts`):
+
+| `type` | Handling |
+| --- | --- |
+| `customer.subscription.created` / `.updated` / `.deleted` | refetch the subscription (customer + tax ids expanded); upsert `payer` → `subscription` → `seat`; then sync entitlements |
+| `customer.subscription.pending_update_applied` | same refetch — the committed items now carry the change, so the upgrade intent is consumed and `license.tier_id` moves |
+| `customer.subscription.pending_update_expired` | same refetch (items never changed); the ledger's upgrade intents are dropped and logged — the console offers a retry |
+| `checkout.session.completed` | refetch the session; project its subscription when it has one |
+| `invoice.paid` / `invoice.payment_failed` | refetch the invoice, resolve its subscription, project that — the subscription's own status carries the payment outcome and moves `past_due_since` |
+| anything else | logged no-op after the `200` |
+
+**The projection reads committed items only.** `subscription.items` is what
+becomes `seat`; a change Stripe could not charge for lives under
+`subscription.pending_update` and is ignored except for its presence, which
+stops an upgrade intent being consumed early. That refetch *is* the C6 gate
+(`src/lib/billing/AGENTS.md`, "One raise path").
 
 Installation **deletion is recorded as suspension**, not a row delete: the
 `repository` rows referencing it survive, so reinstalling the App restores every

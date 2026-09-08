@@ -30,6 +30,7 @@ import { registerDockerRunRoutes } from './docker-run/routes.ts'
 import { registerHostingRoutes } from './hostings/routes.ts'
 import { registerTlsRoutes } from './tls/routes.ts'
 import { registerLicenseRoutes } from './licenses/routes.ts'
+import { registerBillingRoutes } from './billing/routes.ts'
 import {
   registerOrganizationLimitsRoutes,
   registerProjectPrincipalRoutes,
@@ -75,6 +76,8 @@ export function registerClientRoutes(app: Hono<AppEnv>, opts: AuthRouteOpts) {
       opts.runtime,
       resolveSignupEnvOverrideFromContext(platformEnv, opts.signupEnvOverride),
       platformEnv,
+      // Presence of the config *is* billing enabled; the key never leaves here.
+      c.get('billingConfig') !== undefined,
     )
     if (payload === null) {
       return c.json({ ok: false, error: 'Database unavailable' }, 503)
@@ -88,6 +91,9 @@ export function registerClientRoutes(app: Hono<AppEnv>, opts: AuthRouteOpts) {
   registerDatacenterRoutes(client, opts)
   registerIpRoutes(client, opts)
   registerLicenseRoutes(client, opts)
+  // Hosted (Workers) only: self-hosted is free software with no billing, so
+  // `/billing/*` is absent there rather than mounted-and-503.
+  if (opts.runtime === 'workers') registerBillingRoutes(client, opts)
   registerOrganizationRoutes(client, opts)
   registerAccessRoutes(client, opts)
   registerWorkspaceRoutes(client, opts)

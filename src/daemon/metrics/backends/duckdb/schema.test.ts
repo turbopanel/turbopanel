@@ -1,12 +1,17 @@
 import { assertEquals, assertThrows } from '@std/assert'
 import { it } from '@std/testing/bdd'
-import { buildMetricsSampleV5 } from '../../contract-v5.ts'
+import { buildMetricsSample } from '../../contract.ts'
 import {
   BLOCK_METRIC_FIELDS,
   BLOCK_SAMPLES_TABLE,
   buildSchemaStatements,
   DATABASE_PROXY_METRIC_FIELDS,
+  COMMON_METADATA_COLUMNS,
   DATABASE_PROXY_SAMPLES_TABLE,
+  DOCKER_SAMPLES_TABLE,
+  DOCKER_USAGE_METRIC_FIELDS,
+  dockerSamplesInsertColumns,
+  dockerUsageStorageColumnName,
   DUCKDB_SCHEMA_MARKER_VERSION,
   entityMetricColumnName,
   FILESYSTEM_METRIC_FIELDS,
@@ -14,24 +19,29 @@ import {
   GPU_METRIC_FIELDS,
   GPU_SAMPLES_TABLE,
   HARDWARE_SIGNAL_SAMPLES_TABLE,
-  HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST,
+  HOST_GLOBAL_CPU_DIAGNOSTICS_FIELDS_LIST,
   HOST_METRIC_FIELD_REFS,
   HOST_SAMPLES_TABLE,
   hostMetricColumnName,
   hostSamplesInsertColumns,
   INGRESS_METRIC_FIELDS,
   INGRESS_SAMPLES_TABLE,
-  MEMORY_DETAIL_METRIC_FIELDS,
-  MEMORY_DETAIL_SAMPLES_TABLE,
-  memoryDetailSamplesInsertColumns,
+  MEMORY_DIAGNOSTICS_METRIC_FIELDS,
+  MEMORY_DIAGNOSTICS_SAMPLES_TABLE,
+  memoryDiagnosticsSamplesInsertColumns,
   METRIC_EVENTS_TABLE,
+  STORAGE_ENGINE_METRIC_FIELDS,
+  STORAGE_FILESYSTEM_ID_COLUMNS,
+  STORAGE_SAMPLES_TABLE,
+  storageSamplesInsertColumns,
+  storageSamplesMetricColumnNames,
   NETWORK_METRIC_FIELDS,
   NETWORK_SAMPLES_TABLE,
   STATUS_EVENTS_TABLE,
 } from './schema.ts'
 
-it('DuckDB schema marker is 6', () => {
-  assertEquals(DUCKDB_SCHEMA_MARKER_VERSION, 5)
+it('DuckDB schema marker is 8', () => {
+  assertEquals(DUCKDB_SCHEMA_MARKER_VERSION, 8)
 })
 
 it('hostMetricColumnName prefixes by group, avoiding cross-group collisions', () => {
@@ -59,13 +69,12 @@ it('HOST_METRIC_FIELD_REFS has exactly 30 entries covering every host group, no 
 })
 
 it('every leaf metric of a real v5 sample maps to a known host column', () => {
-  const sample = buildMetricsSampleV5({
+  const sample = buildMetricsSample({
     metadata: {
-      version: 5,
+      version: 6,
       sampledAt: new Date().toISOString(),
       intervalSeconds: 60,
       sequence: 1,
-      collectionMode: 'baseline',
       topologyGeneration: 1,
       bootGeneration: 1,
     },
@@ -138,10 +147,12 @@ it('buildSchemaStatements emits idempotent DDL for every v5 table', () => {
     FILESYSTEM_SAMPLES_TABLE,
     BLOCK_SAMPLES_TABLE,
     GPU_SAMPLES_TABLE,
-    MEMORY_DETAIL_SAMPLES_TABLE,
+    MEMORY_DIAGNOSTICS_SAMPLES_TABLE,
     HARDWARE_SIGNAL_SAMPLES_TABLE,
     INGRESS_SAMPLES_TABLE,
     DATABASE_PROXY_SAMPLES_TABLE,
+    STORAGE_SAMPLES_TABLE,
+    DOCKER_SAMPLES_TABLE,
     METRIC_EVENTS_TABLE,
     STATUS_EVENTS_TABLE,
   ]) {
@@ -178,39 +189,54 @@ it('buildSchemaStatements emits idempotent DDL for every v5 table', () => {
   // Long-form hardware-signal table: kind + value, not one column per signal kind.
   assertEquals(joined.includes('kind VARCHAR NOT NULL'), true)
   assertEquals(joined.includes('value DOUBLE'), true)
-  // Hand-declared cpuDetail host-global columns land on server_host_samples.
-  assertEquals(joined.includes('cpu_detail_average_frequency_m_hz DOUBLE'), true)
-  assertEquals(joined.includes('cpu_detail_cpu_irq_percent DOUBLE'), true)
-  for (const field of MEMORY_DETAIL_METRIC_FIELDS) {
+  // Hand-declared diagnostics CPU-half host-global columns land on server_host_samples.
+  assertEquals(joined.includes('cpu_diagnostics_average_frequency_m_hz DOUBLE'), true)
+  assertEquals(joined.includes('cpu_diagnostics_cpu_irq_percent DOUBLE'), true)
+  for (const field of MEMORY_DIAGNOSTICS_METRIC_FIELDS) {
     assertEquals(
       joined.includes(`${entityMetricColumnName(field)} DOUBLE`),
       true,
-      `memoryDetail.${field}`
+      `diagnostics.${field}`
     )
+  }
+  // v6 dropped the sample-level collection-mode column outright.
+  assertEquals(joined.includes('collection_mode'), false)
+  // The seven meminfo gauges v6 dropped have no column anywhere.
+  for (
+    const dropped of [
+      'page_tables_bytes',
+      'kernel_stack_bytes',
+      'commit_limit_bytes',
+      'active_anon_bytes',
+      'inactive_anon_bytes',
+      'active_file_bytes',
+      'inactive_file_bytes',
+    ]
+  ) {
+    assertEquals(joined.includes(dropped), false, dropped)
   }
 })
 
-it('memoryDetailSamplesInsertColumns is a singleton (no entity id column), 19 fields', () => {
-  const columns = memoryDetailSamplesInsertColumns()
-  assertEquals(MEMORY_DETAIL_METRIC_FIELDS.length, 19)
-  assertEquals(columns.length, 8 + MEMORY_DETAIL_METRIC_FIELDS.length)
+it('memoryDiagnosticsSamplesInsertColumns is a singleton (no entity id column), 12 fields', () => {
+  const columns = memoryDiagnosticsSamplesInsertColumns()
+  assertEquals(MEMORY_DIAGNOSTICS_METRIC_FIELDS.length, 12)
+  assertEquals(columns.length, 7 + MEMORY_DIAGNOSTICS_METRIC_FIELDS.length)
   assertEquals(columns.includes('core_id'), false)
   assertEquals(columns.includes('memory_free_bytes'), true)
   assertEquals(columns.includes('compaction_stalls_per_second'), true)
 })
 
-it('hostSamplesInsertColumns lists common metadata then every host metric column plus the hand-declared cpuDetail host-global columns', () => {
+it('hostSamplesInsertColumns lists common metadata then every host metric column plus the hand-declared diagnostics CPU host-global columns', () => {
   const columns = hostSamplesInsertColumns()
   assertEquals(
     columns.length,
-    8 + HOST_METRIC_FIELD_REFS.length + HOST_GLOBAL_CPU_DETAIL_FIELDS_LIST.length
+    7 + HOST_METRIC_FIELD_REFS.length + HOST_GLOBAL_CPU_DIAGNOSTICS_FIELDS_LIST.length
   )
-  assertEquals(columns.slice(0, 8), [
+  assertEquals(columns.slice(0, 7), [
     'server_id',
     'sampled_at',
     'received_at',
     'interval_seconds',
-    'collection_mode',
     'sequence',
     'topology_generation',
     'boot_generation',
@@ -218,8 +244,8 @@ it('hostSamplesInsertColumns lists common metadata then every host metric column
   assertEquals(columns.includes('cpu_busy_percent'), true)
   assertEquals(columns.includes('cpu_process_count'), true)
   assertEquals(columns.includes('memory_pressure_some_percent'), true)
-  assertEquals(columns.includes('cpu_detail_average_frequency_m_hz'), true)
-  assertEquals(columns.includes('cpu_detail_cpu_irq_percent'), true)
+  assertEquals(columns.includes('cpu_diagnostics_average_frequency_m_hz'), true)
+  assertEquals(columns.includes('cpu_diagnostics_cpu_irq_percent'), true)
 })
 
 it('every entity family declares a non-empty, unique field list', () => {
@@ -234,4 +260,83 @@ it('every entity family declares a non-empty, unique field list', () => {
     assertEquals(fields.length > 0, true)
     assertEquals(new Set(fields).size, fields.length)
   }
+})
+
+// ---------------------------------------------------------------------------
+// managed.storage / managed.docker — the two v6 host-wide storage tables.
+// ---------------------------------------------------------------------------
+
+it('server_storage_samples carries the storage row plus a docker_-prefixed breakdown copy', () => {
+  const columns = storageSamplesMetricColumnNames()
+  // The flat storage fields, snake_cased from their contract names.
+  for (
+    const column of [
+      'hosting_used_bytes',
+      'backup_used_bytes',
+      'docker_used_bytes',
+      'logs_used_bytes',
+      'hosting_free_bytes',
+      'backup_free_bytes',
+      'logs_free_bytes',
+    ]
+  ) {
+    assertEquals(columns.includes(column), true, column)
+  }
+  // The Docker breakdown, prefixed so it cannot collide with the total.
+  assertEquals(columns.includes('docker_layers_bytes'), true)
+  assertEquals(columns.includes('docker_build_cache_reclaimable_bytes'), true)
+  // The twelve per-engine census columns, flattened `<engine><Field>`.
+  assertEquals(columns.includes('postgres_instances_running'), true)
+  assertEquals(columns.includes('mariadb_connections_max'), true)
+  assertEquals(STORAGE_ENGINE_METRIC_FIELDS.length, 12)
+  // No duplicate column names in the single wide table.
+  assertEquals(new Set(columns).size, columns.length)
+})
+
+it('storageSamplesInsertColumns is metadata + metrics + the four nullable topology id columns', () => {
+  const columns = storageSamplesInsertColumns()
+  assertEquals(
+    columns.slice(-STORAGE_FILESYSTEM_ID_COLUMNS.length),
+    [...STORAGE_FILESYSTEM_ID_COLUMNS]
+  )
+  assertEquals(
+    columns.length,
+    COMMON_METADATA_COLUMNS.length +
+      storageSamplesMetricColumnNames().length +
+      STORAGE_FILESYSTEM_ID_COLUMNS.length
+  )
+})
+
+it('server_docker_samples mirrors the AE managed.docker family exactly, unprefixed', () => {
+  const columns = dockerSamplesInsertColumns()
+  assertEquals(
+    columns.slice(COMMON_METADATA_COLUMNS.length),
+    DOCKER_USAGE_METRIC_FIELDS.map(entityMetricColumnName)
+  )
+  assertEquals(DOCKER_USAGE_METRIC_FIELDS.length, 10)
+  assertEquals(columns.includes('layers_bytes'), true)
+  assertEquals(columns.includes('docker_layers_bytes'), false)
+})
+
+it('dockerUsageStorageColumnName rejects a field outside the Docker breakdown', () => {
+  assertEquals(dockerUsageStorageColumnName('layersBytes'), 'docker_layers_bytes')
+  assertThrows(
+    () => dockerUsageStorageColumnName('nope'),
+    TypeError,
+    'unknown Docker usage field'
+  )
+})
+
+it('the storage and docker tables carry no entity id column, like the router table', () => {
+  const joined = buildSchemaStatements().join('\n')
+  const storageDdl = joined.slice(
+    joined.indexOf(`CREATE TABLE IF NOT EXISTS ${STORAGE_SAMPLES_TABLE}`)
+  )
+  assertEquals(storageDdl.includes('source_id'), false)
+  const dockerDdl = joined.slice(
+    joined.indexOf(`CREATE TABLE IF NOT EXISTS ${DOCKER_SAMPLES_TABLE}`),
+    joined.indexOf(`CREATE INDEX IF NOT EXISTS idx_${DOCKER_SAMPLES_TABLE}`)
+  )
+  assertEquals(dockerDdl.includes('source_id'), false)
+  assertEquals(dockerDdl.includes('gpu_id'), false)
 })

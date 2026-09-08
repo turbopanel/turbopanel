@@ -1,0 +1,348 @@
+/**
+ * What the deferred Stripe task does: refetch, then project.
+ *
+ * **Never trust the payload.** Delivery is at-least-once and unordered, so a
+ * `customer.subscription.updated` from an hour ago can land after the
+ * `deleted` that followed it. The event is read only for the object **id**
+ * and its type; the object itself is fetched from Stripe so the projection
+ * is written from current state, not from a stale snapshot.
+ *
+ * The events handled:
+ *
+ *   `customer.subscription.created` / `.updated` / `.deleted`
+ *   `customer.subscription.pending_update_applied` / `.pending_update_expired`
+ *   `checkout.session.completed`
+ *   `invoice.paid` / `invoice.payment_failed`
+ *
+ * — every one of which ends in the same place: refetch the subscription,
+ * upsert `payer` → `subscription` → `seat` in one transaction, then sync
+ * entitlements. Unknown types are a logged no-op; the gate has already
+ * answered 200.
+ *
+ * **Entitlement is raised only by committed items.** The refetch reads
+ * `subscription.items`; a change Stripe could not charge for lives under
+ * `subscription.pending_update` and is deliberately ignored, so the C6
+ * gate is this refetch rather than a second code path. The only thing
+ * read off `pending_update` is *whether it exists*, which stops an upgrade
+ * intent from being consumed early.
+ */
+
+import type { Db } from '../../db.ts'
+import { revokeDaemonKey } from '../../daemon/authn/server-identity-db.ts'
+import { logInfo, logWarn } from '../../logger.ts'
+import type { StripeClient } from '../../lib/billing/client.ts'
+import { resolvePayerSubject } from '../../lib/billing/customer-subject.ts'
+import type { BillingQuantityLock } from '../../lib/billing/quantity-lock.ts'
+import {
+  type EntitlementSyncOutcome,
+  syncEntitlementsForOrganization,
+} from '../../lib/billing/entitlements.ts'
+import {
+  type ProviderSubscriptionItem,
+  replaceSubscriptionItems,
+  upsertPayer,
+  upsertSubscriptionFromProvider,
+} from '../../lib/db/billing-records.ts'
+
+export const STRIPE_PROJECTION_LOG_SCOPE = 'billing-webhook'
+
+/** Event types this phase projects. Everything else is `event_not_handled`. */
+export const PROJECTED_STRIPE_EVENT_TYPES = [
+  'customer.subscription.created',
+  'customer.subscription.updated',
+  'customer.subscription.deleted',
+  'customer.subscription.pending_update_applied',
+  'customer.subscription.pending_update_expired',
+  'checkout.session.completed',
+  'invoice.paid',
+  'invoice.payment_failed',
+] as const
+
+/** The only thing read from an event payload. */
+export type StripeEventRef = Readonly<{
+  id: string
+  type: string
+  /** `data.object.id` */
+  objectId: string | null
+  /** `data.object.object` — `subscription`, `checkout.session`, `invoice`, … */
+  objectType: string | null
+}>
+
+export type StripeProjectionOutcome =
+  | {
+    action: 'projected'
+    subscriptionId: string
+    skippedItems: string[]
+    /** `null` when the payer names a user, not an organization. */
+    entitlements: EntitlementSyncOutcome | null
+  }
+  | { action: 'skipped'; reason: string }
+
+type StripeObject = Record<string, unknown>
+
+function isObject(value: unknown): value is StripeObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function str(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/** Stripe fields that are an id when unexpanded and an object when expanded. */
+function idOrObjectId(value: unknown): string | null {
+  if (typeof value === 'string') return str(value)
+  if (isObject(value)) return str(value.id)
+  return null
+}
+
+function unixToIso(value: unknown): string | null {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? new Date(value * 1000).toISOString()
+    : null
+}
+
+/** Pull the object ref out of a parsed event; `null` fields when absent. */
+export function stripeEventRef(
+  event: { id: string; type: string },
+  payload: Record<string, unknown>,
+): StripeEventRef {
+  const data = isObject(payload.data) ? payload.data : null
+  const object = data && isObject(data.object) ? data.object : null
+  return {
+    id: event.id,
+    type: event.type,
+    objectId: object ? str(object.id) : null,
+    objectType: object ? str(object.object) : null,
+  }
+}
+
+type SubscriptionItemsPage = { data?: unknown; has_more?: unknown }
+
+async function loadSubscriptionItems(
+  client: StripeClient,
+  subscriptionId: string,
+  embedded: SubscriptionItemsPage | undefined,
+): Promise<StripeObject[]> {
+  // The embedded `items` list carries the first page only; a subscription
+  // with more lines than that is walked through the list endpoint.
+  if (embedded && Array.isArray(embedded.data) && embedded.has_more !== true) {
+    return embedded.data.filter(isObject)
+  }
+  const all = await client.listAll<StripeObject>('/v1/subscription_items', {
+    subscription: subscriptionId,
+  })
+  return all.filter(isObject)
+}
+
+function providerItems(items: readonly StripeObject[]): ProviderSubscriptionItem[] {
+  const out: ProviderSubscriptionItem[] = []
+  for (const item of items) {
+    const providerItemId = str(item.id)
+    const providerPriceId = isObject(item.price) ? str(item.price.id) : idOrObjectId(item.price)
+    const quantity = typeof item.quantity === 'number' ? item.quantity : 1
+    if (!providerItemId || !providerPriceId) continue
+    out.push({ providerItemId, providerPriceId, quantity })
+  }
+  return out
+}
+
+/**
+ * `current_period_end` lives on the subscription before the `basil` API
+ * line and on each item from it onward; take whichever is present, and the
+ * latest across items when it is per-item.
+ */
+function currentPeriodEnd(sub: StripeObject, items: readonly StripeObject[]): string | null {
+  const own = unixToIso(sub.current_period_end)
+  if (own) return own
+  let latest: number | null = null
+  for (const item of items) {
+    const end = item.current_period_end
+    if (typeof end === 'number' && Number.isFinite(end) && (latest === null || end > latest)) {
+      latest = end
+    }
+  }
+  return latest === null ? null : unixToIso(latest)
+}
+
+function firstTaxId(customer: StripeObject): string | null {
+  const taxIds = customer.tax_ids
+  if (!isObject(taxIds) || !Array.isArray(taxIds.data)) return null
+  const first = taxIds.data.find(isObject)
+  return first ? str(first.value) : null
+}
+
+export type StripeProjectionDeps = Readonly<{
+  db: Db
+  client: StripeClient
+  now?: string
+}>
+
+export type ProjectSubscriptionOpts = Readonly<{
+  /** `pending_update_expired`: drop the upgrade intents the ledger holds. */
+  dropUpgradeIntents?: boolean
+  /**
+   * A quantity lease the caller already holds (a mutation route reprojecting
+   * before it releases). Without one the sync takes its own, retrying briefly
+   * — a route or the license gate may hold it for a Stripe round trip.
+   */
+  lock?: BillingQuantityLock
+}>
+
+/**
+ * The seam every handled event ends in: refetch one subscription (with its
+ * customer and the customer's tax ids expanded), write the three rows, then
+ * sync entitlements for the organization it names.
+ */
+export async function projectSubscriptionById(
+  deps: StripeProjectionDeps,
+  providerSubscriptionId: string,
+  opts: ProjectSubscriptionOpts = {},
+): Promise<StripeProjectionOutcome> {
+  const sub = await deps.client.get<StripeObject>(
+    `/v1/subscriptions/${encodeURIComponent(providerSubscriptionId)}`,
+    { expand: ['customer', 'customer.tax_ids'] },
+  )
+  const customer = isObject(sub.customer) ? sub.customer : null
+  if (!customer || customer.deleted === true) {
+    return { action: 'skipped', reason: 'customer_deleted' }
+  }
+  const providerCustomerId = str(customer.id)
+  if (!providerCustomerId) return { action: 'skipped', reason: 'customer_missing' }
+
+  const subject = resolvePayerSubject(customer.metadata)
+  if (!subject) {
+    logWarn(
+      STRIPE_PROJECTION_LOG_SCOPE,
+      `customer ${providerCustomerId} names no TurboPanel subject in metadata; subscription ${providerSubscriptionId} not projected`,
+    )
+    return { action: 'skipped', reason: 'customer_subject_missing' }
+  }
+
+  const status = str(sub.status)
+  if (!status) return { action: 'skipped', reason: 'status_missing' }
+
+  const items = await loadSubscriptionItems(
+    deps.client,
+    providerSubscriptionId,
+    isObject(sub.items) ? (sub.items as SubscriptionItemsPage) : undefined,
+  )
+  const now = deps.now ?? new Date().toISOString()
+
+  // The three rows land atomically. `replaceSubscriptionItems` is
+  // delete-then-insert (the unique-constraint workaround it documents), so
+  // without a transaction a failure between the delete and the last insert
+  // would publish a subscription with fewer seats than the provider counts
+  // — and every entitlement read (license minting, tier placement, the
+  // per-sample metrics truncation) would act on it. Entitlement sync stays
+  // outside: it takes the quantity lease and may call Stripe.
+  const { subscriptionId, replaced } = await deps.db.transaction(async (tx) => {
+    const { id: payerId } = await upsertPayer(tx, {
+      provider: 'stripe',
+      providerCustomerId,
+      subject,
+      taxId: firstTaxId(customer),
+      now,
+    })
+    const { id: subscriptionId } = await upsertSubscriptionFromProvider(tx, {
+      payerId,
+      providerSubscriptionId,
+      status,
+      currentPeriodEnd: currentPeriodEnd(sub, items),
+      scheduleId: idOrObjectId(sub.schedule),
+      now,
+    })
+    const replaced = await replaceSubscriptionItems(
+      tx,
+      subscriptionId,
+      providerItems(items),
+      { now, logScope: STRIPE_PROJECTION_LOG_SCOPE },
+    )
+    return { subscriptionId, replaced }
+  })
+
+  // Committed items are in; now let the ledger move `license.tier_id`. A
+  // `pending_update` is read for its presence only — never its contents.
+  let entitlements: EntitlementSyncOutcome | null = null
+  if (subject.organizationId) {
+    entitlements = await syncEntitlementsForOrganization(
+      {
+        db: deps.db,
+        client: deps.client,
+        logScope: STRIPE_PROJECTION_LOG_SCOPE,
+        nowMs: Date.parse(now),
+        onRevokeBound: (serverId) => revokeDaemonKey(deps.db, serverId),
+      },
+      {
+        organizationId: subject.organizationId,
+        providerSubscriptionId,
+        pendingUpdate: isObject(sub.pending_update),
+        dropUpgradeIntents: opts.dropUpgradeIntents === true,
+        lock: opts.lock,
+      },
+    )
+  }
+  return { action: 'projected', subscriptionId, skippedItems: replaced.skipped, entitlements }
+}
+
+async function subscriptionIdFromCheckoutSession(
+  client: StripeClient,
+  sessionId: string,
+): Promise<string | null> {
+  const session = await client.get<StripeObject>(
+    `/v1/checkout/sessions/${encodeURIComponent(sessionId)}`,
+  )
+  return idOrObjectId(session.subscription)
+}
+
+async function subscriptionIdFromInvoice(
+  client: StripeClient,
+  invoiceId: string,
+): Promise<string | null> {
+  const invoice = await client.get<StripeObject>(`/v1/invoices/${encodeURIComponent(invoiceId)}`)
+  // Pre-`basil`: `invoice.subscription`. From `basil`:
+  // `invoice.parent.subscription_details.subscription`.
+  const direct = idOrObjectId(invoice.subscription)
+  if (direct) return direct
+  const parent = isObject(invoice.parent) ? invoice.parent : null
+  const details = parent && isObject(parent.subscription_details) ? parent.subscription_details : null
+  return details ? idOrObjectId(details.subscription) : null
+}
+
+/** Dispatch one event to its projection. Idempotent; safe to run twice. */
+export async function projectStripeEvent(
+  deps: StripeProjectionDeps,
+  event: StripeEventRef,
+): Promise<StripeProjectionOutcome> {
+  if (!event.objectId) return { action: 'skipped', reason: 'object_id_missing' }
+
+  let subscriptionId: string | null
+  let dropUpgradeIntents = false
+  switch (event.type) {
+    case 'customer.subscription.created':
+    case 'customer.subscription.updated':
+    case 'customer.subscription.deleted':
+    case 'customer.subscription.pending_update_applied':
+      subscriptionId = event.objectId
+      break
+    case 'customer.subscription.pending_update_expired':
+      // The parked upgrade could not be paid within Stripe's window: items
+      // never changed, and the ledger's upgrade intent must not outlive it.
+      subscriptionId = event.objectId
+      dropUpgradeIntents = true
+      break
+    case 'checkout.session.completed':
+      subscriptionId = await subscriptionIdFromCheckoutSession(deps.client, event.objectId)
+      break
+    case 'invoice.paid':
+    case 'invoice.payment_failed':
+      // The subscription's own status already reflects the payment outcome;
+      // projecting it is what moves `past_due_since`.
+      subscriptionId = await subscriptionIdFromInvoice(deps.client, event.objectId)
+      break
+    default:
+      logInfo(STRIPE_PROJECTION_LOG_SCOPE, `event ${event.id} (${event.type}) not handled`)
+      return { action: 'skipped', reason: 'event_not_handled' }
+  }
+  if (!subscriptionId) return { action: 'skipped', reason: 'no_subscription' }
+  return await projectSubscriptionById(deps, subscriptionId, { dropUpgradeIntents })
+}

@@ -3,7 +3,8 @@
  * (`capabilityPlanGeneration` table, see `../../lib/db/schema.ts`) — one row
  * per `(server, generation)`, written lazily whenever a resolved plan is
  * needed — `POST /api/daemon/v1/metrics` (`../../daemon/api-routes.ts`)
- * calls this on every ingest — rather than pushed by a trigger.
+ * calls this on every ingest — and a `capability-plan-update` cell push
+ * follows when the generation actually changes.
  *
  * Unlike `server-topology-records.ts` (which records every daemon-reported
  * generation verbatim), this table only grows on genuine change:
@@ -12,52 +13,57 @@
  * recorded hash for the server — an unchanged plan is a no-op, a changed (or
  * first-ever) plan inserts a new row with `generation = previous + 1` (or `0`).
  */
-import { desc, eq, sql } from 'drizzle-orm'
-import type { Db } from '../../db.ts'
-import { capabilityPlanGeneration } from '../../lib/db/schema.ts'
+import { desc, eq, sql } from "drizzle-orm";
+import type { Db } from "../../db.ts";
+import { capabilityPlanGeneration } from "../../lib/db/schema.ts";
 import {
   computeMetricsCapabilityPlanHash,
-  type MetricsCapabilityPlanV5,
-} from '../../daemon/metrics/capability-plan.ts'
+  type MetricsCapabilityPlan,
+} from "../../daemon/metrics/capability-plan.ts";
 
 export type CapabilityPlanGenerationRecord = {
-  generation: number
-  planHash: string
-  plan: unknown
-  appliedAt: string
-}
+  generation: number;
+  planHash: string;
+  plan: unknown;
+  appliedAt: string;
+};
+
+export type CapabilityPlanGenerationWrite = {
+  generation: number;
+  changed: boolean;
+};
 
 function serializeRow(
-  row: typeof capabilityPlanGeneration.$inferSelect
+  row: typeof capabilityPlanGeneration.$inferSelect,
 ): CapabilityPlanGenerationRecord {
   return {
     generation: row.generation,
     planHash: row.planHash,
     plan: row.plan,
     appliedAt: row.appliedAt,
-  }
+  };
 }
 
 /** Highest-`generation` row recorded for a server, or `undefined` if none has been recorded yet. */
 export async function getLatestCapabilityPlanGeneration(
   db: Db,
-  serverId: string
+  serverId: string,
 ): Promise<CapabilityPlanGenerationRecord | undefined> {
   const rows = await db
     .select()
     .from(capabilityPlanGeneration)
     .where(eq(capabilityPlanGeneration.serverId, serverId))
     .orderBy(desc(capabilityPlanGeneration.generation))
-    .limit(1)
-  const row = rows[0]
-  return row ? serializeRow(row) : undefined
+    .limit(1);
+  const row = rows[0];
+  return row ? serializeRow(row) : undefined;
 }
 
 /**
  * Resolve the current plan's hash against the latest recorded generation for
  * `serverId`; insert a new generation row only when it differs (or none has
  * ever been recorded). Returns the (possibly unchanged) current generation
- * number.
+ * and whether a new row was written.
  *
  * Runs inside a transaction that locks the server's row `FOR UPDATE` first,
  * serializing concurrent resolutions for the same server (mirrors the
@@ -76,22 +82,22 @@ export async function getLatestCapabilityPlanGeneration(
 export async function recordCapabilityPlanGenerationIfChanged(
   db: Db,
   serverId: string,
-  resolvedPlan: MetricsCapabilityPlanV5
-): Promise<number> {
-  const planHash = await computeMetricsCapabilityPlanHash(resolvedPlan)
+  resolvedPlan: MetricsCapabilityPlan,
+): Promise<CapabilityPlanGenerationWrite> {
+  const planHash = await computeMetricsCapabilityPlanHash(resolvedPlan);
 
   return await db.transaction(async (tx) => {
     await tx.execute(sql`
       SELECT id FROM server WHERE id = ${serverId}::uuid FOR UPDATE
-    `)
+    `);
 
-    const latest = await getLatestCapabilityPlanGeneration(tx, serverId)
+    const latest = await getLatestCapabilityPlanGeneration(tx, serverId);
     if (latest?.planHash === planHash) {
-      return latest.generation
+      return { generation: latest.generation, changed: false };
     }
 
-    const generation = latest ? latest.generation + 1 : 0
-    const appliedAt = new Date().toISOString()
+    const generation = latest ? latest.generation + 1 : 0;
+    const appliedAt = new Date().toISOString();
     await tx
       .insert(capabilityPlanGeneration)
       .values({
@@ -102,17 +108,24 @@ export async function recordCapabilityPlanGenerationIfChanged(
         appliedAt,
       })
       .onConflictDoNothing({
-        target: [capabilityPlanGeneration.serverId, capabilityPlanGeneration.generation],
-      })
+        target: [
+          capabilityPlanGeneration.serverId,
+          capabilityPlanGeneration.generation,
+        ],
+      });
 
-    const persisted = await getLatestCapabilityPlanGeneration(tx, serverId)
-    if (persisted?.generation !== generation || persisted.planHash !== planHash) {
+    const persisted = await getLatestCapabilityPlanGeneration(tx, serverId);
+    if (
+      persisted?.generation !== generation || persisted.planHash !== planHash
+    ) {
       throw new Error(
-        `capability plan generation ${String(generation)} for server ${serverId} ` +
-          'was not persisted with the expected plan hash; conflicting writer under lock'
-      )
+        `capability plan generation ${
+          String(generation)
+        } for server ${serverId} ` +
+          "was not persisted with the expected plan hash; conflicting writer under lock",
+      );
     }
 
-    return generation
-  })
+    return { generation, changed: true };
+  });
 }

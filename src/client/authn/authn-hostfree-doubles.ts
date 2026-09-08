@@ -328,6 +328,9 @@ function buildSelectFrom(
     innerJoin: (_other: unknown, _cond: unknown) => ({
       where: (_cond: unknown) => thenableRows(() => fetchInnerJoinRows(state, table)),
     }),
+    leftJoin: (_other: unknown, _cond: unknown) => ({
+      where: (_cond: unknown) => thenableRows(() => fetchWhereRows(state, internal, table)),
+    }),
     where: (_cond: unknown) => thenableRows(() => fetchWhereRows(state, internal, table)),
   }
 

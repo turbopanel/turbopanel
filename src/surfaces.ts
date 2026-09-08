@@ -6,13 +6,13 @@ export const DAEMON_API_PREFIX = '/api/daemon/v1'
 export const INSTALL_API_PREFIX = '/api/install/v1'
 export const ADMIN_API_PREFIX = '/api/admin/v1'
 /**
- * Inbound Git provider webhooks — a **top-level traffic class**, not an API.
+ * Inbound provider webhooks — a **top-level traffic class**, not an API.
  *
  * Every other surface here authenticates a caller we enrolled: a browser with a
  * session cookie, or a daemon with a JWT. A webhook has neither. The sender is
- * GitHub or GitLab, it carries no `Origin`, its only credential is one it
- * presents in the request itself, and what it delivers is an event rather than a
- * call. That is a different thing from `/api`, so it gets its own prefix rather
+ * GitHub, GitLab or Stripe, it carries no `Origin`, its only credential is one
+ * it presents in the request itself, and what it delivers is an event rather
+ * than a call. That is a different thing from `/api`, so it gets its own prefix rather
  * than a version segment inside one.
  *
  * **Anything fronting the instance must know this prefix.** `Caddyfile`,
@@ -44,6 +44,22 @@ export const GITHUB_WEBHOOK_SCOPED_PATH = `${GITHUB_WEBHOOK_PATH}/:ref`
 export const GITLAB_WEBHOOK_PATH = `${WEBHOOK_PREFIX}/gitlab`
 /** {@link GITHUB_WEBHOOK_SCOPED_PATH}'s counterpart; self-managed GitLab only. */
 export const GITLAB_WEBHOOK_SCOPED_PATH = `${GITLAB_WEBHOOK_PATH}/:ref`
+/**
+ * Inbound Stripe events — a **billing** kind that shares the git kinds' traffic
+ * class, and for the same reason: no session, no daemon JWT, no `Origin`, the
+ * only credential is the `Stripe-Signature` the sender puts on the request,
+ * and what arrives is an event rather than a call. Same gate, same order
+ * (`src/webhook/billing/stripe.ts`).
+ *
+ * There is **no** `:ref` variant. An instance holds one Stripe account and
+ * one signing secret, so there is nothing to disambiguate in the URL.
+ *
+ * `/webhook/*` is already forwarded by every fronting layer, so this path
+ * inherits the plumbing — and `src/surfaces.test.ts` checks that rather than
+ * assuming it. Local forwarding must use this exact path:
+ * `stripe listen --forward-to <instance>/webhook/stripe`.
+ */
+export const STRIPE_WEBHOOK_PATH = `${WEBHOOK_PREFIX}/stripe`
 export const CLIENT_WS_PATH = '/ws/client/v1'
 export const DEVELOPER_WS_PATH = '/ws/developer/v1'
 export const DAEMON_WS_PATH = '/ws/daemon/v1'

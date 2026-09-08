@@ -35,6 +35,25 @@ test('getAdminOpenApiSpec exposes OpenAPI 3.1 metadata and cookie auth', () => {
   )
 })
 
+test('getAdminOpenApiSpec documents the tier catalogue on Workers only', () => {
+  type Spec = {
+    tags: { name: string }[]
+    'x-tagGroups': { name: string }[]
+    paths: Record<string, unknown>
+  }
+  const workers = getAdminOpenApiSpec('https://localhost:8443', { runtime: 'workers' }) as Spec
+  assertEquals(workers.tags.some((tag) => tag.name === 'Tiers'), true)
+  assertEquals(workers['x-tagGroups'].some((group) => group.name === 'Billing'), true)
+  assertExists(workers.paths[`${ADMIN_API_PREFIX}/tiers`])
+  assertExists(workers.paths[`${ADMIN_API_PREFIX}/tiers/{id}/verify`])
+
+  // Self-hosted Deno mounts no billing surface, so its spec has none either.
+  const deno = getAdminOpenApiSpec('https://localhost:8443', { runtime: 'deno' }) as Spec
+  assertEquals(deno.tags.some((tag) => tag.name === 'Tiers'), false)
+  assertEquals(deno['x-tagGroups'].some((group) => group.name === 'Billing'), false)
+  assertEquals(Object.keys(deno.paths).some((path) => path.startsWith(`${ADMIN_API_PREFIX}/tiers`)), false)
+})
+
 test('getAdminOpenApiSpec documents public URL and reencrypt paths', () => {
   const spec = getAdminOpenApiSpec('https://localhost:8443') as {
     paths: Record<string, unknown>

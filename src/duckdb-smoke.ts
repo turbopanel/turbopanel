@@ -42,15 +42,15 @@ export async function runDuckdbSmoke(mode: string): Promise<void> {
       case 'write': {
         await connection.run(
           `INSERT INTO ${HOST_SAMPLES_TABLE} ` +
-            `(server_id, sampled_at, received_at, interval_seconds, collection_mode, ` +
+            `(server_id, sampled_at, received_at, interval_seconds, ` +
             `sequence, topology_generation, boot_generation, cpu_busy_percent) ` +
-            `VALUES (CAST('${SMOKE_SERVER_ID}' AS UUID), now(), now(), 60, 'baseline', 1, 1, 1, 42.0)`
+            `VALUES (CAST('${SMOKE_SERVER_ID}' AS UUID), now(), now(), 60, 1, 1, 1, 42.0)`
         )
         await connection.run(
           `INSERT INTO ${NETWORK_SAMPLES_TABLE} ` +
-            `(server_id, sampled_at, received_at, interval_seconds, collection_mode, ` +
+            `(server_id, sampled_at, received_at, interval_seconds, ` +
             `sequence, topology_generation, boot_generation, device_id, receive_bytes_per_second) ` +
-            `VALUES (CAST('${SMOKE_SERVER_ID}' AS UUID), now(), now(), 60, 'baseline', 1, 1, 1, 'eth0', 1000.0)`
+            `VALUES (CAST('${SMOKE_SERVER_ID}' AS UUID), now(), now(), 60, 1, 1, 1, 'eth0', 1000.0)`
         )
         const hostReader = await connection.runAndReadAll(
           `SELECT count(*) AS n FROM ${HOST_SAMPLES_TABLE}`

@@ -225,6 +225,52 @@ export const serverSchemas = {
       },
     },
   },
+  ServerTierPlacement: {
+    type: 'object',
+    required: ['licenseTier', 'requiredTier', 'recommendedTier', 'unwatched'],
+    properties: {
+      licenseTier: {
+        type: ['string', 'null'],
+        description:
+          'Bound license `tier.label`, or null when unassigned / self-hosted.',
+      },
+      requiredTier: {
+        type: 'string',
+        description: 'Hard floor from CPU cores + RAM (rank label, e.g. S2).',
+      },
+      recommendedTier: {
+        type: 'string',
+        description:
+          'Harder of required and discovered NIC / drive / GPU counts.',
+      },
+      unwatched: {
+        type: 'object',
+        required: ['nics', 'drives', 'gpus'],
+        description:
+          'Devices (detail: ids) or counts (list) beyond the effective plan slot counts.',
+        properties: {
+          nics: {
+            oneOf: [
+              { type: 'array', items: { type: 'string' } },
+              { type: 'integer', minimum: 0 },
+            ],
+          },
+          drives: {
+            oneOf: [
+              { type: 'array', items: { type: 'string' } },
+              { type: 'integer', minimum: 0 },
+            ],
+          },
+          gpus: {
+            oneOf: [
+              { type: 'array', items: { type: 'string' } },
+              { type: 'integer', minimum: 0 },
+            ],
+          },
+        },
+      },
+    },
+  },
   ServerRow: {
     type: 'object',
     properties: {
@@ -232,6 +278,14 @@ export const serverSchemas = {
       name: { type: ['string', 'null'] },
       organizationId: { type: ['string', 'null'] },
       licenseId: { type: ['string', 'null'] },
+      tierPlacement: {
+        oneOf: [
+          { $ref: '#/components/schemas/ServerTierPlacement' },
+          { type: 'null' },
+        ],
+        description:
+          'License vs required/recommended hardware placement. List responses use unwatched counts; detail uses device ids.',
+      },
       options: { type: ['object', 'null'], additionalProperties: true },
       createdAt: { type: 'string', format: 'date-time' },
       connected: {
@@ -248,7 +302,17 @@ export const serverSchemas = {
         type: ['string', 'null'],
         enum: ['physical', 'virtual', null],
         description:
-          'Declared `server.machine_class` for metrics capability-plan resolution. Null until pinned via PATCH or inferred `physical` at ingest (sensors discovered); never inferred `virtual`.',
+          'Declared `server.machine_class` for metrics capability-plan resolution. Null until pinned via PATCH or inferred `physical` at ingest (sensors discovered, or the daemon\'s own verdict on its topology snapshot); never inferred `virtual`.',
+      },
+      layoutPaths: {
+        type: ['object', 'null'],
+        description:
+          'Host layout paths the daemon reports on its latest topology snapshot: where managed-engine backups land (`TURBOPANEL_BACKUP_DIR`, `/backup` by default) and its log directory. Read-only — set by the daemon\'s environment on the host, not by this API. Null until a v6 daemon has reported topology.',
+        properties: {
+          backup: { type: 'string' },
+          logs: { type: 'string' },
+        },
+        required: ['backup', 'logs'],
       },
       remoteAddress: {
         type: ['string', 'null'],

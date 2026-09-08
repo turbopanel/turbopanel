@@ -45,11 +45,11 @@ async function insertHostSample(
 ): Promise<void> {
   await connection.run(
     `INSERT INTO ${HOST_SAMPLES_TABLE} ` +
-      `(server_id, sampled_at, received_at, interval_seconds, collection_mode, ` +
+      `(server_id, sampled_at, received_at, interval_seconds, ` +
       `sequence, topology_generation, boot_generation, cpu_busy_percent) ` +
       `VALUES (CAST(? AS UUID), ${timestampLiteralFromMs(atMs)}, ${timestampLiteralFromMs(
         atMs
-      )}, 60, 'baseline', 1, 1, 1, ?)`,
+      )}, 60, 1, 1, 1, ?)`,
     [SERVER_ID, cpuBusyPercent]
   )
 }

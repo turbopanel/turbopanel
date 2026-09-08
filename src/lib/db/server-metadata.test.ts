@@ -21,6 +21,7 @@ import {
   REDACTED_SERVER_OPTION_KEYS,
   redactServerOptions,
   resolveEffectiveCpuThermalLimits,
+  resolveEffectiveMetricsCapabilityPlan,
   resolveEffectiveServerTimezone,
   resolveServerOsLogoKey,
   resolveServerResponseTimezone,
@@ -990,4 +991,92 @@ test("resolveEffectiveCpuThermalLimits: neither override nor recognized cpuModel
     tjMaxCelsius: null,
     source: "none",
   });
+});
+
+test("resolveEffectiveMetricsCapabilityPlan: a tier-derived base replaces the platform default", () => {
+  const plan = resolveEffectiveMetricsCapabilityPlan(
+    "physical",
+    undefined,
+    undefined,
+    "hosted",
+    {
+      nicSlots: 5,
+      driveSlots: 4,
+      gpuSlots: 2,
+      filesystemSlots: 3,
+      isEntryTier: false,
+    },
+  );
+  assertEquals(plan.normalNicSlots, 5);
+  assertEquals(plan.gpuSlots, 2);
+  assertEquals(plan.extraFilesystemSlots, 3);
+  assertEquals(plan.managedDockerEnabled, true);
+});
+
+test("resolveEffectiveMetricsCapabilityPlan: entry-tier carve-outs apply only at the entry tier", () => {
+  const entry = resolveEffectiveMetricsCapabilityPlan(
+    "physical",
+    undefined,
+    undefined,
+    "hosted",
+    {
+      nicSlots: 2,
+      driveSlots: 2,
+      gpuSlots: 1,
+      filesystemSlots: 4,
+      isEntryTier: true,
+    },
+  );
+  assertEquals(entry.extraFilesystemSlots, 0);
+  assertEquals(entry.physicalHardwareSignalSlots, 11);
+  assertEquals(entry.managedDockerEnabled, false);
+
+  const standard = resolveEffectiveMetricsCapabilityPlan(
+    "physical",
+    undefined,
+    undefined,
+    "hosted",
+    {
+      nicSlots: 5,
+      driveSlots: 4,
+      gpuSlots: 2,
+      filesystemSlots: 3,
+      isEntryTier: false,
+    },
+  );
+  assertEquals(standard.extraFilesystemSlots, 3);
+  assertEquals(standard.physicalHardwareSignalSlots, 19);
+  assertEquals(standard.managedDockerEnabled, true);
+});
+
+test("resolveEffectiveMetricsCapabilityPlan: org/server overrides still win over a tier-derived base", () => {
+  const plan = resolveEffectiveMetricsCapabilityPlan(
+    "physical",
+    { metricsCapabilityPlan: { gpuSlots: 8 } },
+    { metricsCapabilityPlan: { normalNicSlots: 3 } },
+    "hosted",
+    {
+      nicSlots: 5,
+      driveSlots: 4,
+      gpuSlots: 2,
+      filesystemSlots: 3,
+      isEntryTier: false,
+    },
+  );
+  assertEquals(plan.gpuSlots, 8);
+  assertEquals(plan.normalNicSlots, 3);
+  assertEquals(plan.detailedBlockDeviceSlots, 4);
+});
+
+test("resolveEffectiveMetricsCapabilityPlan: absent tier preserves platform-default behavior", () => {
+  const plan = resolveEffectiveMetricsCapabilityPlan(
+    "physical",
+    undefined,
+    undefined,
+    "hosted",
+  );
+  assertEquals(plan.normalNicSlots, 2);
+  assertEquals(plan.gpuSlots, 1);
+  assertEquals(plan.managedDockerEnabled, true);
+  assertEquals(plan.physicalHardwareSignalSlots, 19);
 });

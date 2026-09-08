@@ -4,13 +4,25 @@
 
 import { assertEquals } from '@std/assert'
 import type { Db } from '../../db.ts'
+import type { WebhookGitProviderName } from '../git/git-provider.ts'
 import {
   WEBHOOK_DELIVERY_RETENTION_MS,
   WEBHOOK_DELIVERY_SWEEP_LIMIT,
   claimWebhookDelivery,
   releaseWebhookDelivery,
   sweepExpiredWebhookDeliveries,
+  type WebhookDeliveryProvider,
 } from './webhook-delivery-records.ts'
+
+/**
+ * `WebhookDeliveryProvider` is no longer an alias of the git union (that was
+ * `src/lib/db/`'s only import from `src/lib/git/`), but the git gates still
+ * write it — so every git name must stay assignable. A compile-time pin: if
+ * a git provider is added without widening the ledger, this line stops
+ * type-checking.
+ */
+const _gitNamesStayAssignable: WebhookDeliveryProvider = null as unknown as WebhookGitProviderName
+void _gitNamesStayAssignable
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.

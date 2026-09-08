@@ -204,6 +204,21 @@ export function resolveWorkersGitlabWebhookRateLimiter(
   )
 }
 
+/**
+ * Stripe's limiter — the billing kind on the same gate. Same fail-closed
+ * discipline (a publicly reachable endpoint that performs an HMAC and a
+ * database write per request must never run unthrottled on production),
+ * its own bucket so an invoice run cannot spend a git provider's budget.
+ */
+export function resolveWorkersStripeWebhookRateLimiter(
+  env: CloudflareBindings,
+): RateLimiter {
+  return resolveDaemonLimiterBinding(
+    env.STRIPE_WEBHOOK_RATE_LIMITER,
+    isWorkersDevSurface(env),
+  )
+}
+
 function resolveDaemonLimiterBinding(
   binding: { limit(options: { key: string }): Promise<{ success: boolean }> } | undefined,
   allowNoop: boolean,
@@ -262,6 +277,7 @@ let clientAuthRateLimiterWarningLogged = false
 let clientAuthStrictRateLimiterWarningLogged = false
 let githubWebhookRateLimiterWarningLogged = false
 let gitlabWebhookRateLimiterWarningLogged = false
+let stripeWebhookRateLimiterWarningLogged = false
 
 /** @internal Reset one-shot production warning flags — tests only. */
 export function resetWorkersBindingWarningsForTests(): void {
@@ -271,6 +287,7 @@ export function resetWorkersBindingWarningsForTests(): void {
   clientAuthStrictRateLimiterWarningLogged = false
   githubWebhookRateLimiterWarningLogged = false
   gitlabWebhookRateLimiterWarningLogged = false
+  stripeWebhookRateLimiterWarningLogged = false
 }
 
 /**
@@ -372,6 +389,21 @@ export function warnIfGitlabWebhookRateLimiterMissing(env: CloudflareBindings): 
   gitlabWebhookRateLimiterWarningLogged = true
   console.warn(
     'GITLAB_WEBHOOK_RATE_LIMITER binding missing; the GitLab webhook surface fails closed (429) until it is bound.',
+  )
+}
+
+/**
+ * Warn once when a production-like Workers env is missing the Stripe webhook
+ * rate limit binding — that webhook surface fails closed until it is bound.
+ */
+export function warnIfStripeWebhookRateLimiterMissing(env: CloudflareBindings): void {
+  if (stripeWebhookRateLimiterWarningLogged) return
+  if (env.STRIPE_WEBHOOK_RATE_LIMITER) return
+  if (isWorkersDevSurface(env)) return
+
+  stripeWebhookRateLimiterWarningLogged = true
+  console.warn(
+    'STRIPE_WEBHOOK_RATE_LIMITER binding missing; the Stripe webhook surface fails closed (429) until it is bound.',
   )
 }
 

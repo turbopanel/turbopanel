@@ -128,6 +128,12 @@ test('migrations/ CREATE TABLE names are single lower-case words', async () => {
   if (!unique.includes('ssh')) {
     throw new TypeError('expected principal-ssh-key table "ssh"')
   }
+  if (!unique.includes('payer') || !unique.includes('subscription') || !unique.includes('seat')) {
+    throw new TypeError('expected billing projection tables payer / subscription / seat')
+  }
+  if (unique.includes('subscription_item') || unique.includes('subscriptionitem')) {
+    throw new TypeError('subscription items are the one-word physical table "seat"')
+  }
   if (
     unique.includes('member') ||
     unique.includes('membership') ||

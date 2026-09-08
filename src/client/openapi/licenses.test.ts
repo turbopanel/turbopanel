@@ -33,6 +33,10 @@ test('buildLicenseSchemas documents license lifecycle shapes', () => {
     INSTALL_DESC,
   )
   assertEquals((schemas.InvalidateOkResponse.properties?.ok as SchemaObject).const, true)
+  assertEquals(
+    (schemas.LicenseHasAttachedServerError.properties?.error as SchemaObject).const,
+    'license_has_attached_server',
+  )
 })
 
 test('buildLicensePaths registers list/create/invalidate routes', () => {
@@ -51,4 +55,8 @@ test('buildLicensePaths registers list/create/invalidate routes', () => {
     delete: { responses: Record<string, { description: string }> }
   }
   assertEquals(invalidate.delete.responses['403'].description.includes('control plane'), true)
+  assertEquals(
+    invalidate.delete.responses['409'].description.includes('attached'),
+    true,
+  )
 })

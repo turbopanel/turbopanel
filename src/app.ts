@@ -6,13 +6,14 @@ import { registerClientRoutes } from './client/routes.ts'
 import { createBrowserWriteProtectionMiddleware } from './browser-write-protection.ts'
 import { registerCorsMiddleware } from './cors.ts'
 import type { DaemonCellRegistry } from './daemon/cell/contracts.ts'
-import type { ServerMetricsStoreV5 } from './daemon/metrics/types-v5.ts'
+import type { ServerMetricsStore } from './daemon/metrics/types.ts'
 import type { ExecutionLogStore } from './lib/execution-logs/types.ts'
 import type { Db } from './db.ts'
 import type { SignupEnvOverride } from './client/authn/install-state.ts'
 import type { CommandQueue } from './lib/commands/queue.ts'
 import type { EmailQueue } from './lib/email/types.ts'
 import type { QueryCache } from './query-cache/contracts.ts'
+import type { BillingConfig } from './lib/billing/config.ts'
 import { HEALTH_PATH } from './surfaces.ts'
 import { healthPayload } from './build-info.ts'
 
@@ -30,15 +31,15 @@ export type AppEnv = {
     queryCache?: QueryCache
     /**
      * Host server-metrics store for `POST /api/daemon/v1/metrics` and every
-     * v5 query route. Set by `createApp` from the `serverMetricsStoreV5`
+     * v5 query route. Set by `createApp` from the `serverMetricsStore`
      * option below. On Deno this is the `DuckDbParquetServerMetricsStore`
      * instance; on Workers, the entrypoint passes a real
-     * `CloudflareAnalyticsEngineServerMetricsStoreV5` bound to
-     * `SERVER_METRICS_V5` (or `DisabledServerMetricsStoreV5` when that
+     * `CloudflareAnalyticsEngineServerMetricsStore` bound to
+     * `SERVER_METRICS` (or `DisabledServerMetricsStore` when that
      * binding is unconfigured). Stays unset when no storage backend is
      * configured for the runtime.
      */
-    serverMetricsStoreV5?: ServerMetricsStoreV5
+    serverMetricsStore?: ServerMetricsStore
     /**
      * Command execution-log (transcript) store. Stays unset when no storage
      * backend is configured for the runtime — reads then report "no transcript".
@@ -63,6 +64,13 @@ export type AppEnv = {
      * routes fall back to the process-local shared limiter.
      */
     authRateLimiter?: AuthRateLimiter
+    /**
+     * Stripe configuration. Its **presence is `billingEnabled`** — there is
+     * no separate boolean to drift. Set per request by `workers.ts` from
+     * `resolveBillingConfig(env)`. Never set on the Deno runtime: billing is
+     * hosted-only and self-hosted mounts no billing surface at all.
+     */
+    billingConfig?: BillingConfig
   }
 }
 
@@ -78,7 +86,7 @@ export function createApp({
   signupEnvOverride,
   daemonCellRegistry,
   queryCache,
-  serverMetricsStoreV5,
+  serverMetricsStore,
   executionLogStore,
   dataEncryptionSecrets,
   secretsConfig,
@@ -98,8 +106,8 @@ export function createApp({
   signupEnvOverride: SignupEnvOverride | undefined
   daemonCellRegistry?: DaemonCellRegistry
   queryCache?: QueryCache
-  /** Host server-metrics store — see `AppEnv.Variables.serverMetricsStoreV5`. */
-  serverMetricsStoreV5?: ServerMetricsStoreV5
+  /** Host server-metrics store — see `AppEnv.Variables.serverMetricsStore`. */
+  serverMetricsStore?: ServerMetricsStore
   executionLogStore?: ExecutionLogStore
   dataEncryptionSecrets?: DerivedSecretsConfig
   secretsConfig?: SecretsConfig
@@ -156,9 +164,9 @@ export function createApp({
       return next()
     })
   }
-  if (serverMetricsStoreV5) {
+  if (serverMetricsStore) {
     app.use('*', (c, next) => {
-      c.set('serverMetricsStoreV5', serverMetricsStoreV5)
+      c.set('serverMetricsStore', serverMetricsStore)
       return next()
     })
   }

@@ -135,8 +135,32 @@ behavior changes.
   or over-length).
   `GET`/`DELETE /licenses` are
   owner-only; the UI **Pending keys** page lists unbound keys (OpenAPI
-  `name`). Self-hosted operators set the cap;
-  Workers/Stripe billing will write the same field later.
+  `name`). Self-hosted operators set the cap. When billing is configured,
+  `POST /licenses` also requires `tierId` (**400** `tier_required` /
+  `tier_not_purchasable`) and answers **409** `no_free_seat` when the active
+  licenses at that tier already fill its seats (net of outstanding seat
+  releases); `DELETE /licenses/:id` runs the detach-first refusal, then the
+  billing gate (`authn/license-lifecycle.ts`), which records a deferred
+  `release-seat` intent under the org's quantity lease so the seat drops at
+  the period boundary (**409** `billing_mutation_in_progress` while held).
+- **Billing (client surface):** `src/client/billing/` — `GET /billing/catalog`
+  (active tiers), `GET /billing/subscription` (projection summary: status,
+  period end, per-tier `{ seats, licensesUsed, licensesFree }`, grace clock,
+  schedule flag, pending changes — Postgres only), `POST /billing/checkout`
+  (first purchase → hosted Checkout URL, **409** `subscription_exists` after),
+  `POST /billing/portal` (invoices + payment methods), `POST /billing/preview`
+  (proration quote with a pinned `prorationDate`), `POST /billing/seats`
+  (increase → immediate invoice; decrease → deferred), `POST /billing/upgrade`
+  and `POST /billing/downgrade` (one license, one tier move). Owner-only;
+  every route is **503** `billing_not_configured` when `billingConfig` is
+  absent, so self-hosted has no billing surface; entitlement-raising routes
+  are **409** `subscription_past_due` while delinquent; every mutation holds
+  the org quantity lease (`409 billing_mutation_in_progress`). The three
+  mutation bodies are `billing/mutations.ts` (`changeSeats`,
+  `upgradeLicense`, `downgradeLicense`), context-free functions returning
+  the status and body the route answers with, so the live test-clock
+  harness drives the same gates. Rules and the ledger:
+  `src/lib/billing/AGENTS.md`.
 - **Org managed-database defaults:** `organization.options.managedDatabase`
   (`src/lib/managed/org-defaults.ts`). `GET`/`PUT
   /organizations/:id/managed-defaults` (manage-gated) — today only `sslMode`, the

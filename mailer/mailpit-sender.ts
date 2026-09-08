@@ -1,6 +1,7 @@
 import {
   createEmailOtpEmail,
   createEmailVerificationLinkEmail,
+  createServerTierNoticeEmail,
 } from '../src/lib/email/templates.ts'
 import { resolveEmailSettings, type ResolvedEmailSettings } from '../src/lib/settings/email-settings.ts'
 import type { DerivedSecretsConfig } from '../src/client/authn/secrets.ts'
@@ -70,6 +71,11 @@ export class MailerMailpitSender {
         case 'email-otp': {
           validateEmailAddress(job.to, 'recipient')
           result = createEmailOtpEmail(job.to, job.otp, job.otpType)
+          break
+        }
+        case 'server-tier-notice': {
+          validateEmailAddress(job.to, 'recipient')
+          result = createServerTierNoticeEmail(job)
           break
         }
         default:

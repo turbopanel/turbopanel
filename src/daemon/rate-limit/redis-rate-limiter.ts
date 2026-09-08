@@ -53,6 +53,9 @@ export const DEFAULT_GITHUB_WEBHOOK_RATE_PERIOD_SECONDS = 60
 /** GitLab's own bucket — same sizing, independent budget. */
 export const DEFAULT_GITLAB_WEBHOOK_RATE_LIMIT = 120
 export const DEFAULT_GITLAB_WEBHOOK_RATE_PERIOD_SECONDS = 60
+/** Stripe delivery volume is far below a push fan-out — a modest budget. */
+export const DEFAULT_STRIPE_WEBHOOK_RATE_LIMIT = 60
+export const DEFAULT_STRIPE_WEBHOOK_RATE_PERIOD_SECONDS = 60
 
 const MIN_BUCKET_TTL_MS = 1_000
 
@@ -167,6 +170,21 @@ export function resolveGitlabWebhookRateLimit(env: {
     periodSeconds: parsePositiveIntEnv(
       env.get('TURBOPANEL_GITLAB_WEBHOOK_RATE_PERIOD'),
       DEFAULT_GITLAB_WEBHOOK_RATE_PERIOD_SECONDS,
+    ),
+  }
+}
+
+export function resolveStripeWebhookRateLimit(env: {
+  get(key: string): string | undefined
+} = Deno.env): { limit: number; periodSeconds: number } {
+  return {
+    limit: parsePositiveIntEnv(
+      env.get('TURBOPANEL_STRIPE_WEBHOOK_RATE_LIMIT'),
+      DEFAULT_STRIPE_WEBHOOK_RATE_LIMIT,
+    ),
+    periodSeconds: parsePositiveIntEnv(
+      env.get('TURBOPANEL_STRIPE_WEBHOOK_RATE_PERIOD'),
+      DEFAULT_STRIPE_WEBHOOK_RATE_PERIOD_SECONDS,
     ),
   }
 }

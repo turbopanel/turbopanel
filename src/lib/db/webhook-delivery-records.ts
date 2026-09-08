@@ -2,10 +2,11 @@
  * Replay protection for inbound provider webhooks (`delivery` table).
  *
  * Providers redeliver: GitHub retries anything that did not answer 2xx, GitLab
- * offers a resend button on every hook, and an operator can replay a delivery
- * by hand from either. A redelivered `push` must not enqueue a second deploy,
- * so the delivery id is claimed **once** — the first request through wins,
- * every later one is told the work is already done.
+ * offers a resend button on every hook, Stripe retries for days and delivers
+ * at-least-once, and an operator can replay a delivery by hand from any of
+ * them. A redelivered `push` must not enqueue a second deploy, so the delivery
+ * id is claimed **once** — the first request through wins, every later one is
+ * told the work is already done.
  *
  * The claim is a single `INSERT … ON CONFLICT DO NOTHING`, so two isolates
  * racing the same delivery resolve at the unique index rather than in
@@ -19,14 +20,18 @@
 
 import { and, eq, sql } from 'drizzle-orm'
 import type { Db } from '../../db.ts'
-import type { WebhookGitProviderName } from '../git/git-provider.ts'
 import { webhookDelivery } from './schema.ts'
 
 /**
- * Providers that deliver webhooks. Matches `delivery_provider_check` in
+ * Kinds that deliver webhooks. Matches `delivery_provider_check` in
  * `./schema.ts`; generic-SSH sources have no ingress surface and never appear.
+ *
+ * Its own literal union rather than an alias of `WebhookGitProviderName`: the
+ * ledger stopped being git-shaped when Stripe landed, and aliasing it was
+ * `src/lib/db/`'s only dependency on `src/lib/git/`. The git names must stay
+ * assignable to it — `webhook-delivery-records.hostfree.test.ts` pins that.
  */
-export type WebhookDeliveryProvider = WebhookGitProviderName
+export type WebhookDeliveryProvider = 'github' | 'gitlab' | 'stripe'
 
 /**
  * How long a claimed delivery id is remembered. Every provider gives up

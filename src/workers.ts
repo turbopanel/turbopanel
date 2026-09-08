@@ -14,6 +14,7 @@ import { runOfflineSweep } from './daemon/cell/offline-sweep.ts'
 import { registerAdminRoutes } from './admin/routes.ts'
 import { registerDaemonApiRoutes } from './daemon/api-routes.ts'
 import { registerWebhookRoutes } from './webhook/routes.ts'
+import { resolveBillingConfig } from './lib/billing/config.ts'
 import { registerWorkersDaemonWebSocket } from './daemon/workers-ws.ts'
 import { resolveWorkersEmailQueue } from './lib/email/mailgun/workers-queue.ts'
 import type { EmailQueue } from './lib/email/types.ts'
@@ -30,10 +31,10 @@ import { parseCommandEnvelope } from './lib/commands/envelope.ts'
 import {
   type AnalyticsEngineDatasetLike,
   resolveCloudflareAnalyticsSqlConfig,
-  resolveServerMetricsStoreV5,
+  resolveServerMetricsStore,
 } from './daemon/metrics/store-selection-workers.ts'
 import { setServerStatusEventSink } from './daemon/metrics/status-events.ts'
-import type { ServerMetricsStoreV5 } from './daemon/metrics/types-v5.ts'
+import type { ServerMetricsStore } from './daemon/metrics/types.ts'
 import {
   parseExecutionLogRetentionDays,
   type R2BucketLike,
@@ -49,12 +50,14 @@ import {
   resolveWorkersDb,
   resolveWorkersGithubWebhookRateLimiter,
   resolveWorkersGitlabWebhookRateLimiter,
+  resolveWorkersStripeWebhookRateLimiter,
   warnIfCachedHyperdriveMissing,
   warnIfClientAuthRateLimiterMissing,
   warnIfClientAuthStrictRateLimiterMissing,
   warnIfDaemonRateLimitersMissing,
   warnIfGithubWebhookRateLimiterMissing,
   warnIfGitlabWebhookRateLimiterMissing,
+  warnIfStripeWebhookRateLimiterMissing,
 } from './workers-bindings.ts'
 import { type createWorkersDb, type Db, endDbConnection } from './db.ts'
 import type { AuthRateLimiter } from './client/authn/auth-rate-limit.ts'
@@ -71,7 +74,7 @@ let cachedChallengeSigningSecrets: DerivedSecretsConfig | null = null
 let cachedDataEncryptionSecrets: DerivedSecretsConfig | null = null
 let cachedSecretsConfig: SecretsConfig | null = null
 let cachedCommandQueue: CommandQueue | null = null
-let cachedServerMetricsStoreV5: ServerMetricsStoreV5 | null = null
+let cachedServerMetricsStore: ServerMetricsStore | null = null
 let cachedExecutionLogStore: ExecutionLogStore | null = null
 let cachedAuthRateLimiter: AuthRateLimiter | null = null
 let cachedDaemonCellRegistryFactory:
@@ -92,7 +95,7 @@ export function resetWorkerAppCachesForTests(): void {
   cachedDataEncryptionSecrets = null
   cachedSecretsConfig = null
   cachedCommandQueue = null
-  cachedServerMetricsStoreV5 = null
+  cachedServerMetricsStore = null
   cachedExecutionLogStore = null
   cachedAuthRateLimiter = null
   cachedDaemonCellRegistryFactory = null
@@ -181,22 +184,22 @@ async function initWorkerApp(env: CloudflareBindings) {
     ? createWorkersCommandQueue(env.TURBOPANEL_COMMAND_QUEUE)
     : createNoopCommandQueue()
   const analyticsEngineSql = resolveCloudflareAnalyticsSqlConfig(env)
-  // Real v5 backend (writes to SERVER_METRICS_V5 — the v5 envelope, per
-  // field-map-v5.ts). `CloudflareAnalyticsEngineServerMetricsStoreV5`
-  // implements the full `ServerMetricsStoreV5` surface (writes and reads
+  // Real backend (writes to SERVER_METRICS — the current envelope, per
+  // field-map.ts). `CloudflareAnalyticsEngineServerMetricsStore`
+  // implements the full `ServerMetricsStore` surface (writes and reads
   // alike) directly, including the paged entity families and `sample.events`
-  // — the request-resolved `slotMapping` (`buildMetricsDataPointsV5`'s
+  // — the request-resolved `slotMapping` (`buildMetricsDataPoints`'s
   // parameter) is threaded straight through by the ingest route's
-  // `writeSample` call, with no v3 bridging in between. `resolveServerMetricsStoreV5`
-  // already degrades to `DisabledServerMetricsStoreV5` when the
-  // `SERVER_METRICS_V5` binding is unconfigured, so this is always the
+  // `writeSample` call. `resolveServerMetricsStore`
+  // already degrades to `DisabledServerMetricsStore` when the
+  // `SERVER_METRICS` binding is unconfigured, so this is always the
   // correct store to use here regardless of binding state.
-  cachedServerMetricsStoreV5 = resolveServerMetricsStoreV5({
+  cachedServerMetricsStore = resolveServerMetricsStore({
     runtime: 'workers',
-    analyticsEngine: (env as { SERVER_METRICS_V5?: AnalyticsEngineDatasetLike }).SERVER_METRICS_V5,
+    analyticsEngine: (env as { SERVER_METRICS?: AnalyticsEngineDatasetLike }).SERVER_METRICS,
     analyticsEngineSql,
   })
-  setServerStatusEventSink(cachedServerMetricsStoreV5)
+  setServerStatusEventSink(cachedServerMetricsStore)
   cachedExecutionLogStore = resolveExecutionLogStore({
     runtime: 'workers',
     r2: (env as { EXECUTION_LOGS?: R2BucketLike }).EXECUTION_LOGS,
@@ -215,7 +218,7 @@ async function initWorkerApp(env: CloudflareBindings) {
     runtime: 'workers',
     corsOrigins: env.TURBOPANEL_UI_CORS_ORIGINS,
     signupEnvOverride: env.TURBOPANEL_IS_SIGNUP_ENABLED,
-    serverMetricsStoreV5: cachedServerMetricsStoreV5,
+    serverMetricsStore: cachedServerMetricsStore,
     executionLogStore: cachedExecutionLogStore,
     dataEncryptionSecrets: cachedDataEncryptionSecrets ?? undefined,
     secretsConfig: cachedSecretsConfig ?? undefined,
@@ -225,6 +228,7 @@ async function initWorkerApp(env: CloudflareBindings) {
   warnIfClientAuthStrictRateLimiterMissing(env)
   warnIfGithubWebhookRateLimiterMissing(env)
   warnIfGitlabWebhookRateLimiterMissing(env)
+  warnIfStripeWebhookRateLimiterMissing(env)
   cachedAuthRateLimiter = resolveWorkersClientAuthRateLimiter(env)
   const rateLimiters = resolveWorkersDaemonRateLimiters(env)
   // Daemon registrars are generic over the env — the app's `AppEnv` carries
@@ -249,6 +253,7 @@ async function initWorkerApp(env: CloudflareBindings) {
     runtime: 'workers',
     github: resolveWorkersGithubWebhookRateLimiter(env),
     gitlab: resolveWorkersGitlabWebhookRateLimiter(env),
+    stripe: resolveWorkersStripeWebhookRateLimiter(env),
   })
   registerAdminRoutes(cachedApp, {
     secrets: cachedSessionSecrets!,
@@ -291,6 +296,9 @@ export default {
     const { db, queryCache } = dbHandles
     try {
       const platformEnv = stringBindingEnv(env)
+      // Per request, like platformEnv — a dashboard secret change applies
+      // without an isolate recycle. Absence *is* billing off.
+      const billingConfig = resolveBillingConfig(platformEnv)
       // Lazy: resolving email settings decrypts the Mailgun/SMTP secret on
       // every call, so it must not run ahead of routing (or the auth rate
       // limiter) for requests that never send email — a webhook flood or an
@@ -322,6 +330,7 @@ export default {
           c.set('authRateLimiter', cachedAuthRateLimiter)
         }
         c.set('platformEnv', platformEnv)
+        if (billingConfig) c.set('billingConfig', billingConfig)
         if (postgresConnectionString) {
           c.set('postgresConnectionString', postgresConnectionString)
         }
@@ -329,8 +338,8 @@ export default {
           const registry = cachedDaemonCellRegistryFactory(env, db)
           c.set('daemonCellRegistry', registry)
         }
-        if (cachedServerMetricsStoreV5) {
-          c.set('serverMetricsStoreV5', cachedServerMetricsStoreV5)
+        if (cachedServerMetricsStore) {
+          c.set('serverMetricsStore', cachedServerMetricsStore)
         }
         if (cachedExecutionLogStore) {
           c.set('executionLogStore', cachedExecutionLogStore)
