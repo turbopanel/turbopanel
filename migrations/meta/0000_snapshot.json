@@ -1,5 +1,5 @@
 {
-  "id": "0de1497b-a9d1-4ac2-8f81-1bc3909e911d",
+  "id": "7ea695bf-a51c-4631-a9ba-3d635a1b4260",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -5085,12 +5085,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {
-        "project_name_format_check": {
-          "name": "project_name_format_check",
-          "value": "(name IS NULL) OR (((char_length((name)::text) >= 1) AND (char_length((name)::text) <= 255)) AND ((name)::text ~ '^[A-Za-z0-9 ._/-]+$'::text))"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.recovery": {

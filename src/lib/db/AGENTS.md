@@ -33,7 +33,9 @@ repository inspection columns into `0000_init.sql` (replacing
 `0002_add_capability_plan_generation`), then again to fold the product-tier
 reshape into `0000_init.sql` (replacing `0001_product_tiers`: no `tier_id` on
 `license`, derived `server.assigned_tier_id`, provider product + display
-currency on `tier`, entitlements in code). Each of those is a deliberate
+currency on `tier`, entitlements in code), then again to fold dropping
+`project_name_format_check` into `0000_init.sql` (replacing
+`0001_drop_project_name_format_check`). Each of those is a deliberate
 pre-MVP exception, **not** a precedent: the policy above is what holds going
 forward.
 Additive forward migrations, `0000_init.sql` is the squashed baseline and
@@ -318,7 +320,7 @@ letter-first alphanumeric token, **no underscores**. Guarded by
 | `relay`        | `relay`           | One server in the org TurboFabric mesh — `tp0` address, role, container prefix, advertised CIDRs, PSK. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `subnet`       | `subnet`          | Server-local Docker bridge for a `kind='compose'` spanning network. Was `segment`. SQL-adjacent — double-quote in raw `sql` tagged templates.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `workspace`    | `workspace`       | Resource-tree root (`project.workspace_id` → `workspace.id`). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `project`      | `project`         | Docker Compose / catalog / managed project. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `project`      | `project`         | Docker Compose / catalog / managed project. Unchanged. **`project_name_format_check` dropped.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `environment`  | `environment`     | Staging/production/etc. within a project; optional `server_id` pin. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `managed`      | `managed`         | Environment-scoped managed engine cluster. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `replica`      | `replica`         | One server’s participation in a managed cluster (primary / replica). Was `node`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -435,16 +437,16 @@ via Drizzle `customType` — no regex CHECK constraints belong on those types.
 
 **Names** (`name` column, API `name`) on organization, workspace, project,
 environment, service, hosting, datacenter, network, fabric, tls, team, managed,
-server, license, storage, and secret are labels, not identifiers. The cutover
-dropped **only** `hosting_name_format_check` and `datacenter_name_format_check`
-— those two CHECKs contradicted app-side `display-name-format.ts`. Every other
-name-format CHECK remains: `tls_name_format_check`,
-`workspace_name_format_check`, `project_name_format_check`,
+server, license, storage, and secret are labels, not identifiers. Dropped
+charset CHECKs (they contradicted app-side `display-name-format.ts`):
+`hosting_name_format_check`, `datacenter_name_format_check`,
+`project_name_format_check`. Every other name-format CHECK remains:
+`tls_name_format_check`, `workspace_name_format_check`,
 `environment_name_format_check`, `service_name_format_check`,
 `network_name_format_check`, `fabric_name_format_check`,
 `team_name_format_check`, `managed_name_format_check`, `user_name_format_check`,
 and `binding_database_name_format_check`. The preferred app-side rule for labels
-(and the rule that replaces the two dropped CHECKs) is
+(and the rule that replaces the dropped CHECKs) is
 `src/lib/display-name-format.ts` (`normalizeDisplayName` + `isValidDisplayName`)
 — trim, Unicode NFC, apostrophe-fold, no control characters, and a code-point
 length cap (`DISPLAY_NAME_MAX_LENGTH` / `DESCRIPTION_MAX_LENGTH`, currently

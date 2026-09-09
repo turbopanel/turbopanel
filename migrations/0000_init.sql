@@ -480,8 +480,7 @@ CREATE TABLE "project" (
 	"workspace_id" uuid NOT NULL,
 	"repository_id" uuid,
 	"name" varchar(255),
-	"description" varchar(255),
-	CONSTRAINT "project_name_format_check" CHECK ((name IS NULL) OR (((char_length((name)::text) >= 1) AND (char_length((name)::text) <= 255)) AND ((name)::text ~ '^[A-Za-z0-9 ._/-]+$'::text)))
+	"description" varchar(255)
 );
 --> statement-breakpoint
 CREATE TABLE "recovery" (

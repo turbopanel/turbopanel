@@ -359,6 +359,43 @@ test('POST /projects empty scaffolds Production once with type empty', async () 
   })
 })
 
+test('POST /projects accepts an apostrophe in the display name', async () => {
+  await withProjectFixtures(async ({
+    db,
+    app,
+    secrets,
+    userId,
+    organizationId,
+    workspaceId,
+  }) => {
+    const cookie = await sessionCookie(db, secrets, userId)
+    const res = await app.request('/projects', {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        [ORG_ID_HEADER]: organizationId,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'docker-compose',
+        workspaceId,
+        name: "next's",
+      }),
+    })
+
+    assertEquals(res.status, 200)
+    const body = await res.json() as { ok: boolean; id: string }
+    assertEquals(body.ok, true)
+
+    const [projectRow] = await db
+      .select({ name: project.name })
+      .from(project)
+      .where(eq(project.id, body.id))
+      .limit(1)
+    assertEquals(projectRow?.name, "next's")
+  })
+})
+
 test('POST /projects rejects missing type', async () => {
   await withProjectFixtures(async ({
     db,
