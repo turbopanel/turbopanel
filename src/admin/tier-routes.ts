@@ -367,11 +367,7 @@ export function registerAdminTierRoutes(
     const productError = productPatchError(existing, patch);
     if (productError !== null) return c.json({ error: "tier_invalid", message: productError }, 400);
 
-    const verified = await verifyPatchedProduct(
-      () => gatewayFor(resolved.config),
-      existing,
-      patch,
-    );
+    const verified = await verifyPatchedProduct(() => gatewayFor(resolved.config), existing, patch);
     if (verified && !verified.ok) return c.json(verified.body, 400);
 
     let updated: TierRow | null;
