@@ -513,10 +513,11 @@ export const server = pgTable(
     /**
      * The tier this server is assigned from the organization's purchased
      * quantities — **derived**, never chosen: recomputed by
-     * `src/lib/tiers/assignment-records.ts` whenever seats or hardware
-     * change, and read on every ingest sample for the capability plan.
-     * Null on self-hosted, on a server with no active license, and on a
-     * server nothing purchased covers.
+     * `src/lib/tiers/assignment-records.ts` whenever seats, the self-hosted
+     * grant, or hardware change, and read on every ingest sample for the
+     * capability plan. Null on a server with no active license, and on a
+     * licensed server nothing entitled covers. Self-hosted is entitled by
+     * the SX grant, so the column is populated there too.
      */
     assignedTierId: uuid("assigned_tier_id"),
     isConnected: boolean("is_connected").default(false).notNull(),

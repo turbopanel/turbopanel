@@ -57,7 +57,7 @@ export type ServerLicenseTierJoinRow = {
   serverMetadata: unknown;
   machineClass: unknown;
   licenseId: string | null;
-  /** The derived tier; null when unlicensed, self-hosted, or uncovered. */
+  /** The derived tier; null when unlicensed or uncovered. */
   assignedTierId: string | null;
   tierRank: number | null;
   tierLabel: string | null;
@@ -300,11 +300,13 @@ export async function evaluateHostedEnrollmentTier(
     // Newest: placed after every incumbent.
     boundAt: "9999-12-31T23:59:59.999Z",
   };
+  const quantities = tierQuantitiesFromState(state);
   const assignment = computeAssignment(
-    tierQuantitiesFromState(state),
+    quantities,
     already ? servers : [...servers, candidate],
   );
-  if (assignment.byServer.get(candidate.serverId) === null) {
+  const assigned = assignment.byServer.get(candidate.serverId) ?? null;
+  if (assigned === null) {
     return {
       ok: false,
       error: already ? LICENSE_TIER_BELOW_REQUIRED_ERROR : LICENSE_TIER_UNASSIGNED_ERROR,

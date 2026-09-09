@@ -1,8 +1,8 @@
 /**
  * The derived assignment, persisted: `server.assigned_tier_id` is written
- * only for the rows whose tier moved, a server outside any paying
- * organization is left alone beyond clearing a stale assignment, and the
- * hardware → required rank read treats an unreported box as unknown.
+ * only for the rows whose tier moved. An organization without a payer still
+ * assigns from its self-hosted grant; a server outside any organization is
+ * left alone. Hardware → required rank treats an unreported box as unknown.
  */
 
 import { assertEquals } from '@std/assert'
@@ -18,6 +18,8 @@ import {
   requiredRankFromResources,
   tierQuantitiesFromState,
 } from './assignment-records.ts'
+import { CUSTOM_TIER_LABEL } from './ladder.ts'
+import { SELF_HOSTED_GRANT_VERSION, selfHostedGrantKey } from './self-hosted-grant.ts'
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -34,6 +36,7 @@ const SUB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const S1 = '11111111-1111-4111-8111-111111111111'
 const S3 = '33333333-3333-4333-8333-333333333333'
 const S5 = '55555555-5555-4555-8555-555555555555'
+const SX = '88888888-8888-4888-8888-888888888888'
 const SERVER_A = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const SERVER_B = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 const SERVER_C = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
@@ -57,14 +60,29 @@ function seed(opts: {
   seats?: { tierId: string; quantity: number }[]
   status?: string
   payer?: boolean
+  grantQuantity?: number
   servers?: ReturnType<typeof serverRow>[]
   licenses?: ReturnType<typeof licenseRow>[]
 }) {
+  const sxRow = {
+    ...tierRow(SX, CUSTOM_TIER_LABEL, 8),
+    providerProductId: null,
+    priceCents: null,
+    currency: null,
+    isCustom: true,
+  }
+  const grantRows = opts.grantQuantity
+    ? [{
+      id: 'setting-grant',
+      key: selfHostedGrantKey(ORG),
+      value: { version: SELF_HOSTED_GRANT_VERSION, tierId: SX, quantity: opts.grantQuantity },
+      createdAt: NOW,
+      updatedAt: NOW,
+    }]
+    : []
   return createMemoryDb([
-    [tier, [tierRow(S1, 'S1', 1), tierRow(S3, 'S3', 3), tierRow(S5, 'S5', 5)]],
-    // The self-hosted grant lives in a `setting` row; every entitlement read
-    // looks for one (`src/lib/tiers/self-hosted-grant.ts`).
-    [setting, []],
+    [tier, [tierRow(S1, 'S1', 1), tierRow(S3, 'S3', 3), tierRow(S5, 'S5', 5), sxRow]],
+    [setting, grantRows],
     [payer, opts.payer === false ? [] : [{ id: PAYER, organizationId: ORG, userId: null, provider: 'stripe', providerCustomerId: 'cus_1', taxId: null, createdAt: NOW, updatedAt: NOW }]],
     [subscription, [{ id: SUB, payerId: PAYER, providerSubscriptionId: 'sub_1', status: opts.status ?? 'active', currentPeriodEnd: null, scheduleId: null, graceExpiresAt: null, pastDueSince: null, createdAt: NOW, updatedAt: NOW }]],
     [subscriptionItem, (opts.seats ?? []).map((seat, index) => ({
@@ -185,27 +203,41 @@ test('recomputeAssignmentsForServer recomputes the organization the server belon
   assertEquals(db.rows(server)[0]?.assignedTierId, S3)
 })
 
-test('recomputeAssignmentsForServer is a no-op without a payer, beyond clearing a stale assignment', async () => {
+test('recomputeAssignmentsForServer assigns from the self-hosted grant when there is no payer', async () => {
+  const db = seed({
+    payer: false,
+    grantQuantity: 1,
+    servers: [serverRow(SERVER_A, '2026-09-01T00:00:00.000Z', hardware(12), null)],
+    licenses: [licenseRow('l-a', SERVER_A)],
+  })
+  const result = await recomputeAssignmentsForServer(db, SERVER_A)
+  assertEquals(result?.changed, [SERVER_A])
+  assertEquals(result?.uncovered, [])
+  assertEquals(db.rows(server)[0]?.assignedTierId, SX)
+})
+
+test('recomputeAssignmentsForServer with no payer and no grant leaves a licensed server uncovered', async () => {
   const stale = seed({
     payer: false,
     servers: [serverRow(SERVER_A, '2026-09-01T00:00:00.000Z', hardware(12), S3)],
     licenses: [licenseRow('l-a', SERVER_A)],
   })
-  assertEquals(await recomputeAssignmentsForServer(stale, SERVER_A), null)
+  const cleared = await recomputeAssignmentsForServer(stale, SERVER_A)
+  assertEquals(cleared?.uncovered, [SERVER_A])
   assertEquals(stale.rows(server)[0]?.assignedTierId, null)
   assertEquals(stale.ops.filter((op) => op === 'update:server').length, 1)
-  // Nothing on the billing side was read past the payer lookup.
-  assertEquals(stale.ops.filter((op) => op.startsWith('select:')), ['select:server', 'select:payer'])
 
   const clean = seed({
     payer: false,
     servers: [serverRow(SERVER_A, '2026-09-01T00:00:00.000Z', hardware(12), null)],
     licenses: [licenseRow('l-a', SERVER_A)],
   })
-  assertEquals(await recomputeAssignmentsForServer(clean, SERVER_A), null)
+  const empty = await recomputeAssignmentsForServer(clean, SERVER_A)
+  assertEquals(empty?.changed, [])
+  assertEquals(empty?.uncovered, [SERVER_A])
   assertEquals(clean.ops.filter((op) => op.startsWith('update:')), [])
 
-  // A server outside any organization, or one that does not exist, is left alone without a payer read.
+  // A server outside any organization, or one that does not exist, is left alone.
   const orphan = seed({ servers: [serverRow(SERVER_A, '2026-09-01T00:00:00.000Z', hardware(12), S3, null)] })
   assertEquals(await recomputeAssignmentsForServer(orphan, SERVER_A), null)
   assertEquals(orphan.rows(server)[0]?.assignedTierId, S3)

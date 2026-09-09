@@ -728,12 +728,13 @@ bind order (`created_at`), gives each the smallest purchased tier whose rank
 covers its hardware requirement (`tier-placement`; unknown hardware needs the
 entry rank), and leaves the newest uncovered when nothing fits.
 `assignment-records.ts` writes the column after every seat projection and
-mutation, on every hardware report (`touchServerMetadata`), on enroll, on
-server delete and on license revoke. Ingest, the capability plan, placement
-and the notice sweep read this column; nothing on those paths recomputes.
-Null on self-hosted, on an unlicensed server, and on a licensed server
-nothing purchased covers — the daemon's next session is then refused with
-`License tier below required`.
+mutation, after the self-hosted grant is synced, on every hardware report
+(`touchServerMetadata`), on enroll, on server delete and on license revoke.
+Ingest, the capability plan, placement and the notice sweep read this column;
+nothing on those paths recomputes. Null on an unlicensed server and on a
+licensed server nothing entitled covers — the daemon's next session is then
+refused with `License tier below required`. Self-hosted is entitled by the
+SX grant (`self-hosted-grant.ts`), so the column is populated there too.
 
 **Cell metadata fields** (stored in `server.metadata` and/or `server.options`
 JSONB):

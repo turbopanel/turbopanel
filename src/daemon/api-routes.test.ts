@@ -1699,11 +1699,20 @@ test("a hosted 400 tier refusal does not consume the license so a later retry wi
   );
 });
 
-test("self-hosted enroll accepts a license with nothing bought — self-hosted never joins tiers", async () => {
+test("self-hosted enroll assigns SX and issues a session with nothing bought", async () => {
   await withEnrollFixture(
-    async ({ enrollBody }) => {
-      assertEquals(typeof enrollBody.serverId, "string");
-      assertEquals(enrollBody.serverId.length > 0, true);
+    async (fixture) => {
+      assertEquals(typeof fixture.enrollBody.serverId, "string");
+      assertEquals(fixture.enrollBody.serverId.length > 0, true);
+      const session = await postAuthSession(fixture.app, fixture);
+      assertEquals(session.status, 200);
+      const [row] = await fixture.db
+        .select({ assignedTierId: server.assignedTierId, label: tier.label })
+        .from(server)
+        .leftJoin(tier, eq(tier.id, server.assignedTierId))
+        .where(eq(server.id, fixture.serverId))
+        .limit(1);
+      assertEquals(row?.label, "SX");
     },
     { runtime: "deno", tierRank: null },
   );

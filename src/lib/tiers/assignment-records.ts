@@ -22,7 +22,6 @@
 import { and, eq, inArray, isNull } from 'drizzle-orm'
 import type { Db } from '../../db.ts'
 import {
-  getPayerForOrganization,
   isEndedStatus,
   listSeatsForOrganization,
   type OrganizationBillingState,
@@ -146,28 +145,24 @@ export async function recomputeOrganizationAssignments(
 
 /**
  * Recompute for the organization one server belongs to — the hook the
- * hardware-report and enroll paths call. A server with no organization,
- * or an organization with no payer (self-hosted, or hosted before the
- * first purchase), is a no-op beyond clearing a stale assignment.
+ * hardware-report, enroll, and session paths call. A server with no
+ * organization is a no-op. Self-hosted has no payer; the grant still
+ * supplies quantity (`tierQuantitiesFromState`), so this always runs the
+ * same assignment as the hosted path rather than skipping and leaving
+ * `assigned_tier_id` null (which the session gate treats as a permanent
+ * `License tier below required`).
  */
 export async function recomputeAssignmentsForServer(
   db: Db,
   serverId: string,
 ): Promise<RecomputeAssignmentsResult | null> {
   const [row] = await db
-    .select({ organizationId: server.organizationId, assignedTierId: server.assignedTierId })
+    .select({ organizationId: server.organizationId })
     .from(server)
     .where(eq(server.id, serverId))
     .limit(1)
   if (!row?.organizationId) return null
-  const payer = await getPayerForOrganization(db, row.organizationId)
-  if (!payer) {
-    if (row.assignedTierId !== null) {
-      await db.update(server).set({ assignedTierId: null }).where(eq(server.id, serverId))
-    }
-    return null
-  }
-  return await recomputeOrganizationAssignments(db, row.organizationId)
+  return recomputeOrganizationAssignments(db, row.organizationId)
 }
 
 /** Clear the assignment on servers that no longer hold a license (a revoke or delete path). */
