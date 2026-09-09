@@ -1,11 +1,15 @@
 /**
- * License-tier floor and placement evaluation. Pure ranking plus the shared
- * `server → license → tier` join ingest already used — no HTTP, no priced-
- * offering vocabulary. Callers refuse, nag, or render from the returned ranks.
+ * Tier floor and placement evaluation. Pure ranking plus the shared
+ * `server → license → assigned tier` join ingest already uses — no HTTP,
+ * no priced-offering vocabulary. Callers refuse, nag, or render from the
+ * returned ranks. The tier a server sits on is `server.assigned_tier_id`,
+ * derived from what the organization bought (`assignment-records.ts`);
+ * nothing here chooses it.
  */
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../../db.ts";
 import { license, organization, server, tier } from "../db/schema.ts";
+import { listSeatsForOrganization } from "../db/billing-records.ts";
 import {
   parseServerHardwareProfile,
   parseServerHostResources,
@@ -27,7 +31,9 @@ import {
   type TopologyOverrides,
   type TopologySnapshot,
 } from "../../client/servers/topology-types.ts";
-import { metricsCapabilityTierEntitlementsFromRow } from "./tier-entitlements.ts";
+import { metricsCapabilityTierEntitlementsForRank } from "./tier-entitlements.ts";
+import { computeAssignment } from "./assignment.ts";
+import { loadAssignableServers, tierQuantitiesFromState } from "./assignment-records.ts";
 import {
   resolveRecommendedTier,
   resolveRequiredTier,
@@ -51,24 +57,10 @@ export type ServerLicenseTierJoinRow = {
   serverMetadata: unknown;
   machineClass: unknown;
   licenseId: string | null;
-  licenseTierId: string | null;
-  nicSlots: number | null;
-  driveSlots: number | null;
-  gpuSlots: number | null;
-  filesystemSlots: number | null;
+  /** The derived tier; null when unlicensed, self-hosted, or uncovered. */
+  assignedTierId: string | null;
   tierRank: number | null;
   tierLabel: string | null;
-  tierGeneration: number | null;
-  tierIsCustom: boolean | null;
-};
-
-export type ServerTierBinding = {
-  licenseId: string;
-  tierId: string | null;
-  tierRank: number | null;
-  tierLabel: string | null;
-  generation: number | null;
-  custom: boolean | null;
 };
 
 export type TierFloorEvaluation = {
@@ -119,15 +111,9 @@ const JOIN_COLUMNS = {
   serverMetadata: server.metadata,
   machineClass: server.machineClass,
   licenseId: license.id,
-  licenseTierId: license.tierId,
-  nicSlots: tier.nicSlots,
-  driveSlots: tier.driveSlots,
-  gpuSlots: tier.gpuSlots,
-  filesystemSlots: tier.filesystemSlots,
+  assignedTierId: server.assignedTierId,
   tierRank: tier.rank,
   tierLabel: tier.label,
-  tierGeneration: tier.generation,
-  tierIsCustom: tier.isCustom,
 } as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -241,8 +227,8 @@ function unwatchedNicIds(
 
 /**
  * Identical hosted join ingest uses: `server → organization`, active
- * `license` (`revoked_at IS NULL`), `tier`. One query so ingest and
- * enforcement cannot disagree on the bound entitlement.
+ * `license` (`revoked_at IS NULL`), and the `tier` the server is assigned.
+ * One query so ingest and enforcement cannot disagree on the entitlement.
  */
 export async function loadServerLicenseTierJoin(
   db: Db,
@@ -267,7 +253,7 @@ export async function loadServerLicenseTierJoins(
       license,
       and(eq(license.serverId, server.id), isNull(license.revokedAt)),
     )
-    .leftJoin(tier, eq(tier.id, license.tierId))
+    .leftJoin(tier, eq(tier.id, server.assignedTierId))
     .where(inArray(server.id, [...serverIds]));
 
   for (const row of rows) {
@@ -280,9 +266,14 @@ export async function loadServerLicenseTierJoins(
 }
 
 /**
- * Hosted enroll gate that must run before any durable latch/attach. Looks at
- * the license itself (and the already-bound server, when one exists) so a
- * 400 refusal cannot consume `license.server_id` or replace `server.daemon`.
+ * Hosted enroll gate that must run before any durable latch/attach: would
+ * the organization's purchased tiers still cover every licensed server
+ * once this license binds one more? Hardware is unknown at enroll, so the
+ * newcomer needs the entry rank; the incumbents are placed first
+ * (`computeAssignment`), so the newcomer is the one refused when nothing
+ * is free. Reads the license (and its already-bound server, on a
+ * re-enroll) so a 400 refusal cannot consume `license.server_id` or
+ * replace `server.daemon`.
  */
 export async function evaluateHostedEnrollmentTier(
   db: Db,
@@ -290,47 +281,36 @@ export async function evaluateHostedEnrollmentTier(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const [row] = await db
     .select({
-      licenseTierId: license.tierId,
-      tierRank: tier.rank,
-      serverMetadata: server.metadata,
+      organizationId: license.organizationId,
+      serverId: license.serverId,
     })
     .from(license)
-    .leftJoin(tier, eq(tier.id, license.tierId))
-    .leftJoin(server, eq(server.id, license.serverId))
-    .where(eq(license.id, licenseId))
+    .where(and(eq(license.id, licenseId), isNull(license.revokedAt)))
     .limit(1);
+  if (!row) return { ok: false, error: LICENSE_TIER_UNASSIGNED_ERROR };
 
-  if (!row?.licenseTierId || row.tierRank == null) {
-    return { ok: false, error: LICENSE_TIER_UNASSIGNED_ERROR };
-  }
-
-  const metadata = isRecord(row.serverMetadata)
-    ? row.serverMetadata
+  const state = await listSeatsForOrganization(db, row.organizationId);
+  const servers = await loadAssignableServers(db, row.organizationId);
+  const already = row.serverId
+    ? servers.find((entry) => entry.serverId === row.serverId)
     : undefined;
-  const floor = evaluateTierFloor({
-    resources: parseServerHostResources(metadata?.resources),
-    tierRank: row.tierRank,
-  });
-  if (!floor.satisfied) {
-    return { ok: false, error: LICENSE_TIER_BELOW_REQUIRED_ERROR };
+  const candidate = already ?? {
+    serverId: `enrolling:${licenseId}`,
+    requiredRank: null,
+    // Newest: placed after every incumbent.
+    boundAt: "9999-12-31T23:59:59.999Z",
+  };
+  const assignment = computeAssignment(
+    tierQuantitiesFromState(state),
+    already ? servers : [...servers, candidate],
+  );
+  if (assignment.byServer.get(candidate.serverId) === null) {
+    return {
+      ok: false,
+      error: already ? LICENSE_TIER_BELOW_REQUIRED_ERROR : LICENSE_TIER_UNASSIGNED_ERROR,
+    };
   }
   return { ok: true };
-}
-
-export async function loadServerTierBinding(
-  db: Db,
-  serverId: string,
-): Promise<ServerTierBinding | null> {
-  const row = await loadServerLicenseTierJoin(db, serverId);
-  if (!row?.licenseId) return null;
-  return {
-    licenseId: row.licenseId,
-    tierId: row.licenseTierId,
-    tierRank: row.tierRank,
-    tierLabel: row.tierLabel,
-    generation: row.tierGeneration,
-    custom: row.tierIsCustom,
-  };
 }
 
 /**
@@ -453,13 +433,18 @@ function placementFromJoinRow(
   const orgOptions = orgOptionsOverride ??
     parseOrganizationOptions(row.orgOptions);
   const serverOptions = parseServerOptions(row.serverOptions) ?? undefined;
-  const entitlements = metricsCapabilityTierEntitlementsFromRow({
-    nicSlots: row.nicSlots,
-    driveSlots: row.driveSlots,
-    gpuSlots: row.gpuSlots,
-    filesystemSlots: row.filesystemSlots,
-    rank: row.tierRank,
-  });
+  // Self-hosted has an assigned tier now — the licence grant places every
+  // server on `SX` (`src/lib/tiers/self-hosted-grant.ts`) — but placement is
+  // a *priced* idea and self-hosted buys nothing. Feeding the grant's rung in
+  // here would cap the plan at SX's slot budgets on a deployment that is
+  // uncapped by definition, and would put an "SX" badge on a console that has
+  // no billing area. So the tier is dropped on this path only: the grant
+  // stays what it is, an entitlement the assignment reads.
+  const selfHosted = deployment === "self-hosted";
+  const tierRank = selfHosted ? null : row.tierRank;
+  const entitlements = selfHosted
+    ? undefined
+    : metricsCapabilityTierEntitlementsForRank(row.tierRank);
   const plan = resolveEffectiveMetricsCapabilityPlan(
     machineClass,
     orgOptions,
@@ -471,8 +456,8 @@ function placementFromJoinRow(
     resources,
     topologySnapshot: snapshot,
     plan,
-    tierRank: row.tierRank,
-    licenseLabel: row.tierLabel,
+    tierRank,
+    licenseLabel: selfHosted ? null : row.tierLabel,
     topologyOverrides: topologyOverridesFromMetadata(metadata),
   });
 }

@@ -6,16 +6,18 @@
  * route when `c.get('billingConfig')` is absent — self-hosted has no
  * billing surface at all.
  *
- * Mounted by `registerClientRoutes` on Workers only — self-hosted has no
- * billing. `GET` routes read Postgres only. The mutation routes may call
- * Stripe (they are neither ingest nor page load). The seat and tier
- * mutations are `mutations.ts` — `changeSeats`, `upgradeLicense`,
- * `downgradeLicense` — which the routes call after parsing the body and
- * answer with verbatim; each one wraps the organization's quantity lease in
- * `try/finally` and answers `409 billing_mutation_in_progress` while another
- * holder has it. Every Stripe write goes through `mutateSubscription` with
- * the idempotency key minted on the intent, so a retry replays rather than
- * duplicates. The live harness drives the same three functions.
+ * Mounted by `registerClientRoutes` on Workers only. `GET` routes read
+ * Postgres only. The mutation routes may call the provider (they are
+ * neither ingest nor page load). The quantity mutations are
+ * `mutations.ts` — `changeSeats`, `upgradeTier`, `downgradeTier` — which
+ * the routes call after parsing the body and answer with verbatim; each
+ * one wraps the organization's quantity lease in `try/finally` and answers
+ * `409 billing_mutation_in_progress` while another holder has it. The live
+ * harness drives the same three functions.
+ *
+ * Nothing on this surface names a license or a server: an admin buys and
+ * releases *quantities* per tier, and which server sits where is derived
+ * (`src/lib/tiers/assignment.ts`).
  */
 
 import type { Context, Hono } from 'hono'
@@ -29,6 +31,7 @@ import {
   ensureCustomerForOrganization,
 } from '../../lib/billing/checkout.ts'
 import { seatLinesFromState } from '../../lib/billing/entitlements.ts'
+import { resolveBillingGateway } from '../../lib/billing/gateway.ts'
 import { createPortalSession } from '../../lib/billing/portal.ts'
 import {
   type BillingQuantityLock,
@@ -40,19 +43,19 @@ import {
   previewSubscriptionChange,
   type TierDelta,
 } from '../../lib/billing/subscriptions.ts'
-import { listActiveTiers, resolvePurchasableTier } from '../../lib/db/tier-records.ts'
+import { resolveTierPrice } from '../../lib/billing/tier-prices.ts'
+import { listActiveTiers } from '../../lib/db/tier-records.ts'
 import { resolvePublicBaseUrl } from '../../lib/resolve-public-base-url.ts'
 import type { AuthRouteOpts } from '../authn/http.ts'
 import { createSessionMiddleware } from '../authn/middleware.ts'
 import { assertOrgOwnerOr403 } from '../authz/index.ts'
 import { getOrgId } from '../shared.ts'
 import {
-  activeLicenseTier,
   type BillingMutationDeps,
   type BillingMutationOutcome,
   changeSeats,
-  downgradeLicense,
-  upgradeLicense,
+  downgradeTier,
+  upgradeTier,
 } from './mutations.ts'
 import {
   assertTierChangeAllowed,
@@ -119,30 +122,23 @@ async function readBody(c: Ctx): Promise<Record<string, unknown> | Response> {
 
 /**
  * Turn a request body into per-tier deltas: `{ tierId, delta }` for a
- * quantity change, or `{ licenseId, targetTierId }` for a tier move.
+ * quantity change, or `{ fromTierId, toTierId }` for a tier move.
  */
-async function deltasFromBody(
-  c: Ctx,
-  auth: Authed,
-  body: Record<string, unknown>,
-): Promise<TierDelta[] | Response> {
-  const licenseId = readUuidField(body, 'licenseId')
-  const targetTierId = readUuidField(body, 'targetTierId')
+function deltasFromBody(c: Ctx, body: Record<string, unknown>): TierDelta[] | Response {
+  const fromTierId = readUuidField(body, 'fromTierId')
+  const toTierId = readUuidField(body, 'toTierId')
   const tierId = readUuidField(body, 'tierId')
   const delta = readIntField(body, 'delta')
   if (
-    licenseId === PARSE_UUID_INVALID ||
-    targetTierId === PARSE_UUID_INVALID ||
+    fromTierId === PARSE_UUID_INVALID ||
+    toTierId === PARSE_UUID_INVALID ||
     tierId === PARSE_UUID_INVALID ||
     delta === 'invalid'
   ) {
     return c.json({ error: 'Invalid request' }, 400)
   }
-  if (licenseId && targetTierId) {
-    const active = await activeLicenseTier(auth.db, auth.organizationId, licenseId)
-    if (!active) return c.json({ error: 'Not found' }, 404)
-    if (!active.tierId) return c.json({ error: 'Invalid request' }, 400)
-    return [{ tierId: active.tierId, delta: -1 }, { tierId: targetTierId, delta: 1 }]
+  if (fromTierId && toTierId && fromTierId !== toTierId) {
+    return [{ tierId: fromTierId, delta: -1 }, { tierId: toTierId, delta: 1 }]
   }
   if (tierId && delta !== null && delta !== 0) return [{ tierId, delta }]
   return c.json({ error: 'Invalid request' }, 400)
@@ -159,6 +155,20 @@ async function answer<T extends Record<string, unknown>>(
   } catch (err) {
     return stripeErrorResponse(c, err)
   }
+}
+
+function readTierMove(c: Ctx, body: Record<string, unknown>, withProration: boolean) {
+  const fromTierId = readUuidField(body, 'fromTierId')
+  const toTierId = readUuidField(body, 'toTierId')
+  const prorationDate = withProration ? readIntField(body, 'prorationDate') : null
+  if (
+    fromTierId === PARSE_UUID_INVALID || !fromTierId ||
+    toTierId === PARSE_UUID_INVALID || !toTierId ||
+    prorationDate === 'invalid'
+  ) {
+    return c.json({ error: 'Invalid request' }, 400)
+  }
+  return { fromTierId, toTierId, prorationDate }
 }
 
 export function registerBillingRoutes(
@@ -219,12 +229,14 @@ export function registerBillingRoutes(
     }
     const view = await loadView(auth.db, auth.organizationId, nowMs())
     if (hasLiveSubscription(view)) return c.json({ error: SUBSCRIPTION_EXISTS_ERROR }, 409)
-    const tier = await resolvePurchasableTier(auth.db, tierId)
-    if (!tier.ok) return c.json({ error: TIER_NOT_PURCHASABLE_ERROR, reason: tier.reason }, 400)
 
     return await underLease(c, auth, async () => {
       const client = createClient(auth.config)
       try {
+        const price = await resolveTierPrice(auth.db, resolveBillingGateway(client), tierId)
+        if (!price.ok) {
+          return c.json({ error: TIER_NOT_PURCHASABLE_ERROR, reason: price.reason, failures: price.failures ?? [] }, 400)
+        }
         const { providerCustomerId } = await ensureCustomerForOrganization(auth.db, client, {
           organizationId: auth.organizationId,
           email: auth.userEmail,
@@ -232,7 +244,7 @@ export function registerBillingRoutes(
         const urls = checkoutReturnUrls(await resolvePublicBaseUrl(c, opts), auth.organizationId)
         const session = await createCheckoutSession(client, {
           providerCustomerId,
-          providerPriceId: tier.tier.providerPriceId,
+          providerPriceId: price.providerPriceId,
           quantity,
           successUrl: urls.successUrl,
           cancelUrl: urls.cancelUrl,
@@ -268,27 +280,30 @@ export function registerBillingRoutes(
     if (auth instanceof Response) return auth
     const body = await readBody(c)
     if (body instanceof Response) return body
-    const deltas = await deltasFromBody(c, auth, body)
+    const deltas = deltasFromBody(c, body)
     if (deltas instanceof Response) return deltas
     const view = await loadView(auth.db, auth.organizationId, nowMs())
     const denied = assertTierChangeAllowed(c, view)
     if (denied) return denied
-    const { lines, priceByTier } = seatLinesFromState(view.state)
-    for (const { tierId, delta } of deltas) {
-      if (delta > 0 && !priceByTier.has(tierId)) {
-        const tier = await resolvePurchasableTier(auth.db, tierId)
-        if (!tier.ok) return c.json({ error: TIER_NOT_PURCHASABLE_ERROR, reason: tier.reason }, 400)
-        priceByTier.set(tierId, tier.tier.providerPriceId)
-      }
-    }
-    let items
-    try {
-      items = buildItemMutation(lines, deltas, priceByTier)
-    } catch {
-      return c.json({ error: 'Invalid request' }, 400)
-    }
     const client = createClient(auth.config)
+    const gateway = resolveBillingGateway(client)
+    const { lines, priceByTier } = seatLinesFromState(view.state)
     try {
+      for (const { tierId, delta } of deltas) {
+        if (delta > 0 && !priceByTier.has(tierId)) {
+          const price = await resolveTierPrice(auth.db, gateway, tierId)
+          if (!price.ok) {
+            return c.json({ error: TIER_NOT_PURCHASABLE_ERROR, reason: price.reason, failures: price.failures ?? [] }, 400)
+          }
+          priceByTier.set(tierId, price.providerPriceId)
+        }
+      }
+      let items
+      try {
+        items = buildItemMutation(lines, deltas, priceByTier)
+      } catch {
+        return c.json({ error: 'Invalid request' }, 400)
+      }
       const preview = await previewSubscriptionChange(client, {
         providerSubscriptionId: view.state.subscription!.providerSubscriptionId,
         items,
@@ -339,20 +354,10 @@ export function registerBillingRoutes(
     if (auth instanceof Response) return auth
     const body = await readBody(c)
     if (body instanceof Response) return body
-    const prorationDate = readIntField(body, 'prorationDate')
-    const licenseId = readUuidField(body, 'licenseId')
-    const targetTierId = readUuidField(body, 'targetTierId')
-    if (
-      prorationDate === 'invalid' ||
-      licenseId === PARSE_UUID_INVALID ||
-      !licenseId ||
-      targetTierId === PARSE_UUID_INVALID ||
-      !targetTierId
-    ) {
-      return c.json({ error: 'Invalid request' }, 400)
-    }
+    const move = readTierMove(c, body, true)
+    if (move instanceof Response) return move
     return await answer(c, () =>
-      upgradeLicense(mutationDeps(auth), { organizationId: auth.organizationId, licenseId, targetTierId, prorationDate }))
+      upgradeTier(mutationDeps(auth), { organizationId: auth.organizationId, ...move }))
   })
 
   router.post('/billing/downgrade', async (c) => {
@@ -360,17 +365,9 @@ export function registerBillingRoutes(
     if (auth instanceof Response) return auth
     const body = await readBody(c)
     if (body instanceof Response) return body
-    const licenseId = readUuidField(body, 'licenseId')
-    const targetTierId = readUuidField(body, 'targetTierId')
-    if (
-      licenseId === PARSE_UUID_INVALID ||
-      !licenseId ||
-      targetTierId === PARSE_UUID_INVALID ||
-      !targetTierId
-    ) {
-      return c.json({ error: 'Invalid request' }, 400)
-    }
+    const move = readTierMove(c, body, false)
+    if (move instanceof Response) return move
     return await answer(c, () =>
-      downgradeLicense(mutationDeps(auth), { organizationId: auth.organizationId, licenseId, targetTierId }))
+      downgradeTier(mutationDeps(auth), { organizationId: auth.organizationId, fromTierId: move.fromTierId, toTierId: move.toTierId }))
   })
 }

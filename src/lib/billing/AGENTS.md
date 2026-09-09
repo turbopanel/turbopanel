@@ -8,27 +8,33 @@ is the only way anything arrives.
 ```
 src/lib/billing/
 ├── config.ts             BillingConfig + resolveBillingConfig — the feature gate
+├── gateway.ts            BillingGateway — the provider seam (catalogue: list / get / verify products)
+├── stripe-products.ts    the Stripe gateway: products with their default price, the verification rules
+├── tier-prices.ts        which price a tier bills at, resolved from its product at mutation time
 ├── client.ts             createStripeClient — get / post / del / listAll
 ├── form-encode.ts        Stripe's bracket-syntax form encoding (pure)
 ├── errors.ts             StripeApiError, permanent vs transient
 ├── webhook-signature.ts  Stripe-Signature over raw bytes, tolerance, multi-v1
 ├── customer-subject.ts   customer.metadata → organization or user
 ├── quantity-lock.ts      the per-organization mutation lease
-├── pending-changes.ts    the per-organization intent ledger (a `setting` row)
+├── pending-changes.ts    the per-organization deferred-quantity ledger (a `setting` row)
 ├── subscriptions.ts      the mutation surface — the only module that changes items
 ├── schedules.ts          deferred changes: subscription-schedule phases, `mutateSubscription`
-├── entitlements.ts       ledger → `applySeatEntitlements` → schedule rebuild, under the lease
-├── seat-increase.ts      the in-flight seat raise's idempotency key + params, persisted before Stripe
+├── entitlements.ts       landed intents → derived server assignment → schedule rebuild, under the lease
+├── seat-increase.ts      an immediate change's idempotency key + params, persisted before Stripe
 ├── checkout.ts           first purchase (hosted Checkout) + customer creation
 ├── portal.ts             Customer Portal: invoices and payment methods only
 ├── grace-clock.ts        maintenance phase: cancel what Stripe leaves past due
-├── reconcile.ts          maintenance phase: seats vs licenses, alert only
-├── catalogue.ts          the S1…S7 + SX ladder — the admin form's defaults (pure)
-├── tier-verify.ts        read-only Stripe check gating every hand-entered tier row
+├── reconcile.ts          maintenance phase: purchased vs held vs covered, alert only
 └── test-clock.ts         /v1/test_helpers/test_clocks, for the live harness only
 
-src/client/billing/mutations.ts        changeSeats / upgradeLicense / downgradeLicense — the
-                                       route bodies as functions; the routes and the harness call them
+src/lib/tiers/ladder.ts                the S1…S7 + SX ladder: what a label entitles (the one matrix)
+src/lib/tiers/assignment.ts            the greedy server → tier assignment (pure)
+src/lib/tiers/assignment-records.ts    reads seats + licensed servers, writes `server.assigned_tier_id`
+src/lib/tiers/self-hosted-grant.ts     what a self-hosted organization is entitled to: one SX unit per licence (pure)
+src/lib/tiers/self-hosted-grant-records.ts  the grant's `setting` row + the grow-on-self-hosted / shrink-only rule
+src/client/billing/mutations.ts        changeSeats / upgradeTier / downgradeTier — the route bodies
+                                       as functions; the routes and the harness call them
 scripts/billing-test-clock-harness.ts  C16 — six lifecycle scenarios on test clocks
 ```
 
@@ -41,12 +47,13 @@ ingress copies the former into the latter; nothing copies the other way.
 
 The projection exists because of where entitlement is read. Tier placement,
 license minting, and the **metrics truncation that runs on every sample**
-all need "how many seats at which tier" — a Stripe call there is impossible
-on cost alone, and it would also mean a Stripe outage breaks monitoring.
+all need "how many at which tier" and "which tier is this server on" — a
+Stripe call there is impossible on cost alone, and it would also mean a
+Stripe outage breaks monitoring.
 So: **nothing on the ingest or page-load path may call Stripe.** Reads are
 local rows; Stripe is called only from the webhook's deferred task, from the
-explicit mutation routes (`src/client/billing/`, the license revoke gate), and
-from the grace clock on the maintenance tick. The reconciliation sweep reads
+explicit mutation routes (`src/client/billing/`), the admin catalogue routes,
+and from the grace clock on the maintenance tick. The reconciliation sweep reads
 Postgres only.
 
 ## The switch
@@ -143,18 +150,66 @@ Stripe round trip plus the projection write). Rows are transient — created
 on mutation, deleted on release.
 
 Holders: every `/billing/*` mutation route, the hosted license mint (the
-free-seat read and the insert), the license revoke gate, and the entitlement
-sync the webhook task runs after a projection. A held lease answers
+availability read and the insert), and the entitlement sync the webhook
+task runs after a projection. A held lease answers
 `409 billing_mutation_in_progress` on a route; the webhook task logs and
 skips the sync (the seat rows are still written — they are Stripe's truth) and
 the mutation holder, which runs the same sync before releasing, catches up.
 
+## Who chooses a tier: nobody
+
+An organization owns a **quantity per tier** (the `seat` rows). Each server
+with an active license needs a tier from its hardware (`tier-placement`:
+required = max(core band, RAM band)). Which server gets which tier is
+**derived**, never chosen: `src/lib/tiers/assignment.ts` takes the servers
+in bind order (oldest first), gives each the smallest purchased tier whose
+rank covers its need (unknown hardware needs the entry rank), and leaves
+the newest uncovered when nothing fits. Incumbents are placed before any
+newcomer, so adding hardware can never move a covered server onto nothing.
+`assignment-records.ts` writes the result to `server.assigned_tier_id`
+after every projection and mutation, on every hardware report, on enroll,
+on delete and on revoke; ingest and the capability plan read the column.
+
+A self-hosted organization has no purchased quantity at all; its
+quantity is the grant (see *Billing runs on Workers, not Deno* below), one
+`SX` unit per active license, so the same greedy assignment places every
+self-hosted server on `SX` rather than on nothing.
+
+A license therefore carries no tier. It is minted only inside "Add server"
+(gated on `purchased − releasing − held > 0`), embedded in the install
+command, and revoked when its server is deleted — without touching Stripe.
+An uncovered licensed server is refused at its next `/auth/session` with
+`License tier below required` (byte-identical to the daemon's permanent
+list) and reported by the reconcile sweep.
+
 ## The mutation surface
 
-Seats are bought through Stripe; keys are minted by the operator against a
-free seat. Seat *purchase* and key *minting* are separate acts because a
-license token is shown once at creation, so nothing on a webhook can mint a
-usable key.
+Quantities are bought through Stripe; keys are minted by the console
+against the total. Every mutation is a **quantity** change — nothing names
+a license or a server:
+
+- `changeSeats(tierId, +n)` — immediate, invoiced now.
+- `changeSeats(tierId, −n)` — one `release-seat` intent per unit, a schedule
+  phase at the boundary.
+- `upgradeTier(from, to)` — `−1` at the lower and `+1` at the higher tier,
+  **now** (the item swap under `pending_if_incomplete`).
+- `downgradeTier(from, to)` — the same pair as a `downgrade` intent and a
+  schedule phase at the boundary.
+
+Every reduction and deferred change runs the **coverage gate**
+(`coverageRefusal`): apply the ledger's outstanding deltas and the proposed
+ones to the committed quantities, run the assignment against the licensed
+servers, and refuse `409 servers_uncovered` (naming the server and the tier
+it needs) when one would go uncovered, or `409 licenses_in_use` when the
+organization would hold more licenses than it pays for.
+
+Which price a tier bills at is resolved at mutation time from its product
+(`tier-prices.ts`: `resolveTierPrice` → `product.default_price`, refusing a
+product that no longer verifies, and refreshing the row's cached display
+price). A re-price is therefore "set a new default price in the Dashboard".
+Existing items keep their old price and still map by product; the
+projection stores each item's price on `seat.provider_price_id` because a
+restated `items[]` or schedule phase must name the price the item has.
 
 `subscriptions.ts` is the only module that changes a subscription's items,
 `schedules.ts` the only one that parks a change for later, and
@@ -168,8 +223,7 @@ be paid, Stripe parks the change under `subscription.pending_update` and
 leaves `subscription.items` alone; the projection reads `items` only, so an
 unpaid change never raises entitlement and there is no second gate to keep
 in step. The projection reads `pending_update` for its *presence* alone,
-which stops an upgrade intent being consumed early on the `updated` event
-Stripe sends when it parks the change.
+which holds the deferred-schedule rebuild until the parked change resolves.
 
 **The schedule is the only deferral.** A downgrade or a seat removal is a
 second phase on a subscription schedule starting at `current_period_end`;
@@ -189,8 +243,7 @@ schedule is written with the current phase alone and `end_behavior=cancel`:
 paid-for until the period ends, cancelled there. A release (the first step
 of every immediate change) drops that pending cancellation by default —
 `preserve_cancel_date` is never sent — so buying a seat again before the
-boundary resumes the subscription. Verified against the API reference; the
-live confirmation belongs to the harness.
+boundary resumes the subscription.
 
 **Anchor and mode.** `SUBSCRIPTION_ANCHOR_PARAMS` spells the invariant once:
 flexible billing mode, `billing_cycle_anchor_config` at day 1 / 00:00:00
@@ -200,36 +253,36 @@ first month. Checkout passes the same block under `subscription_data`
 
 ## The pending-change ledger
 
-A Stripe pending update or schedule phase carries no TurboPanel identity —
-"one fewer S3, one more S5", never "server X's seat". So every mutation
-first records an **intent** in `BILLING_PENDING_CHANGES:<organizationId>`
-(`pending-changes.ts`, a `setting` row like the lease — no migration),
-keyed to the exact `license.id` it moves, with the `idempotencyKey` minted
-once and reused on every retry of that Stripe call. `upgrade` intents live
-24 h (one hour past Stripe's 23 h pending-update expiry) and are pruned on
-read; `downgrade` / `release-seat` intents live until the boundary. The
-ledger names its `providerSubscriptionId` so a re-subscribe reads empty.
+A Stripe schedule phase carries no reason: "one fewer S3 next period",
+never why. So every deferred mutation first records an **intent** in
+`BILLING_PENDING_CHANGES:<organizationId>` (`pending-changes.ts`, a
+`setting` row like the lease — no migration, ledger version 2): `kind`
+(`release-seat` / `downgrade`), `fromTierId`, `toTierId`, the
+`idempotencyKey` minted once and reused on every retry of that Stripe
+call, `landsAt` (the `current_period_end` it is parked behind) and
+`fromQuantity` (the tier's quantity when it was written). The ledger names
+its `providerSubscriptionId` so a re-subscribe reads empty; a version-1
+(license-keyed) ledger reads as empty too.
 
-A seat **increase** names no license, so it has no intent in the ledger.
+An intent **lands** when the projected `current_period_end` has rolled past
+`landsAt`, when the tier's quantity has dropped below `fromQuantity`, or
+when the subscription ended (`landedIntents`). `entitlements.ts` drops
+landed intents after every projection and mutation, then recomputes the
+assignment, revokes every license when the subscription ended, and rebuilds
+the schedule when intents remain but no schedule is attached.
+
+An **immediate** change (a seat raise, an upgrade's swap) has no intent.
 Its key lives in `BILLING_SEAT_INCREASE:<organizationId>` instead
-(`seat-increase.ts`, another `setting` row under the lease): `changeSeats`
-writes the key together with the tier, delta, the `items[]` array and the
-proration date **before** calling Stripe, replays exactly those on a retry of
-the same `(tierId, delta)` (never items rebuilt from seat rows a webhook may
+(`seat-increase.ts`, another `setting` row under the lease): the mutation
+writes the key together with the per-tier deltas, the `items[]` array and
+the proration date **before** calling Stripe, replays exactly those on a
+retry of the same deltas (never items rebuilt from seat rows a webhook may
 have moved meanwhile — Stripe answers `idempotency_error` to a reused key
-with different params), and clears the row once the reprojection has landed — or at once on
-a permanent Stripe refusal, which applied nothing. A transient failure after
-Stripe accepted the update (the reprojection refetch timing out, say) keeps
-the row, so the console's retry cannot buy the seats a second time. Records
-expire with Stripe's 24 h key window.
-
-After each projection (and at the end of each mutation route, under the
-same lease) `entitlements.ts` reads the ledger and calls
-`applySeatEntitlements` (`src/lib/db/billing-records.ts`), which moves
-`license.tier_id` **only when the committed seats show the change landed**,
-closes residual gaps with unbound licenses only, and reports a gap only a
-bound license could close as drift. On `pending_update_expired` the upgrade
-intents are dropped and logged; the console offers a retry.
+with different params), and clears the row once the reprojection has
+landed — or at once on a permanent Stripe refusal, which applied nothing. A
+transient failure after Stripe accepted the update keeps the row, so the
+console's retry cannot buy twice. Records expire with Stripe's 24 h key
+window.
 
 ## Grace clock and reconciliation
 
@@ -247,11 +300,13 @@ subscription id: it exists for the live harness, which must never run the
 batch against a shared development database (it would cancel whatever
 other delinquent rows were there), and nothing in the instance calls it.
 
-`reconcile.ts` compares `seat.quantity` to `countActiveLicensesByTier` per
-tier per organization and asserts the quantity never falls below the bound
-subset. **Alert, never auto-correct**: an error-level structured log and the
-last report in `BILLING_RECONCILE_REPORT` for the admin surface. No Stripe
-write, no license write.
+`reconcile.ts` compares, per organization, the purchased total to the
+active licenses (`licenses_exceed_purchased`), runs the assignment and
+reports every licensed server nothing covers (`servers_uncovered`), and
+notes bought-ahead quantity (`purchased_unused`, informational). **Alert,
+never auto-correct**: an error-level structured log and the last report in
+`BILLING_RECONCILE_REPORT` for the admin surface. No Stripe write, no
+license write.
 
 Both run as optional phases of the Workers maintenance cron
 (`src/daemon/cell/offline-sweep.ts`, minute-divisor predicates, each isolated
@@ -270,52 +325,70 @@ directory and fails on either spelling.
 
 ## Tier catalogue (C15)
 
-**Nothing seeds the catalogue.** There is one High-Availability instance
-and fewer than ten plans, and no script should hold the ability to write
-its own catalogue — so the seed script is gone. The owner creates the
-Products and Prices in the Stripe Dashboard by hand, and a superadmin
-types the `tier` rows in under Admin → Tiers.
+**The ladder is code; the row is a binding.** `src/lib/tiers/ladder.ts` is
+the one matrix — for each label, the core / RAM ceilings that place a
+server, the NIC / drive / GPU / filesystem slots the daemon's plan is built
+from, and the list price the Dashboard is expected to carry. A `tier` row
+holds only `label`, the provider `product` it bills against, and a cached
+display price; `rank` and `is_custom` are copied from the ladder on insert
+and never taken from a request. NIC slots top out at the daemon's
+`MAX_NIC_SLOTS` (`ladder.test.ts` pins it).
 
-`catalogue.ts` is what survives of it: the S1…S7 + SX ladder as the
-**defaults the admin form prefills**, so the operator supplies only the one
-field nothing can derive — the Stripe price id. It writes nothing and is
-imported by the form, not by any writer.
+**Nothing seeds the catalogue.** The owner creates the Products (one per
+label, with a default Price) in the Stripe Dashboard, and a superadmin binds
+each label to a product under Admin → Tiers — from a **dropdown**
+(`GET /api/admin/v1/tiers/products`), never by pasting an id. The dropdown
+lists every active product with its default price expanded and an inline
+pass/fail; a product whose `metadata.turbopanel_tier` names a valid label is
+preselected for it.
 
-`tier-verify.ts` is the gate. Saving a row runs one
-`GET /v1/prices/:id?expand[]=product` and refuses on any failure, because a
-wrong price id is **not** loud downstream: the projection logs and skips
-subscription items whose price maps to no tier, so a typo silently loses
-entitlement instead of erroring. Every check is code-dependent — `active`
-and `product.active` (the purchasable gate assumes live), monthly
-`interval` with `interval_count` 1 (schedule phases and the anchor config
-assume it), `billing_scheme = per_unit` (seats are `quantity`; tiered
-pricing breaks the proration maths), `currency` and `unit_amount` matching
-`price_cents` (the UI shows it, the harness compares invoice totals to it),
-and `tax_behavior` not `unspecified` (automatic tax fails against such a
-price without an account default). `livemode`, `product.name`, `nickname`,
-`lookup_key` and `metadata` come back for the operator to eyeball; nothing
-reads them. In particular the lookup key stopped being an idempotency
-handle when the seed died — it is now Dashboard decoration.
+`gateway.ts` is the provider seam the admin routes talk to
+(`BillingGateway`: `listProducts`, `getProduct`, `verifyProduct`);
+`stripe-products.ts` is the Stripe implementation. Checkout, the item
+mutations, the schedule and the projection remain Stripe modules driven by
+`StripeClient` — abstracting them before a second gateway exists would be
+guessing at its shape — and rows carry a `provider` discriminator so a
+second gateway can coexist. Adding one: a second `BillingGateway`, a second
+projection under `src/webhook/billing/`, and routing on `provider` in the
+mutation routes.
 
-Writes go through `insertTier` / `updateTierById` in
-`src/lib/db/tier-records.ts`. The insert is **plain**, not an upsert: the
-seed's converge-on-`(generation, label)` was right for a script that owned
-the catalogue and wrong behind a form, where an operator mistyping a label
-that matches an existing row would silently overwrite that row's
-entitlements. `uniq_tier_generation_label` raises and the route answers
-`409`. Two further indexes close gaps the seed's discipline used to cover:
-`uniq_tier_generation_rank` (rank decides upgrade-versus-downgrade
-direction, so a tie makes it undefined) and a partial
-`uniq_tier_provider_price_id` where not null (the projection's price→tier
-map would otherwise resolve a duplicate to whichever row it saw last).
+**Verification** (`productVerificationFailures`) runs before every write
+and every mutation that resolves a price, and refuses on any failure,
+because a wrong product is **not** loud downstream: the projection logs and
+skips subscription items whose product maps to no tier, so a mistake
+silently loses entitlement instead of erroring. Every check is
+code-dependent — the product and its default price `active` (the
+purchasable gate assumes live), a `default_price` present (every write
+names it), monthly `interval` with `interval_count` 1 (schedule phases and
+the anchor config assume it), `billing_scheme = per_unit` (quantities are
+`quantity`; tiered pricing breaks the proration maths), `currency` usd (the
+ladder is priced in one currency), and a **resolvable tax behaviour**.
+`livemode`, `name` and `metadata` come back for the operator to eyeball.
 
-Rows are **deactivated, never deleted**, and once any license or seat
-references a row only `is_active` and `successor_id` may change — the
-entitlement columns are what that row's history was written in terms of.
+"Resolvable" means the price names `inclusive`/`exclusive` **or** the
+account's Stripe Tax settings carry a default; Stripe documents
+`tax_behavior` as "only required if a default tax behavior was not provided
+in the Stripe Tax settings", and recommends the account default. The
+Dashboard renders that state as *"Use default (no)"* while the API still
+returns `unspecified`, so refusing on the price alone rejects the setup
+Stripe recommends — it did, and that was a bug. `getTaxDefaults()` reads
+`GET /v1/tax/settings`, and `needsAccountTaxDefaults` keeps it to the
+prices that actually need it, so a catalogue of explicit prices costs no
+extra round trip. An account with Tax not set up errors on that endpoint;
+that degrades to "no default", which only makes the gate stricter.
 
-SX is a row with no price and no price id, so it is never purchasable.
-When a negotiated deal exists, sales creates that customer's Price and a
-superadmin sets it on the SX row or on a per-customer custom row.
+The cached display price is written on every verify and refreshed by the
+`product.updated` / `price.updated` webhooks (`refreshTierCatalogue` in the
+projection); nothing does arithmetic on it. Writes go through `insertTier`
+/ `updateTierById` in `src/lib/db/tier-records.ts`. The insert is **plain**,
+not an upsert: `uniq_tier_label` raises and the route answers `409`, and
+`uniq_tier_provider_product` stops two labels billing against one product
+(the projection's product→tier map would otherwise resolve to whichever
+row it saw last).
+
+Rows are **deactivated, never deleted**. SX is a row with no product, so it
+is never purchasable. When a negotiated deal exists, sales creates that
+customer's Product and a superadmin binds it to the SX row.
 
 ## Live harness (C16)
 
@@ -328,10 +401,10 @@ deleted in a `finally`:
 | Scenario                 | Proves                                                                                                                                                                        |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `partial-first-month`    | C2: signup mid-month — day-1 anchor, one prorated first invoice, `active` projection, no latch                                                                                |
-| `mid-cycle-upgrade`      | C4/C6: `upgradeLicense` on a failing card is parked (`pending: true`); seats, ledger and `license.tier_id` are unchanged, a reprojection raises nothing; paying the open proration makes Stripe apply it (`pending_update_applied`), and only then does the projection add the S5 seat, repoint the license and consume the intent |
-| `deferred-downgrade`     | C5/C7: `downgradeLicense` parks S5 → S3 on a schedule; seats and license hold until the boundary, then S3 replaces S5, the ledger consumes the intent, and the renewal bills S3 with no proration invoice |
+| `mid-cycle-upgrade`      | C4/C6: `upgradeTier` on a failing card is parked (`pending: true`); seats and the server's `assigned_tier_id` are unchanged, a reprojection raises nothing; paying the open proration makes Stripe apply it (`pending_update_applied`), and only then does the projection add the S5 seat and the assignment move the server onto it |
+| `deferred-downgrade`     | C5/C7: `downgradeTier` parks S5 → S3 on a schedule; seats and the assignment hold until the boundary, then S3 replaces S5, the intent lands, the server is reassigned S3, and the renewal bills S3 with no proration invoice |
 | `quantity-up-down`       | C3/C5, one scenario: `changeSeats(+2)` is immediate and invoiced (`always_invoice`); `changeSeats(−1)` is a `release-seat` intent on a schedule that lands at the boundary, `current_period_end` rolls, and the renewal bills the reduced quantity at full price |
-| `upgrade-while-past-due` | C8: after a failed renewal `upgradeLicense` and `changeSeats(+1)` answer `409 subscription_past_due` (naming `graceExpiresAt`) with **zero** Stripe writes, no intent, no invoice, lease released; paying the renewal clears both latches and the same upgrade then applies |
+| `upgrade-while-past-due` | C8: after a failed renewal `upgradeTier` and `changeSeats(+1)` answer `409 subscription_past_due` (naming `graceExpiresAt`) with **zero** Stripe writes, no intent, no invoice, lease released; paying the renewal clears both latches and the same upgrade then applies |
 | `dunning-retry-window`   | C13: the failed renewal latches `past_due` + grace; the clock is walked through Smart Retries' window a fortnight at a time with the status delinquent, the latches held and the seat and license intact; `runGraceClockForSubscription` does nothing a millisecond early and at expiry cancels, reprojects to `canceled`, zero seats, license revoked; a second tick is a no-op |
 
 Every seat or tier change is made through `src/client/billing/mutations.ts`
@@ -339,8 +412,9 @@ Every seat or tier change is made through `src/client/billing/mutations.ts`
 routes pass — and then read back through `projectSubscriptionById`, the
 seam the webhook task ends in. Assertions are on the rows production
 reads, never on Stripe's objects. Nothing in the harness writes
-`license.tier_id`, `license.revoked_at` or a ledger row directly; minting a
-license is the one direct write, as setup. The scenario's test clock is
+`server.assigned_tier_id`, `license.revoked_at` or a ledger row directly; minting a
+license and binding it to a `server` row sized for the tier under test are
+the only direct writes, as setup. The scenario's test clock is
 its wall clock — projection `now`, intent timestamps, `prorationDate` and
 the grace clock's `nowMs` all read the frozen time — so a latch written at
 a simulated boundary and a sweep run at a simulated expiry agree.
@@ -392,7 +466,8 @@ records as delivered; `src/surfaces.test.ts` pins the path). Two ways:
    listener): register a **Dashboard endpoint** at
    `https://<host>/webhook/stripe`, pin its API version to
    `DEFAULT_STRIPE_API_VERSION`, subscribe `checkout.session.completed`,
-   `customer.subscription.*`, `invoice.*`, `customer.*`, and put its
+   `customer.subscription.*`, `invoice.*`, `customer.*`, `product.updated`,
+   `price.updated`, and put its
    `whsec_…` in `.stripe_webhook_signing_secret`. Production's shape.
 2. The optional **Stripe CLI** service (`turbopanel-stripe-listen`, off by
    default; Developer → *Optional services…*): `stripe listen
@@ -407,11 +482,11 @@ records as delivered; `src/surfaces.test.ts` pins the path). Two ways:
 **Not available locally:** metrics. The Analytics Engine binding accepts
 writes in local mode and discards them, and reads need the account SQL API
 token, so charts stay empty on a local Workers instance; the offline sweep
-tolerates that (`ae-unavailable` → probe). A daemon whose licence has no
-tier is refused by the hosted gate (`License tier not assigned`) — enter
-tiers and buy a seat in the sandbox first.
+tolerates that (`ae-unavailable` → probe). A daemon whose organization has
+bought nothing is refused by the hosted gate (`License tier not assigned`)
+— bind the tiers under Admin → Tiers and buy in the sandbox first.
 
-## Billing runs on Workers, not Deno
+## Billing runs on Workers, not Deno — but licensing runs on both
 
 Self-hosted TurboPanel is free software: run as much as you like, nothing is
 metered, nothing is billed. So the Deno runtime has **no billing surface and
@@ -431,9 +506,40 @@ grace clock and reconcile run on the Workers cron
 option — `workers.ts` sets the context variable per request in its own
 middleware.
 
-This lines up with the deployment kind: `metricsDeploymentKindForRuntime`
-maps `deno → "self-hosted"` with no override, so ingest is never truncated
-to a plan and tier entitlements are never enforced there.
+This lines up with the deployment kind for **metering**:
+`metricsDeploymentKindForRuntime` maps `deno → "self-hosted"` with no
+override, so ingest is never truncated to a plan there — a self-hosted
+instance stores whatever the daemon reports.
+
+What is *not* Workers-only is the **licensing machinery**. A server is
+licensed, placed and assigned a tier on both runtimes, and the enroll gate
+and the `/auth/session` entitlement check are one code path with no
+`self-hosted` exemption. Self-hosted passes them by being entitled rather
+than by being skipped: `src/lib/tiers/self-hosted-grant.ts` holds one
+granted `SX` unit per active license in a `setting` row
+(`SELF_HOSTED_GRANT:<organizationId>`), and `listSeatsForOrganization`
+returns it on `OrganizationBillingState.grant`.
+
+Read that file for the rules; the two that matter here are:
+
+- **A grant is not a seat.** It is deliberately outside `state.seats`, so
+  `buildItemMutation` and the schedule phases — which restate `items[]`
+  from the seat rows — can never emit one at the provider. It is counted by
+  the entitlement readers only: `tierQuantitiesFromState` (the assignment
+  and every coverage gate) and `summarizeLicenses` (the mint gate). It is
+  absent from `seatQuantitiesByTier`, so `summarizeTiers` never renders it
+  and `serializeSubscriptionSummary` drops `granted` on the way out. The
+  console shows nothing.
+- **Only self-hosted grows one.** `syncSelfHostedGrant` takes `allowGrow`,
+  true only when the deployment is self-hosted. On Workers the grant may
+  fall — a revoked license gives its granted unit back, or the free license
+  it left behind would be mintable again — but never rise. So a control
+  plane moved from Deno to Workers keeps every server it already had
+  connected, and buys through Checkout for the next one.
+
+That asymmetry is what makes the two runtimes interchangeable in
+development without a licence setup step, and it is why
+`recomputeOrganizationAssignments` now runs on both.
 
 What the Deno bundle still *imports* from `src/lib/billing/` is the
 absent-config no-op path in `src/client/authn/license-lifecycle.ts` and the
@@ -462,8 +568,9 @@ done from code.
    it creates, not in the Dashboard; a Dashboard-edited default configuration
    is never used because sessions name their configuration explicitly. What
    the Dashboard still owns in a fresh sandbox: the portal's branding, and
-   *Settings → Tax* (a business address, and a tax behaviour on each Price
-   you create by hand), or the portal shows prices without tax.
+   *Settings → Tax* (a business address, and a **default tax behaviour** —
+   preferred over stamping each Price, and what verification reads when a
+   price says "Use default"), or the portal shows prices without tax.
 4. **Stripe Tax registrations.** Every subscription and Checkout session is
    created with `automatic_tax[enabled]=true`. That collects nothing until
    *Tax → Registrations* holds at least one jurisdiction; before then Stripe

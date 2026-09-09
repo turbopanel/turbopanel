@@ -1,43 +1,48 @@
 /**
- * Tier catalogue reads for billing.
+ * Tier catalogue reads and writes.
  *
- * The only place the `tier` table is read *for billing*: the catalogue
- * endpoint, the purchasable-tier gate on license minting and on every
- * Stripe mutation, the reconciliation sweep and the superadmin admin
+ * A `tier` row is a ladder label bound to a payment-provider product
+ * (`src/lib/tiers/ladder.ts` holds everything the label entitles). The
+ * catalogue endpoint, the purchasable-tier gate on every mutation, the
+ * projection's product→tier map, the assignment and the superadmin admin
  * routes all come through here so they agree on what "active",
- * "purchasable" and "used" mean.
+ * "purchasable" and "referenced" mean.
  *
- * Rows are entered by a superadmin through `/api/admin/v1/tiers` and
- * verified against Stripe before they are written; nothing seeds them.
- * {@link insertTier} and {@link updateTierById} are the only writers
- * outside migrations.
- *
- * Pricing-tier labels never leak into `capability-plan.ts`; the
- * entitlement-column boundary is `tier-entitlements.ts`, and this module
- * sits on the billing side of it.
+ * Rows are chosen from the provider's product list through
+ * `/api/admin/v1/tiers` and verified before they are written; nothing
+ * seeds them. {@link insertTier} and {@link updateTierById} are the only
+ * writers outside migrations. `rank` is copied from the ladder on insert
+ * and never taken from a request.
  *
  * Workers-bundleable: nothing at module load.
  */
 
-import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import type { Db } from '../../db.ts'
-import { license, subscriptionItem, tier } from './schema.ts'
+import type { BillingProviderId } from '../billing/gateway.ts'
+import { type LadderEntry, ladderEntry } from '../tiers/ladder.ts'
+import { license, server, subscriptionItem, tier } from './schema.ts'
 
 export type TierRow = typeof tier.$inferSelect
 
 export type PurchasableTierRefusal = 'not_found' | 'inactive' | 'uncatalogued'
 
 export type ResolvePurchasableTierResult =
-  | { ok: true; tier: TierRow & { providerPriceId: string } }
+  | { ok: true; tier: TierRow & { providerProductId: string } }
   | { ok: false; reason: PurchasableTierRefusal }
 
-/** Active offerings in catalogue order: `(generation, rank)`. */
+/** Every row, active and inactive, in ladder order. */
+export async function listAllTiers(db: Db): Promise<TierRow[]> {
+  return await db.select().from(tier).orderBy(asc(tier.rank))
+}
+
+/** Active offerings in ladder order. */
 export async function listActiveTiers(db: Db): Promise<TierRow[]> {
   return await db
     .select()
     .from(tier)
     .where(eq(tier.isActive, true))
-    .orderBy(asc(tier.generation), asc(tier.rank))
+    .orderBy(asc(tier.rank))
 }
 
 export async function getTierById(db: Db, tierId: string): Promise<TierRow | null> {
@@ -45,63 +50,49 @@ export async function getTierById(db: Db, tierId: string): Promise<TierRow | nul
   return row ?? null
 }
 
-export async function getTierByGenerationLabel(
-  db: Db,
-  generation: number,
-  label: string,
-): Promise<TierRow | null> {
-  const [row] = await db
-    .select()
-    .from(tier)
-    .where(and(eq(tier.generation, generation), eq(tier.label, label)))
-    .limit(1)
+export async function getTierByLabel(db: Db, label: string): Promise<TierRow | null> {
+  const [row] = await db.select().from(tier).where(eq(tier.label, label)).limit(1)
   return row ?? null
 }
 
+/** The ladder entry a row is keyed to; `null` only for a row whose label left the ladder. */
+export function ladderEntryForTier(row: Pick<TierRow, 'label'>): LadderEntry | null {
+  return ladderEntry(row.label) ?? null
+}
+
 export type InsertTierInput = Readonly<{
-  generation: number
   label: string
-  rank: number
+  provider?: BillingProviderId
+  /** Null on a custom / SX row. */
+  providerProductId: string | null
+  /** Display cache of the product's default price. */
   priceCents: number | null
-  providerPriceId: string | null
-  isCustom: boolean
-  isActive: boolean
-  maxCores: number
-  maxMemoryBytes: number
-  nicSlots: number
-  driveSlots: number
-  gpuSlots: number
-  filesystemSlots: number
+  currency: string | null
+  isActive?: boolean
   now?: string
 }>
 
 /**
- * Add one tier row. A **plain insert**, deliberately: the seed script's
- * upsert-on-`(generation, label)` was right for a script that owned the
- * catalogue and converged it, and wrong behind a form — an operator who
- * mistypes a label that happens to match an existing row would silently
- * overwrite that row's entitlements instead of being told the label is
- * taken. The `uniq_tier_generation_label` index raises here; the route
- * turns that into a `409`.
+ * Add one tier row. `rank` and `isCustom` come from the ladder — a label
+ * the ladder does not know is refused here, before anything is written.
+ * A **plain insert**: `uniq_tier_label` raises on a second row for the
+ * same label, and the route turns that into a `409`.
  */
 export async function insertTier(db: Db, input: InsertTierInput): Promise<TierRow> {
+  const entry = ladderEntry(input.label)
+  if (!entry) throw new RangeError(`tier label ${input.label} is not on the ladder`)
   const now = input.now ?? new Date().toISOString()
   const [row] = await db
     .insert(tier)
     .values({
-      generation: input.generation,
-      label: input.label,
-      rank: input.rank,
+      label: entry.label,
+      rank: entry.rank,
+      provider: input.provider ?? 'stripe',
+      providerProductId: input.providerProductId,
       priceCents: input.priceCents,
-      providerPriceId: input.providerPriceId,
-      isCustom: input.isCustom,
-      isActive: input.isActive,
-      maxCores: input.maxCores,
-      maxMemoryBytes: input.maxMemoryBytes,
-      nicSlots: input.nicSlots,
-      driveSlots: input.driveSlots,
-      gpuSlots: input.gpuSlots,
-      filesystemSlots: input.filesystemSlots,
+      currency: input.currency,
+      isCustom: entry.isCustom,
+      isActive: input.isActive ?? true,
       createdAt: now,
       updatedAt: now,
     })
@@ -111,38 +102,18 @@ export async function insertTier(db: Db, input: InsertTierInput): Promise<TierRo
 }
 
 /**
- * The columns a superadmin may change on an existing row. `generation` and
- * `label` are identity, not data: a re-label or a re-generation is a new
- * row, which is what keeps `(generation, label)` meaningful as the natural
- * key. Every field is optional; `undefined` leaves the column alone, while
- * `null` on a nullable column clears it.
+ * The columns a superadmin (or the price webhook) may change on an
+ * existing row. `label`, `rank` and `is_custom` are identity: a re-label
+ * is a new row. `undefined` leaves a column alone; `null` clears it.
  */
 export type UpdateTierPatch = Readonly<{
-  rank?: number
+  providerProductId?: string | null
   priceCents?: number | null
-  providerPriceId?: string | null
-  isCustom?: boolean
+  currency?: string | null
   isActive?: boolean
-  successorId?: string | null
-  maxCores?: number
-  maxMemoryBytes?: number
-  nicSlots?: number
-  driveSlots?: number
-  gpuSlots?: number
-  filesystemSlots?: number
 }>
 
-/** The subset accepted once any license or seat points at the row. */
-export const REFERENCED_TIER_PATCH_COLUMNS = ['isActive', 'successorId'] as const satisfies
-  readonly (keyof UpdateTierPatch)[]
-
-/**
- * Apply a patch to one row. Returns `null` when no such row exists, so the
- * caller answers `404` without a second read. Enforcing *which* columns are
- * allowed is the route's job — it needs {@link countTierReferences} to
- * decide, and wants to answer `409` with the counts rather than silently
- * dropping fields here.
- */
+/** Returns `null` when no such row exists, so the caller answers `404` without a second read. */
 export async function updateTierById(
   db: Db,
   tierId: string,
@@ -158,32 +129,29 @@ export async function updateTierById(
 }
 
 export type TierReferenceCounts = {
-  /** Licenses pointing at this tier, **revoked ones included**. */
-  licenses: number
   /** Projected seat rows pointing at this tier. */
   seats: number
+  /** Servers currently assigned this tier. */
+  servers: number
 }
 
 /**
- * How many rows depend on this tier. Revoked licenses count: the FK is
- * `on delete restrict` and a revoked row still holds the tier's
- * entitlements in its history, so changing what "S3" means underneath it
- * would rewrite the past. This is deliberately *not*
- * {@link countActiveLicensesByTier}, which excludes revoked licenses
- * because it answers a different question — how many seats are in use.
+ * How many rows depend on this tier — what the admin surface shows beside
+ * "retire", and what makes a product change on a referenced row a
+ * deliberate act rather than a typo.
  */
 export async function countTierReferences(db: Db, tierId: string): Promise<TierReferenceCounts> {
-  const [licenses] = await db
-    .select({ total: sql<number>`count(*)::int` })
-    .from(license)
-    .where(eq(license.tierId, tierId))
   const [seats] = await db
     .select({ total: sql<number>`count(*)::int` })
     .from(subscriptionItem)
     .where(eq(subscriptionItem.tierId, tierId))
+  const [servers] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(server)
+    .where(eq(server.assignedTierId, tierId))
   return {
-    licenses: Number(licenses?.total ?? 0),
     seats: Number(seats?.total ?? 0),
+    servers: Number(servers?.total ?? 0),
   }
 }
 
@@ -197,12 +165,34 @@ export async function getTiersByIds(db: Db, ids: readonly string[]): Promise<Map
 }
 
 /**
+ * `provider_product_id` → `tier.id` for the products named, on one
+ * provider. Unknown products are absent — the projection logs and skips
+ * them rather than inserting a seat with no tier.
+ */
+export async function mapProviderProductsToTierIds(
+  db: Db,
+  provider: BillingProviderId,
+  providerProductIds: readonly string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const unique = [...new Set(providerProductIds)].filter((id) => id.length > 0)
+  if (unique.length === 0) return out
+  const rows = await db
+    .select({ id: tier.id, providerProductId: tier.providerProductId })
+    .from(tier)
+    .where(and(eq(tier.provider, provider), inArray(tier.providerProductId, unique)))
+  for (const row of rows) {
+    if (row.providerProductId) out.set(row.providerProductId, row.id)
+  }
+  return out
+}
+
+/**
  * A tier that may be *bought*: active and catalogued on the provider.
  *
- * A grandfathered (`is_active = false`) row may still be held by existing
- * licenses and seats, but never bought into; a row with no
- * `provider_price_id` is not on the provider's catalogue and no mutation
- * can name it.
+ * A retired (`is_active = false`) row may still be held by existing seats
+ * and assignments, but never bought into; a row with no product is not on
+ * the provider's catalogue and no mutation can name it.
  */
 export async function resolvePurchasableTier(
   db: Db,
@@ -211,47 +201,29 @@ export async function resolvePurchasableTier(
   const row = await getTierById(db, tierId)
   if (!row) return { ok: false, reason: 'not_found' }
   if (!row.isActive) return { ok: false, reason: 'inactive' }
-  const providerPriceId = row.providerPriceId?.trim() ?? ''
-  if (providerPriceId.length === 0) return { ok: false, reason: 'uncatalogued' }
-  return { ok: true, tier: { ...row, providerPriceId } }
+  const providerProductId = row.providerProductId?.trim() ?? ''
+  if (providerProductId.length === 0) return { ok: false, reason: 'uncatalogued' }
+  return { ok: true, tier: { ...row, providerProductId } }
 }
 
-export type TierLicenseCount = {
-  /** Active (`revoked_at IS NULL`) licenses at this tier. */
+export type LicenseCount = {
+  /** Active (`revoked_at IS NULL`) licenses, bound or not. */
   active: number
   /** The subset already bound to a server (`server_id IS NOT NULL`). */
   bound: number
 }
 
 /**
- * Active license counts per tier for one organization — one half of the
- * C12 invariant (`seat.quantity >= bound`) and the free-seat check on
- * minting. Both readers must come through here so they cannot disagree.
- * Licenses with no tier (self-hosted, unassigned) are not returned.
+ * Active license counts for one organization — the "licenses held" side
+ * of the mint gate (`active < purchased`) and of the reconcile report.
  */
-export async function countActiveLicensesByTier(
-  db: Db,
-  organizationId: string,
-): Promise<Map<string, TierLicenseCount>> {
-  const rows = await db
+export async function countActiveLicenses(db: Db, organizationId: string): Promise<LicenseCount> {
+  const [row] = await db
     .select({
-      tierId: license.tierId,
       active: sql<number>`count(*)::int`,
       bound: sql<number>`count(${license.serverId})::int`,
     })
     .from(license)
-    .where(
-      and(
-        eq(license.organizationId, organizationId),
-        isNull(license.revokedAt),
-        isNotNull(license.tierId),
-      ),
-    )
-    .groupBy(license.tierId)
-  const out = new Map<string, TierLicenseCount>()
-  for (const row of rows) {
-    if (!row.tierId) continue
-    out.set(row.tierId, { active: Number(row.active), bound: Number(row.bound) })
-  }
-  return out
+    .where(and(eq(license.organizationId, organizationId), isNull(license.revokedAt)))
+  return { active: Number(row?.active ?? 0), bound: Number(row?.bound ?? 0) }
 }

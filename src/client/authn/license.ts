@@ -33,13 +33,13 @@ export async function verifyLicenseToken(
 }
 
 /**
- * Mint one registration key. `tierId` binds the seat to a hosted billing
- * tier and is billing-managed there (`src/lib/db/AGENTS.md`); self-hosted
- * keeps it `null`.
+ * Mint one registration key. A license carries no tier: which purchased
+ * tier the server it binds ends up on is derived
+ * (`src/lib/tiers/assignment.ts`).
  */
 export async function createLicense(
   db: Db,
-  opts: { organizationId: string; name?: string; tierId?: string | null },
+  opts: { organizationId: string; name?: string },
 ): Promise<{ licenseId: string; licenseToken: string }> {
   const { plaintext, hashed } = await generateLicenseToken()
   const now = nowTs()
@@ -49,7 +49,6 @@ export async function createLicense(
     .values({
       organizationId: opts.organizationId,
       name: opts.name ?? null,
-      tierId: opts.tierId ?? null,
       token: hashed,
       createdAt: now,
       updatedAt: now,
@@ -106,14 +105,9 @@ export async function disconnectServersBoundToLicense(
 
 export type LicenseAttachment =
   | { ok: false; reason: 'not_found' }
-  | { ok: true; tierId: string | null; boundServer: { id: string; name: string | null } | null }
+  | { ok: true; boundServer: { id: string; name: string | null } | null }
 
-/**
- * What `invalidateLicense` would see, without revoking anything: the
- * license's tier and its bound server. The billing gate runs between this
- * read and the revoke, so a refused (attached) revoke never leaves a
- * `release-seat` intent behind.
- */
+/** What `invalidateLicense` would see, without revoking anything: the bound server. */
 export async function inspectLicenseAttachment(
   db: Db,
   licenseId: string,
@@ -121,7 +115,6 @@ export async function inspectLicenseAttachment(
 ): Promise<LicenseAttachment> {
   const rows = await db
     .select({
-      tierId: license.tierId,
       serverId: license.serverId,
       boundId: server.id,
       boundName: server.name,
@@ -139,7 +132,6 @@ export async function inspectLicenseAttachment(
   const boundId = row.boundId ?? row.serverId
   return {
     ok: true,
-    tierId: row.tierId,
     boundServer: boundId ? { id: boundId, name: row.boundName ?? null } : null,
   }
 }

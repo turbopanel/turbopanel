@@ -14,18 +14,27 @@
  * from the provider before calling in here, so every write is from current
  * state rather than from a possibly stale replay.
  *
- * `provider_price_id` on `tier` is the bridge from a provider price to a
- * `tier_id`. An item whose price maps to no tier is **logged and skipped**,
- * never inserted with a null tier: the reconciliation invariant compares
- * seats to licenses per tier, and a null would silently break it.
+ * `provider_product_id` on `tier` is the bridge from a provider item to a
+ * `tier_id` — an item names a price, a price names its product, and the
+ * product names the tier. An item whose product maps to no tier is
+ * **logged and skipped**, never inserted with a null tier: the assignment
+ * and the reconcile report are per tier, and a null would silently break
+ * them. Two items on one product (a re-price plus a hand edit) are summed
+ * into one seat row under the first item's id.
  */
 
 import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm'
+import type { BillingProviderId } from '../billing/gateway.ts'
 import type { Db } from '../../db.ts'
 import { logWarn } from '../../logger.ts'
 import type { PayerSubject } from '../billing/customer-subject.ts'
-import { license, payer, subscription, subscriptionItem, tier } from './schema.ts'
-import { countActiveLicensesByTier, getTiersByIds } from './tier-records.ts'
+import { license, payer, setting, subscription, subscriptionItem, tier } from './schema.ts'
+import { mapProviderProductsToTierIds } from './tier-records.ts'
+import {
+  parseSelfHostedGrant,
+  type SelfHostedGrant,
+  selfHostedGrantKey,
+} from '../tiers/self-hosted-grant.ts'
 
 /**
  * The handle inside `db.transaction(async (tx) => …)`. The projection
@@ -38,8 +47,8 @@ export type BillingDbTx = Parameters<Parameters<Db['transaction']>[0]>[0]
 
 export type BillingWriteDb = Db | BillingDbTx
 
-/** Matches `payer_provider_check`. */
-export type BillingProvider = 'stripe' | 'apple'
+/** Matches `payer_provider_check` and `tier_provider_check`. */
+export type BillingProvider = BillingProviderId
 
 /**
  * Provider statuses this projection acts on. Anything else is stored
@@ -204,32 +213,16 @@ export async function upsertSubscriptionFromProvider(
 export type ProviderSubscriptionItem = Readonly<{
   providerItemId: string
   providerPriceId: string
+  /** The price's product — what maps to a tier. */
+  providerProductId: string
   quantity: number
 }>
 
 export type ReplaceSubscriptionItemsResult = {
   /** Rows written (inserted or updated). */
   written: number
-  /** Provider item ids skipped because their price maps to no tier. */
+  /** Provider item ids skipped because their product maps to no tier, or folded into another item on the same tier. */
   skipped: string[]
-}
-
-/** `provider_price_id` → `tier.id` for the prices named. Unknown prices are absent. */
-export async function mapProviderPricesToTierIds(
-  db: BillingWriteDb,
-  providerPriceIds: readonly string[],
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>()
-  const unique = [...new Set(providerPriceIds)].filter((id) => id.length > 0)
-  if (unique.length === 0) return out
-  const rows = await db
-    .select({ id: tier.id, providerPriceId: tier.providerPriceId })
-    .from(tier)
-    .where(inArray(tier.providerPriceId, unique))
-  for (const row of rows) {
-    if (row.providerPriceId) out.set(row.providerPriceId, row.id)
-  }
-  return out
 }
 
 /**
@@ -241,44 +234,46 @@ export async function mapProviderPricesToTierIds(
  * `(subscription_id, tier_id)` — and Stripe's ordinary "replace item" flow
  * (a proration or plan swap deletes `si_1` and adds `si_2` at the same
  * price) trips the second one if the new row is written while the old one
- * still exists. An upsert-then-prune would throw there, and because the
- * ledger claim is already taken the retry would `204`. Clearing the
- * subscription's rows first makes every shape of item change — replace,
- * swap, remove — a plain insert. `created_at` restarts on each projection,
- * which nothing reads.
+ * still exists. Clearing the subscription's rows first makes every shape
+ * of item change — replace, swap, remove — a plain insert.
  *
- * The delete and the inserts are **not** atomic on their own: an insert that
- * fails halfway would leave the subscription with fewer seats than the
- * provider counts, and every entitlement read would act on that. The
- * projection therefore calls this inside `db.transaction` (with the payer
- * and subscription upserts) so a mid-update error rolls the delete back too.
+ * Items are mapped to tiers by **product**. Two items whose products map
+ * to the same tier (one price retired, one live) are summed into one row
+ * under the first item's id, with a warning: the quantity is what
+ * entitlement reads, and a throw here would be a silent entitlement outage
+ * inside the webhook task.
+ *
+ * The delete and the inserts are **not** atomic on their own; the
+ * projection calls this inside `db.transaction` so a mid-update error
+ * rolls the delete back too.
  */
 export async function replaceSubscriptionItems(
   db: BillingWriteDb,
   subscriptionId: string,
   items: readonly ProviderSubscriptionItem[],
-  opts: { now?: string; logScope?: string } = {},
+  opts: { now?: string; logScope?: string; provider?: BillingProvider } = {},
 ): Promise<ReplaceSubscriptionItemsResult> {
   const now = opts.now ?? new Date().toISOString()
   const logScope = opts.logScope ?? 'billing-records'
-  const tierByPrice = await mapProviderPricesToTierIds(
-    db,
-    items.map((item) => item.providerPriceId),
+  const tierByProduct = await mapProviderProductsToTierIds(
+    db as Db,
+    opts.provider ?? 'stripe',
+    items.map((item) => item.providerProductId),
   )
 
   // Prune first — see the doc comment. Everything on this subscription goes,
   // including rows for items that are about to be skipped as unmappable.
   await db.delete(subscriptionItem).where(eq(subscriptionItem.subscriptionId, subscriptionId))
 
-  const kept: string[] = []
   const skipped: string[] = []
+  const byTier = new Map<string, { providerItemId: string; providerPriceId: string; quantity: number }>()
   for (const item of items) {
-    const tierId = tierByPrice.get(item.providerPriceId)
+    const tierId = tierByProduct.get(item.providerProductId)
     if (!tierId) {
-      // Never a null tier: the reconciliation invariant is per tier.
+      // Never a null tier: the assignment is per tier.
       logWarn(
         logScope,
-        `subscription item ${item.providerItemId} names price ${item.providerPriceId}, which maps to no tier; skipped`,
+        `subscription item ${item.providerItemId} names product ${item.providerProductId}, which maps to no tier; skipped`,
       )
       skipped.push(item.providerItemId)
       continue
@@ -288,6 +283,20 @@ export async function replaceSubscriptionItems(
       skipped.push(item.providerItemId)
       continue
     }
+    const existing = byTier.get(tierId)
+    if (existing) {
+      logWarn(
+        logScope,
+        `subscription item ${item.providerItemId} maps to the same tier as ${existing.providerItemId}; quantities summed under the first`,
+      )
+      existing.quantity += item.quantity
+      skipped.push(item.providerItemId)
+      continue
+    }
+    byTier.set(tierId, { providerItemId: item.providerItemId, providerPriceId: item.providerPriceId, quantity: item.quantity })
+  }
+
+  for (const [tierId, line] of byTier) {
     // The `provider_item_id` conflict target is belt-and-braces: item ids are
     // globally unique on the provider side, so it can only fire if an id was
     // somehow projected under a different subscription — re-home it.
@@ -296,19 +305,19 @@ export async function replaceSubscriptionItems(
       .values({
         subscriptionId,
         tierId,
-        providerItemId: item.providerItemId,
-        quantity: item.quantity,
+        providerItemId: line.providerItemId,
+        providerPriceId: line.providerPriceId,
+        quantity: line.quantity,
         createdAt: now,
         updatedAt: now,
       })
       .onConflictDoUpdate({
         target: subscriptionItem.providerItemId,
-        set: { subscriptionId, tierId, quantity: item.quantity, updatedAt: now },
+        set: { subscriptionId, tierId, providerPriceId: line.providerPriceId, quantity: line.quantity, updatedAt: now },
       })
-    kept.push(item.providerItemId)
   }
 
-  return { written: kept.length, skipped }
+  return { written: byTier.size, skipped }
 }
 
 export async function getPayerForOrganization(
@@ -354,13 +363,15 @@ export type OrganizationSeat = Readonly<{
   seatId: string
   tierId: string
   providerItemId: string
+  /** The item's own price; `null` only on a row projected before the column existed. */
+  providerPriceId: string | null
   quantity: number
   tier: Readonly<{
     label: string
-    generation: number
     rank: number
     priceCents: number | null
-    providerPriceId: string | null
+    currency: string | null
+    providerProductId: string | null
     isActive: boolean
   }>
 }>
@@ -369,6 +380,15 @@ export type OrganizationBillingState = Readonly<{
   payer: PayerRow | null
   subscription: SubscriptionRow | null
   seats: readonly OrganizationSeat[]
+  /**
+   * The self-hosted grant, when this organization holds one
+   * (`src/lib/tiers/self-hosted-grant.ts`). It is an entitlement, not a
+   * purchase: it is deliberately **not** a member of `seats`, so nothing
+   * that restates a provider `items[]` array can ever emit it, and it is
+   * counted only by the entitlement readers — `tierQuantitiesFromState`
+   * and the license summary.
+   */
+  grant: SelfHostedGrant | null
 }>
 
 /**
@@ -380,21 +400,28 @@ export async function listSeatsForOrganization(
   db: Db,
   organizationId: string,
 ): Promise<OrganizationBillingState> {
-  const payerRow = await getPayerForOrganization(db, organizationId)
-  if (!payerRow) return { payer: null, subscription: null, seats: [] }
+  // The grant is read alongside the payer, not instead of it: a self-hosted
+  // organization has a grant and no payer, and an instance moved to the
+  // hosted runtime holds both until the grant has been spent down.
+  const [payerRow, grant] = await Promise.all([
+    getPayerForOrganization(db, organizationId),
+    readGrantForOrganization(db, organizationId),
+  ])
+  if (!payerRow) return { payer: null, subscription: null, seats: [], grant }
   const subscriptionRow = await getSubscriptionForPayer(db, payerRow.id)
-  if (!subscriptionRow) return { payer: payerRow, subscription: null, seats: [] }
+  if (!subscriptionRow) return { payer: payerRow, subscription: null, seats: [], grant }
   const rows = await db
     .select({
       seatId: subscriptionItem.id,
       tierId: subscriptionItem.tierId,
       providerItemId: subscriptionItem.providerItemId,
+      providerPriceId: subscriptionItem.providerPriceId,
       quantity: subscriptionItem.quantity,
       label: tier.label,
-      generation: tier.generation,
       rank: tier.rank,
       priceCents: tier.priceCents,
-      providerPriceId: tier.providerPriceId,
+      currency: tier.currency,
+      providerProductId: tier.providerProductId,
       isActive: tier.isActive,
     })
     .from(subscriptionItem)
@@ -404,21 +431,47 @@ export async function listSeatsForOrganization(
     seatId: row.seatId,
     tierId: row.tierId,
     providerItemId: row.providerItemId,
+    providerPriceId: row.providerPriceId,
     quantity: row.quantity,
     tier: {
       label: row.label,
-      generation: row.generation,
       rank: row.rank,
       priceCents: row.priceCents,
-      providerPriceId: row.providerPriceId,
+      currency: row.currency,
+      providerProductId: row.providerProductId,
       isActive: row.isActive,
     },
   }))
-  seats.sort((a, b) => a.tier.generation - b.tier.generation || a.tier.rank - b.tier.rank)
-  return { payer: payerRow, subscription: subscriptionRow, seats }
+  seats.sort((a, b) => a.tier.rank - b.tier.rank)
+  return { payer: payerRow, subscription: subscriptionRow, seats, grant }
 }
 
-/** Committed seats per tier; every tier reads as zero once the subscription ended. */
+/**
+ * The self-hosted grant row for one organization. Read here rather than in
+ * `src/lib/tiers/self-hosted-grant-records.ts` so `OrganizationBillingState`
+ * is complete wherever it is loaded, and so this module keeps its own
+ * dependency direction (the tier tree reads billing, not the reverse).
+ */
+async function readGrantForOrganization(
+  db: Db,
+  organizationId: string,
+): Promise<SelfHostedGrant | null> {
+  const [row] = await db
+    .select({ value: setting.value })
+    .from(setting)
+    .where(eq(setting.key, selfHostedGrantKey(organizationId)))
+    .limit(1)
+  return row ? parseSelfHostedGrant(row.value) : null
+}
+
+/**
+ * Committed **provider** seats per tier; every tier reads as zero once the
+ * subscription ended. The self-hosted grant is deliberately absent: this is
+ * what a mutation restates to the provider (`fromQuantity`) and what the
+ * per-tier billing table renders, and neither may name a granted unit. The
+ * entitlement total that does include the grant is
+ * `tierQuantitiesFromState` in `src/lib/tiers/assignment-records.ts`.
+ */
 export function seatQuantitiesByTier(state: OrganizationBillingState): Map<string, number> {
   const out = new Map<string, number>()
   const ended = !state.subscription || isEndedStatus(state.subscription.status)
@@ -428,208 +481,43 @@ export function seatQuantitiesByTier(state: OrganizationBillingState): Map<strin
   return out
 }
 
-/** The subset of a ledger intent `applySeatEntitlements` needs. */
-export type EntitlementIntent = Readonly<{
-  id: string
-  kind: 'upgrade' | 'downgrade' | 'release-seat'
-  licenseId: string | null
-  fromTierId: string
-  toTierId: string | null
+export type RevokedLicenses = Readonly<{
+  licenseIds: string[]
+  /** Servers whose bound license was revoked. */
+  serverIds: string[]
 }>
-
-export type SeatEntitlementDrift = Readonly<{
-  tierId: string
-  seats: number
-  active: number
-  bound: number
-  /** Licenses over the seat count that only a bound license could close. */
-  excess: number
-}>
-
-export type ApplySeatEntitlementsResult = Readonly<{
-  consumedIntentIds: string[]
-  repointed: { licenseId: string; fromTierId: string; toTierId: string }[]
-  revokedLicenseIds: string[]
-  /** Servers whose bound license was revoked (subscription ended only). */
-  disconnectedServerIds: string[]
-  drift: SeatEntitlementDrift[]
-}>
-
-export type ApplySeatEntitlementsOpts = Readonly<{
-  /** The refetched subscription carries a `pending_update`: never consume an upgrade. */
-  pendingUpdate?: boolean
-  /** Already-loaded state, to skip the second read. */
-  state?: OrganizationBillingState
-  now?: string
-  /** Called for each server whose bound license is revoked on cancellation. */
-  onRevokeBound?: (serverId: string) => Promise<void>
-}>
-
-type ActiveLicense = { id: string; tierId: string; serverId: string | null }
 
 /**
- * The one place `license.tier_id` moves in response to billing.
- *
- *  1. Each recorded intent is applied **by id**, and only once the
- *     committed seats show its change landed: an upgrade or downgrade
- *     repoints that exact license when the target tier has room (and, for
- *     a downgrade, the source tier is now short); a `release-seat` is
- *     consumed when the source tier's quantity has dropped below the
- *     licenses still counting against it. A change Stripe parked as
- *     pending, or a replayed `updated` from before the change, changes
- *     nothing — that is what makes this idempotent across deliveries.
- *  2. Any residual gap between seats and active licenses is closed with
- *     **unbound** licenses only (`server_id IS NULL`): repointed **down** to
- *     an equal-or-lower tier with a free seat when one exists, revoked
- *     otherwise. Never up — a spare seat at a higher tier is not a reason
- *     to hand out its entitlements.
- *  3. A gap that only a **bound** license could close is never touched. It
- *     is returned as drift for the reconciliation sweep to alert on; the
- *     daily nag and the enroll floor already show the operator the
- *     consequence.
- *  4. A subscription that ended (seats → 0) is the one case that revokes
- *     bound licenses too, through `onRevokeBound` — the detach-first guard
- *     protects an operator from an accident, and an ended subscription is
- *     not an accident.
+ * The one case billing revokes licenses: the subscription **ended**
+ * (cancelled, or the grace clock ran out). Every active license goes,
+ * bound ones included — the detach-first guard on the revoke route
+ * protects an operator from an accident, and an ended subscription is not
+ * an accident. `onRevokeBound` runs per bound server so the caller can
+ * revoke its daemon key.
  */
-export async function applySeatEntitlements(
+export async function revokeAllLicensesForOrganization(
   db: Db,
   organizationId: string,
-  intents: readonly EntitlementIntent[],
-  opts: ApplySeatEntitlementsOpts = {},
-): Promise<ApplySeatEntitlementsResult> {
+  opts: { now?: string; onRevokeBound?: (serverId: string) => Promise<void> } = {},
+): Promise<RevokedLicenses> {
   const now = opts.now ?? new Date().toISOString()
-  const state = opts.state ?? await listSeatsForOrganization(db, organizationId)
-  const result: {
-    consumedIntentIds: string[]
-    repointed: { licenseId: string; fromTierId: string; toTierId: string }[]
-    revokedLicenseIds: string[]
-    disconnectedServerIds: string[]
-    drift: SeatEntitlementDrift[]
-  } = { consumedIntentIds: [], repointed: [], revokedLicenseIds: [], disconnectedServerIds: [], drift: [] }
-  // No subscription was ever projected: nothing to compare against.
-  if (!state.subscription) return result
-
-  const ended = isEndedStatus(state.subscription.status)
-  const seats = seatQuantitiesByTier(state)
-  const counts = await countActiveLicensesByTier(db, organizationId)
-  const active = new Map<string, number>()
-  for (const [tierId, count] of counts) active.set(tierId, count.active)
-  const seatsAt = (tierId: string) => seats.get(tierId) ?? 0
-  const activeAt = (tierId: string) => active.get(tierId) ?? 0
-  const bump = (tierId: string, delta: number) => active.set(tierId, activeAt(tierId) + delta)
-
-  const licenses: ActiveLicense[] = await db
-    .select({ id: license.id, tierId: license.tierId, serverId: license.serverId })
+  const rows = await db
+    .select({ id: license.id, serverId: license.serverId })
     .from(license)
-    .where(and(eq(license.organizationId, organizationId), isNull(license.revokedAt), isNotNull(license.tierId)))
-    .then((rows) => rows.flatMap((row) => (row.tierId ? [{ id: row.id, tierId: row.tierId, serverId: row.serverId }] : [])))
-  const licenseById = new Map(licenses.map((row) => [row.id, row]))
-
-  const repoint = async (row: ActiveLicense, toTierId: string): Promise<void> => {
-    await db
-      .update(license)
-      .set({ tierId: toTierId, updatedAt: now })
-      .where(and(eq(license.id, row.id), eq(license.organizationId, organizationId), isNull(license.revokedAt)))
-    result.repointed.push({ licenseId: row.id, fromTierId: row.tierId, toTierId })
-    bump(row.tierId, -1)
-    bump(toTierId, 1)
-    row.tierId = toTierId
-  }
-  const revoke = async (row: ActiveLicense): Promise<void> => {
+    .where(and(eq(license.organizationId, organizationId), isNull(license.revokedAt)))
+  const out: { licenseIds: string[]; serverIds: string[] } = { licenseIds: [], serverIds: [] }
+  for (const row of rows) {
     await db
       .update(license)
       .set({ revokedAt: now, updatedAt: now })
-      .where(and(eq(license.id, row.id), eq(license.organizationId, organizationId), isNull(license.revokedAt)))
-    result.revokedLicenseIds.push(row.id)
-    bump(row.tierId, -1)
-    licenseById.delete(row.id)
+      .where(and(eq(license.id, row.id), isNull(license.revokedAt)))
+    out.licenseIds.push(row.id)
     if (row.serverId) {
-      result.disconnectedServerIds.push(row.serverId)
+      out.serverIds.push(row.serverId)
       if (opts.onRevokeBound) await opts.onRevokeBound(row.serverId)
     }
   }
-
-  // Outstanding releases per source tier: their licenses are already
-  // revoked, so the provider still counts one seat each until the boundary.
-  const releasesAt = new Map<string, number>()
-  for (const intent of intents) {
-    if (intent.kind === 'release-seat') {
-      releasesAt.set(intent.fromTierId, (releasesAt.get(intent.fromTierId) ?? 0) + 1)
-    }
-  }
-
-  // 1. Intents by id.
-  for (const intent of intents) {
-    const row = intent.licenseId ? licenseById.get(intent.licenseId) : undefined
-    if (intent.kind === 'release-seat') {
-      const outstanding = releasesAt.get(intent.fromTierId) ?? 0
-      const landed = ended || seatsAt(intent.fromTierId) < activeAt(intent.fromTierId) + outstanding
-      if (!landed) continue
-      releasesAt.set(intent.fromTierId, Math.max(0, outstanding - 1))
-      result.consumedIntentIds.push(intent.id)
-      continue
-    }
-    if (!row) {
-      // The license is gone (revoked meanwhile): the intent has nothing to move.
-      result.consumedIntentIds.push(intent.id)
-      continue
-    }
-    if (!intent.toTierId || row.tierId !== intent.fromTierId) {
-      result.consumedIntentIds.push(intent.id)
-      continue
-    }
-    if (intent.kind === 'upgrade' && opts.pendingUpdate) continue
-    const room = seatsAt(intent.toTierId) - activeAt(intent.toTierId) > 0
-    const sourceShort = seatsAt(intent.fromTierId) < activeAt(intent.fromTierId)
-    if (!room) continue
-    if (intent.kind === 'downgrade' && !sourceShort) continue
-    await repoint(row, intent.toTierId)
-    result.consumedIntentIds.push(intent.id)
-  }
-
-  // 2 – 4. Residual gaps, per tier, unbound licenses first.
-  const tierIds = new Set<string>([...seats.keys(), ...active.keys()])
-  const tierRank = await getTiersByIds(db, [...tierIds])
-  const lowerOrEqual = (candidate: string, source: string): boolean => {
-    const a = tierRank.get(candidate)
-    const b = tierRank.get(source)
-    if (!a || !b) return false
-    return a.generation < b.generation || (a.generation === b.generation && a.rank <= b.rank)
-  }
-  for (const tierId of tierIds) {
-    let excess = activeAt(tierId) - seatsAt(tierId)
-    if (excess <= 0) continue
-    const atTier = licenses.filter((row) => row.tierId === tierId && licenseById.has(row.id))
-    const unbound = atTier.filter((row) => row.serverId === null)
-    for (const row of unbound) {
-      if (excess <= 0) break
-      const target = [...seats.keys()]
-        .filter((candidate) => candidate !== tierId && lowerOrEqual(candidate, tierId))
-        .sort((x, y) => {
-          const a = tierRank.get(x)!
-          const b = tierRank.get(y)!
-          return b.generation - a.generation || b.rank - a.rank
-        })
-        .find((candidate) => seatsAt(candidate) - activeAt(candidate) > 0)
-      if (target) await repoint(row, target)
-      else await revoke(row)
-      excess -= 1
-    }
-    if (excess <= 0) continue
-    if (ended) {
-      for (const row of atTier.filter((candidate) => candidate.serverId !== null && licenseById.has(candidate.id))) {
-        if (excess <= 0) break
-        await revoke(row)
-        excess -= 1
-      }
-      continue
-    }
-    const bound = atTier.filter((row) => row.serverId !== null).length
-    result.drift.push({ tierId, seats: seatsAt(tierId), active: activeAt(tierId), bound, excess })
-  }
-
-  return result
+  return out
 }
 
 export type ListGraceExpiredOpts = Readonly<{

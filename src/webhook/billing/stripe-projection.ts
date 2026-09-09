@@ -16,15 +16,19 @@
  *
  * — every one of which ends in the same place: refetch the subscription,
  * upsert `payer` → `subscription` → `seat` in one transaction, then sync
- * entitlements. Unknown types are a logged no-op; the gate has already
- * answered 200.
+ * entitlements. Two catalogue events — `product.updated`, `price.updated`
+ * — refresh a tier's cached display price instead. Unknown types are a
+ * logged no-op; the gate has already answered 200.
  *
  * **Entitlement is raised only by committed items.** The refetch reads
  * `subscription.items`; a change Stripe could not charge for lives under
  * `subscription.pending_update` and is deliberately ignored, so the C6
  * gate is this refetch rather than a second code path. The only thing
- * read off `pending_update` is *whether it exists*, which stops an upgrade
- * intent from being consumed early.
+ * read off `pending_update` is *whether it exists*, which holds the
+ * deferred-schedule rebuild until the parked change resolves.
+ *
+ * Items map to tiers by **product**: an item names a price, the price
+ * names its product, and `tier.provider_product_id` names the tier.
  */
 
 import type { Db } from '../../db.ts'
@@ -43,6 +47,9 @@ import {
   upsertPayer,
   upsertSubscriptionFromProvider,
 } from '../../lib/db/billing-records.ts'
+import { mapProviderProductsToTierIds } from '../../lib/db/tier-records.ts'
+import { resolveBillingGateway } from '../../lib/billing/gateway.ts'
+import { cacheTierPrice } from '../../lib/billing/tier-prices.ts'
 
 export const STRIPE_PROJECTION_LOG_SCOPE = 'billing-webhook'
 
@@ -56,6 +63,8 @@ export const PROJECTED_STRIPE_EVENT_TYPES = [
   'checkout.session.completed',
   'invoice.paid',
   'invoice.payment_failed',
+  'product.updated',
+  'price.updated',
 ] as const
 
 /** The only thing read from an event payload. */
@@ -76,6 +85,7 @@ export type StripeProjectionOutcome =
     /** `null` when the payer names a user, not an organization. */
     entitlements: EntitlementSyncOutcome | null
   }
+  | { action: 'catalogue_refreshed'; tierIds: string[] }
   | { action: 'skipped'; reason: string }
 
 type StripeObject = Record<string, unknown>
@@ -134,14 +144,25 @@ async function loadSubscriptionItems(
   return all.filter(isObject)
 }
 
+/**
+ * A subscription item embeds its Price object, whose `product` is the
+ * product id — so the product→tier map needs no extra call. An item whose
+ * price came back as a bare id (never, on a refetch) is dropped and logged.
+ */
 function providerItems(items: readonly StripeObject[]): ProviderSubscriptionItem[] {
   const out: ProviderSubscriptionItem[] = []
   for (const item of items) {
     const providerItemId = str(item.id)
-    const providerPriceId = isObject(item.price) ? str(item.price.id) : idOrObjectId(item.price)
+    const price = isObject(item.price) ? item.price : null
+    const providerPriceId = price ? str(price.id) : idOrObjectId(item.price)
+    const providerProductId = price ? idOrObjectId(price.product) : null
     const quantity = typeof item.quantity === 'number' ? item.quantity : 1
     if (!providerItemId || !providerPriceId) continue
-    out.push({ providerItemId, providerPriceId, quantity })
+    if (!providerProductId) {
+      logWarn(STRIPE_PROJECTION_LOG_SCOPE, `subscription item ${providerItemId} carries no product; skipped`)
+      continue
+    }
+    out.push({ providerItemId, providerPriceId, providerProductId, quantity })
   }
   return out
 }
@@ -178,8 +199,6 @@ export type StripeProjectionDeps = Readonly<{
 }>
 
 export type ProjectSubscriptionOpts = Readonly<{
-  /** `pending_update_expired`: drop the upgrade intents the ledger holds. */
-  dropUpgradeIntents?: boolean
   /**
    * A quantity lease the caller already holds (a mutation route reprojecting
    * before it releases). Without one the sync takes its own, retrying briefly
@@ -255,12 +274,12 @@ export async function projectSubscriptionById(
       tx,
       subscriptionId,
       providerItems(items),
-      { now, logScope: STRIPE_PROJECTION_LOG_SCOPE },
+      { now, logScope: STRIPE_PROJECTION_LOG_SCOPE, provider: 'stripe' },
     )
     return { subscriptionId, replaced }
   })
 
-  // Committed items are in; now let the ledger move `license.tier_id`. A
+  // Committed items are in; now the assignment follows them. A
   // `pending_update` is read for its presence only — never its contents.
   let entitlements: EntitlementSyncOutcome | null = null
   if (subject.organizationId) {
@@ -276,7 +295,6 @@ export async function projectSubscriptionById(
         organizationId: subject.organizationId,
         providerSubscriptionId,
         pendingUpdate: isObject(sub.pending_update),
-        dropUpgradeIntents: opts.dropUpgradeIntents === true,
         lock: opts.lock,
       },
     )
@@ -308,6 +326,30 @@ async function subscriptionIdFromInvoice(
   return details ? idOrObjectId(details.subscription) : null
 }
 
+/**
+ * A product or price changed on the Dashboard: refresh the cached display
+ * price of the tier that names the product. The price on a `price.*` event
+ * is read for its product only; the product is then refetched with its
+ * default price, so a retired price never overwrites the cache.
+ */
+async function refreshTierCatalogue(
+  deps: StripeProjectionDeps,
+  event: StripeEventRef,
+): Promise<StripeProjectionOutcome> {
+  let productId: string | null = event.objectId
+  if (event.type === 'price.updated' && productId) {
+    const price = await deps.client.get<StripeObject>(`/v1/prices/${encodeURIComponent(productId)}`)
+    productId = idOrObjectId(price.product)
+  }
+  if (!productId) return { action: 'skipped', reason: 'product_missing' }
+  const tierByProduct = await mapProviderProductsToTierIds(deps.db, 'stripe', [productId])
+  const tierId = tierByProduct.get(productId)
+  if (!tierId) return { action: 'skipped', reason: 'product_not_a_tier' }
+  const product = await resolveBillingGateway(deps.client).getProduct(productId)
+  await cacheTierPrice(deps.db, tierId, product)
+  return { action: 'catalogue_refreshed', tierIds: [tierId] }
+}
+
 /** Dispatch one event to its projection. Idempotent; safe to run twice. */
 export async function projectStripeEvent(
   deps: StripeProjectionDeps,
@@ -316,20 +358,19 @@ export async function projectStripeEvent(
   if (!event.objectId) return { action: 'skipped', reason: 'object_id_missing' }
 
   let subscriptionId: string | null
-  let dropUpgradeIntents = false
   switch (event.type) {
     case 'customer.subscription.created':
     case 'customer.subscription.updated':
     case 'customer.subscription.deleted':
     case 'customer.subscription.pending_update_applied':
-      subscriptionId = event.objectId
-      break
     case 'customer.subscription.pending_update_expired':
-      // The parked upgrade could not be paid within Stripe's window: items
-      // never changed, and the ledger's upgrade intent must not outlive it.
+      // On expiry the items never changed; reprojecting is what lets the
+      // deferred schedule be rebuilt now that `pending_update` is gone.
       subscriptionId = event.objectId
-      dropUpgradeIntents = true
       break
+    case 'product.updated':
+    case 'price.updated':
+      return await refreshTierCatalogue(deps, event)
     case 'checkout.session.completed':
       subscriptionId = await subscriptionIdFromCheckoutSession(deps.client, event.objectId)
       break
@@ -344,5 +385,5 @@ export async function projectStripeEvent(
       return { action: 'skipped', reason: 'event_not_handled' }
   }
   if (!subscriptionId) return { action: 'skipped', reason: 'no_subscription' }
-  return await projectSubscriptionById(deps, subscriptionId, { dropUpgradeIntents })
+  return await projectSubscriptionById(deps, subscriptionId)
 }

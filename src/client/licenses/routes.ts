@@ -15,18 +15,14 @@ import {
   listServersBoundToLicenses,
 } from "../authn/license.ts";
 import {
-  assertLicenseInvalidationAllowed,
-  BILLING_MUTATION_IN_PROGRESS_ERROR,
-} from "../authn/license-lifecycle.ts";
-import {
   type BillingQuantityLock,
   endQuantityMutation,
   tryBeginQuantityMutation,
 } from "../../lib/billing/quantity-lock.ts";
-import { resolvePurchasableTier } from "../../lib/db/tier-records.ts";
 import {
+  BILLING_MUTATION_IN_PROGRESS_ERROR,
   loadBillingOrgView,
-  summarizeTierSeats,
+  summarizeLicenses,
 } from "../billing/routes-helpers.ts";
 import { loadServerStatusRecords } from "../servers/update-status.ts";
 import { createSessionMiddleware } from "../authn/middleware.ts";
@@ -37,6 +33,7 @@ import type { DaemonCellRegistry } from "../../daemon/cell/contracts.ts";
 import { isDeveloperSurfaceEnabled } from "../../dev-mode.ts";
 import { buildLicenseInstallCommand } from "../../lib/daemon-install-command.ts";
 import { installOriginNeedsInsecureTls } from "../../lib/install-tls.ts";
+import { syncSelfHostedGrant } from "../../lib/tiers/self-hosted-grant-records.ts";
 import {
   parseInstallBaseUrl,
   resolvePublicBaseUrl,
@@ -51,13 +48,11 @@ import {
   installBaseUrlValidationError,
   isInvalidInstallBaseUrl,
   isReservedColocatedLicenseName,
-  noFreeSeatRefusal,
+  noLicenseAvailableBody,
   parseLicenseCreateFields,
   reservedColocatedLicenseNameError,
   serializeLicenseListEntry,
   serverCapacityExceededBody,
-  TIER_NOT_PURCHASABLE_ERROR,
-  TIER_REQUIRED_ERROR,
 } from "./routes-helpers.ts";
 
 // License create/list/revoke are owner-only. Use the exact owner-only guard so
@@ -107,31 +102,20 @@ async function requireLicenseOwnerContext(
 }
 
 type LicenseMintPrep =
-  | { ok: true; mintTierId: string | null; lease: BillingQuantityLock | null }
+  | { ok: true; lease: BillingQuantityLock | null }
   | { ok: false; response: Response };
 
+/**
+ * Hosted: the mint runs under the organization's quantity lease so a
+ * concurrent seat change cannot let two mints share one purchased
+ * license. Self-hosted holds no lease and has no gate.
+ */
 async function prepareLicenseMint(
   c: Context<AppEnv>,
   db: Db,
   organizationId: string,
-  tierId: string | undefined,
 ): Promise<LicenseMintPrep> {
-  if (!c.get("billingConfig")) {
-    return { ok: true, mintTierId: null, lease: null };
-  }
-  if (!tierId) {
-    return { ok: false, response: c.json({ error: TIER_REQUIRED_ERROR }, 400) };
-  }
-  const tier = await resolvePurchasableTier(db, tierId);
-  if (!tier.ok) {
-    return {
-      ok: false,
-      response: c.json({
-        error: TIER_NOT_PURCHASABLE_ERROR,
-        reason: tier.reason,
-      }, 400),
-    };
-  }
+  if (!c.get("billingConfig")) return { ok: true, lease: null };
   const lease = await tryBeginQuantityMutation(db, organizationId);
   if (!lease) {
     return {
@@ -139,22 +123,27 @@ async function prepareLicenseMint(
       response: c.json({ error: BILLING_MUTATION_IN_PROGRESS_ERROR }, 409),
     };
   }
-  return { ok: true, mintTierId: tierId, lease };
+  return { ok: true, lease };
 }
 
-async function rejectIfNoFreeMintSeat(
+/** Hosted: one more license must fit under what is purchased and not already leaving. */
+async function rejectIfNoLicenseAvailable(
   c: Context<AppEnv>,
   db: Db,
   organizationId: string,
-  mintTierId: string | null,
+  hosted: boolean,
 ): Promise<Response | null> {
-  if (!mintTierId) return null;
+  if (!hosted) return null;
+  // Belt and braces under the lease we already hold: a self-hosted grant is
+  // part of `purchased`, so a stale-high one is a free license here and
+  // nowhere else. Shrink it to what the organization still holds before
+  // reading the view, whatever path last forgot to. `allowGrow: false` —
+  // this is the hosted runtime, and the fast path makes it one indexed
+  // `setting` read for an organization that never held a grant.
+  await syncSelfHostedGrant(db, organizationId, { allowGrow: false });
   const view = await loadBillingOrgView(db, organizationId, Date.now());
-  const summary = summarizeTierSeats(view).find((entry) =>
-    entry.tierId === mintTierId
-  );
-  const body = noFreeSeatRefusal({ tierId: mintTierId, summary });
-  return body ? c.json(body, 409) : null;
+  const summary = summarizeLicenses(view);
+  return summary.available > 0 ? null : c.json(noLicenseAvailableBody(summary), 409);
 }
 
 async function releaseMintLease(
@@ -234,7 +223,7 @@ export function registerLicenseRoutes(
       return c.json({ error: "Invalid request" }, 400);
     }
     // `name` is already normalized (or omitted when blank) by the parser.
-    const { name, installBaseUrl, tierId } = parsedFields;
+    const { name, installBaseUrl } = parsedFields;
 
     // Reserved for the co-located control-plane license (install / disk recovery).
     if (isReservedColocatedLicenseName(name, COLOCATED_SERVER_DISPLAY_NAME)) {
@@ -279,19 +268,19 @@ export function registerLicenseRoutes(
       );
     }
 
-    // Hosted: a key is minted against a free seat at a purchasable tier. The
-    // seat count is read under the quantity lease so a concurrent seat
-    // change cannot let two mints share one seat. Self-hosted keeps `null`.
-    const mint = await prepareLicenseMint(c, db, organizationId, tierId);
+    // Hosted: a key is minted only while the organization holds fewer
+    // licenses than it has purchased. Which tier the server lands on is
+    // decided when it connects, from its hardware — never here.
+    const mint = await prepareLicenseMint(c, db, organizationId);
     if (!mint.ok) return mint.response;
     try {
-      const noSeat = await rejectIfNoFreeMintSeat(
+      const unavailable = await rejectIfNoLicenseAvailable(
         c,
         db,
         organizationId,
-        mint.mintTierId,
+        Boolean(c.get("billingConfig")),
       );
-      if (noSeat) return noSeat;
+      if (unavailable) return unavailable;
 
       // The instance does not build daemon release artifacts. In self-hosted dev
       // the operator builds them via Developer → Rebuild daemon and upgrade
@@ -299,8 +288,16 @@ export function registerLicenseRoutes(
       const { licenseId, licenseToken } = await createLicense(db, {
         organizationId,
         name,
-        tierId: mint.mintTierId,
       });
+
+      // Self-hosted entitles what it mints: one granted `SX` unit per active
+      // license (`src/lib/tiers/self-hosted-grant.ts`), so this key is
+      // covered before its daemon ever enrolls — and stays covered if the
+      // control plane later moves to the hosted runtime. Hosted mints
+      // against what was purchased; the gate above already ran.
+      if (opts.runtime === "deno") {
+        await syncSelfHostedGrant(db, organizationId, { allowGrow: true });
+      }
 
       const instanceUrl = parsedInstallBaseUrl ??
         await resolvePublicBaseUrl(c, opts);
@@ -341,8 +338,9 @@ export function registerLicenseRoutes(
       return c.json({ error: colocatedLicenseRevokeError() }, 403);
     }
 
-    // Detach-first refusal comes before the billing gate, so a refused
-    // revoke never records a `release-seat` intent.
+    // Detach-first: a bound license is revoked by deleting its server.
+    // Revoking never touches the provider — what was purchased stays
+    // purchased until the billing page reduces it.
     const attachment = await inspectLicenseAttachment(db, id, organizationId);
     if (!attachment.ok) return c.json({ error: "Not found" }, 404);
     if (attachment.boundServer) {
@@ -351,16 +349,6 @@ export function registerLicenseRoutes(
         server: attachment.boundServer,
       }, 409);
     }
-
-    const billingDenied = await assertLicenseInvalidationAllowed(c, {
-      db,
-      runtime: opts.runtime,
-      organizationId,
-      licenseId: id,
-      tierId: attachment.tierId,
-      billingConfig: c.get("billingConfig"),
-    });
-    if (billingDenied) return billingDenied;
 
     const invalidated = await invalidateLicense(db, id, organizationId);
     if (!invalidated.ok) {
@@ -376,6 +364,13 @@ export function registerLicenseRoutes(
     // Actively disconnect bound daemons — revoke alone leaves live sockets and
     // unexpired JWTs usable until they naturally expire.
     await purgeInvalidatedDaemonCells(registry, invalidated.serverIds);
+
+    // The revoked key gave its granted unit back. Shrinking runs on **both**
+    // runtimes: a grant left standing after a revoke is a license the hosted
+    // mint gate would hand out for free.
+    await syncSelfHostedGrant(db, organizationId, {
+      allowGrow: opts.runtime === "deno",
+    });
 
     return c.json({ ok: true as const });
   });

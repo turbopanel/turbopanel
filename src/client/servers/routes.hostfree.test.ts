@@ -152,12 +152,20 @@ function serverRowSelect(options: Record<string, unknown> = {}) {
         orderBy: () => Promise.resolve([row]),
       })
     },
-    leftJoin: () => ({
-      where: () => ({
-        limit: () => Promise.resolve([]),
-        orderBy: () => Promise.resolve([]),
-      }),
-    }),
+    // Chainable: `loadServerLicenseTierJoins` walks
+    // `server ⟕ organization ⟕ license ⟕ tier`, so a join must return
+    // something that can be joined again. These routes never read the
+    // placement rows from this stub, so every chain resolves empty.
+    leftJoin: function leftJoin(): Record<string, unknown> {
+      return {
+        leftJoin,
+        where: () =>
+          Object.assign(Promise.resolve([]), {
+            limit: () => Promise.resolve([]),
+            orderBy: () => Promise.resolve([]),
+          }),
+      }
+    },
   }
 }
 
@@ -425,7 +433,9 @@ test('POST /servers/updates reports Forbidden when manage is denied', async () =
   seedTrunkManifestCacheForTests(null)
   const { app, cookie } = await buildSessionApp({
     registry: stubRegistry(),
-    executeQueue: [[{ item_id: SERVER_ID }], [{ allowed: false }]],
+    // listVisible, then the self-host environment pin (no rows: this server
+    // does not run the control plane), then the per-server manage check.
+    executeQueue: [[{ item_id: SERVER_ID }], [], [{ allowed: false }]],
   })
   const res = await app.request('/servers/updates', {
     method: 'POST',
@@ -442,7 +452,8 @@ test('POST /servers/updates reports Daemon not connected when the host is offlin
   seedTrunkManifestCacheForTests(null)
   const { app, cookie } = await buildSessionApp({
     registry: stubRegistry(),
-    executeQueue: [[{ item_id: SERVER_ID }], [{ allowed: true }]],
+    // listVisible, self-host pin (no rows), then the per-server manage check.
+    executeQueue: [[{ item_id: SERVER_ID }], [], [{ allowed: true }]],
   })
   const res = await app.request('/servers/updates', {
     method: 'POST',

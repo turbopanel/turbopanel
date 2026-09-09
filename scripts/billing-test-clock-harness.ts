@@ -23,21 +23,26 @@
  *                           window with entitlement intact; the grace clock cancels at expiry
  *
  * Every seat or tier change goes through the **exported mutation path the
- * console uses** — `changeSeats`, `upgradeLicense`, `downgradeLicense` in
+ * console uses** — `changeSeats`, `upgradeTier`, `downgradeTier` in
  * `src/client/billing/mutations.ts`, the bodies of the `/billing/*` routes
  * — so what is proved is the real contract: the same gates, the same
  * ledger writes, the same `mutateSubscription` call, the same reprojection
- * under the same lease. Nothing here writes `license.tier_id`,
- * `license.revoked_at` or a ledger row directly; the only direct license
- * write is minting one as setup, which is the operator's act and has no
- * route the harness can reach without a session.
+ * under the same lease. Nothing here writes `server.assigned_tier_id`,
+ * `license.revoked_at` or a ledger row directly; the only direct writes
+ * are setup — minting a license, inserting the server it binds to and
+ * latching `license.server_id` — which are the operator's mint and the
+ * daemon's enroll, neither of which has a route the harness can reach
+ * without a session.
  *
  * Assertions are on what production reads — the `payer` / `subscription`
- * / `seat` rows, the ledger and `license.tier_id` after
- * `projectSubscriptionById` (the seam the webhook task ends in) — never on
- * Stripe's object state. The one thing not done is delivering a signed
- * webhook: the projection is called where the deferred task would call it,
- * which is the same code and the same rows.
+ * / `seat` rows, the ledger and the derived `server.assigned_tier_id`
+ * after `projectSubscriptionById` (the seam the webhook task ends in,
+ * which recomputes the assignment) — never on Stripe's object state. A
+ * license carries no tier: the tier a scenario "moves" is the one its
+ * licensed server is assigned from the purchased quantities. The one thing
+ * not done is delivering a signed webhook: the projection is called where
+ * the deferred task would call it, which is the same code and the same
+ * rows.
  *
  * **One time base.** The scenario's clock is its wall clock: every
  * projection `now`, every intent timestamp, every `prorationDate` and the
@@ -46,14 +51,17 @@
  * agree. Mixing in `Date.now()` would make the grace assertions vacuous.
  *
  * Needs a sandbox whose catalogue a superadmin has entered under Admin →
- * Tiers (exactly one active priced `S3` and one `S5`, both verifying
- * against Stripe) and **no Billing Automations** configured — see the
- * runbook in `src/lib/billing/AGENTS.md`. The harness only ever *reads*
- * tier rows; it has never written them and must not start. Every scenario gets a fresh
+ * Tiers (exactly one active `S3` and one `S5`, each naming a product whose
+ * default price verifies against Stripe) and **no Billing Automations**
+ * configured — see the runbook in `src/lib/billing/AGENTS.md`. The harness
+ * itself only ever *reads* tier rows; it has never written them and must
+ * not start (the mutations it drives refresh a row's cached display price
+ * from the product, as production does). Every scenario gets a fresh
  * test clock and a fresh throw-away organization; both, and the
- * organization's ledger and lease rows, are removed in a `finally`. The
- * grace clock is never run as the batch: `runGraceClockForSubscription`
- * sees this scenario's subscription and nothing else in the database.
+ * organization's servers, ledger and lease rows, are removed in a
+ * `finally`. The grace clock is never run as the batch:
+ * `runGraceClockForSubscription` sees this scenario's subscription and
+ * nothing else in the database.
  *
  * The traps the shared helpers absorb so no scenario has to know them:
  *
@@ -73,18 +81,19 @@
  *  - A test clock advances at most a couple of billing intervals per call;
  *    the retry window is walked in fortnights.
  */
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { createDenoDb, type Db, endDbConnection } from "../src/db.ts";
+import { createLicense } from "../src/client/authn/license.ts";
 import {
   changeSeats,
-  downgradeLicense,
-  upgradeLicense,
+  downgradeTier,
+  upgradeTier,
 } from "../src/client/billing/mutations.ts";
 import { SUBSCRIPTION_PAST_DUE_ERROR } from "../src/client/billing/routes-helpers.ts";
-import { verifyTierPrice } from "../src/lib/billing/tier-verify.ts";
 import { createStripeClient, type StripeClient } from "../src/lib/billing/client.ts";
 import { resolveBillingConfig, STRIPE_SECRET_KEY_ENV } from "../src/lib/billing/config.ts";
 import { STRIPE_CUSTOMER_ORGANIZATION_METADATA_KEY } from "../src/lib/billing/customer-subject.ts";
+import { resolveBillingGateway } from "../src/lib/billing/gateway.ts";
 import { runGraceClockForSubscription } from "../src/lib/billing/grace-clock.ts";
 import { billingPendingChangesKey, readPendingChanges } from "../src/lib/billing/pending-changes.ts";
 import { billingQuantityLockKey } from "../src/lib/billing/quantity-lock.ts";
@@ -103,8 +112,9 @@ import {
   type OrganizationBillingState,
   seatQuantitiesByTier,
 } from "../src/lib/db/billing-records.ts";
-import { license, organization, setting } from "../src/lib/db/schema.ts";
+import { license, organization, server, setting } from "../src/lib/db/schema.ts";
 import { listActiveTiers, type TierRow } from "../src/lib/db/tier-records.ts";
+import { ladderEntry } from "../src/lib/tiers/ladder.ts";
 import { projectSubscriptionById } from "../src/webhook/billing/stripe-projection.ts";
 
 type StripeObject = Record<string, unknown>;
@@ -128,11 +138,18 @@ const PENDING_APPLY_POLL_MS = 2_000;
 
 export type HarnessLog = (line: string) => void;
 
+/**
+ * A tier row plus the price id its product's default price resolved to
+ * when the harness opened — what `subscribe` names in `lines[n].price`,
+ * the same id `resolveTierPrice` hands the mutations.
+ */
+export type HarnessTier = TierRow & { providerProductId: string; providerPriceId: string };
+
 export type Harness = Readonly<{
   db: Db;
   client: StripeClient;
-  /** The active, priced, Stripe-verified S3 and S5 rows, by label. */
-  tiers: ReadonlyMap<string, TierRow & { providerPriceId: string }>;
+  /** The active S3 and S5 rows whose products verified against Stripe, by label. */
+  tiers: ReadonlyMap<string, HarnessTier>;
   log: HarnessLog;
 }>;
 
@@ -213,27 +230,27 @@ export async function openHarness(log: HarnessLog = console.log): Promise<Harnes
   const client = createStripeClient(config);
   const db = createDenoDb();
 
-  // No generation filter: nothing seeds the catalogue any more, so the
-  // harness takes whatever a superadmin entered and insists only that the
-  // two labels it drives are unambiguous. Two active priced S3 rows in
-  // different generations would make "upgrade S3 → S5" mean two things.
-  const priced = (await listActiveTiers(db)).filter((row) => Boolean(row.providerPriceId));
-  const tiers = new Map<string, TierRow & { providerPriceId: string }>();
+  // Nothing seeds the catalogue: the harness takes whatever a superadmin
+  // entered and insists only that the two labels it drives are unambiguous
+  // and each name a product. Two active S3 rows would make "upgrade S3 →
+  // S5" mean two things.
+  const catalogued = (await listActiveTiers(db)).filter((row) => Boolean(row.providerProductId));
+  const rows = new Map<string, TierRow & { providerProductId: string }>();
   for (const label of ["S3", "S5"] as const) {
-    const matches = priced.filter((row) => row.label === label);
+    const matches = catalogued.filter((row) => row.label === label);
     if (matches.length !== 1) {
       await endDbConnection(db);
       throw new Error(
-        `expected exactly one active priced ${label} tier, found ${matches.length}: ` +
+        `expected exactly one active catalogued ${label} tier, found ${matches.length}: ` +
           "enter the catalogue under Admin → Tiers (and deactivate superseded rows)",
       );
     }
     const row = matches[0]!;
-    tiers.set(label, { ...row, providerPriceId: row.providerPriceId! });
+    rows.set(label, { ...row, providerProductId: row.providerProductId! });
   }
 
-  const s3 = tiers.get("S3")!;
-  const s5 = tiers.get("S5")!;
+  const s3 = rows.get("S3")!;
+  const s5 = rows.get("S5")!;
   if (s5.rank <= s3.rank) {
     await endDbConnection(db);
     throw new Error(
@@ -243,21 +260,36 @@ export async function openHarness(log: HarnessLog = console.log): Promise<Harnes
   }
 
   // The same read-only verification the admin route runs before writing a
-  // row. Rows are hand-entered now, so a price that drifted (archived,
-  // re-denominated, switched to tiered billing) would otherwise surface as
-  // an inscrutable mid-scenario failure.
-  for (const row of tiers.values()) {
-    const verified = await verifyTierPrice(client, {
-      providerPriceId: row.providerPriceId,
-      expectedPriceCents: row.priceCents,
-    });
-    if (!verified.ok) {
+  // row, through the gateway seam. Rows are hand-entered now, so a product
+  // that drifted (archived, no default price, re-denominated, switched to
+  // tiered billing) would otherwise surface as an inscrutable mid-scenario
+  // failure. The default price's id is what every subscribe line names;
+  // its amount is what the invoice-total assertions compare against, so
+  // the row's cached display price must agree with it.
+  const gateway = resolveBillingGateway(client);
+  // One tax-settings lookup for the whole catalogue — verifyProduct is
+  // pure and the caller supplies the account defaults.
+  const taxDefaults = await gateway.getTaxDefaults();
+  const tiers = new Map<string, HarnessTier>();
+  for (const row of rows.values()) {
+    const product = await gateway.getProduct(row.providerProductId);
+    const verified = gateway.verifyProduct(product, taxDefaults);
+    const price = product.defaultPrice;
+    if (!verified.ok || !price) {
       await endDbConnection(db);
       throw new Error(
-        `tier ${row.label} (${row.providerPriceId}) does not verify against Stripe: ` +
+        `tier ${row.label} (${row.providerProductId}) does not verify against Stripe: ` +
           `${verified.failures.join("; ")} — fix it under Admin → Tiers`,
       );
     }
+    if (price.unitAmount !== row.priceCents) {
+      await endDbConnection(db);
+      throw new Error(
+        `tier ${row.label} (${row.providerProductId}) shows ${row.priceCents} but its default price ` +
+          `${price.id} bills ${price.unitAmount}: re-verify it under Admin → Tiers so invoice totals compare`,
+      );
+    }
+    tiers.set(row.label, { ...row, providerPriceId: price.id });
   }
 
   return { db, client, tiers, log, close: () => endDbConnection(db) };
@@ -285,9 +317,11 @@ export async function createScenarioClock(client: StripeClient, name: string): P
  * Run one scenario inside a fresh clock and organization; both are removed
  * in `finally` whatever happens. Deleting the clock deletes its customers,
  * subscriptions and invoices; deleting the organization cascades through
- * `payer` → `subscription` → `seat` and `license`. The ledger and lease
- * live in `setting` rows keyed by organization, which do not cascade, so
- * they are deleted by key — a scenario that failed halfway leaves nothing.
+ * `payer` → `subscription` → `seat` and `license`. The `server` rows a
+ * scenario binds licenses to restrict the organization delete, so they go
+ * first (which nulls `license.server_id`). The ledger and lease live in
+ * `setting` rows keyed by organization, which do not cascade, so they are
+ * deleted by key — a scenario that failed halfway leaves nothing.
  */
 export async function runScenario(harness: Harness, scenario: Scenario): Promise<void> {
   const log = (line: string) => harness.log(`[${scenario.name}] ${line}`);
@@ -311,6 +345,9 @@ export async function runScenario(harness: Harness, scenario: Scenario): Promise
       .catch((err) => {
         log(`cleanup: ledger/lease delete failed: ${String(err)}`);
       });
+    await harness.db.delete(server).where(eq(server.organizationId, organizationId)).catch((err) => {
+      log(`cleanup: server delete failed: ${String(err)}`);
+    });
     await harness.db.delete(organization).where(eq(organization.id, organizationId)).catch((err) => {
       log(`cleanup: organization delete failed: ${String(err)}`);
     });
@@ -484,7 +521,7 @@ export async function subscribe(
   return { providerSubscriptionId: created.providerSubscriptionId };
 }
 
-export function tierOf(ctx: Harness, label: string): TierRow & { providerPriceId: string } {
+export function tierOf(ctx: Harness, label: string): HarnessTier {
   const row = ctx.tiers.get(label);
   if (!row) throw new Error(`tier ${label} has not been entered in Admin → Tiers`);
   return row;
@@ -528,41 +565,98 @@ function quantity(state: OrganizationBillingState, tierId: string): number {
 }
 
 async function ledgerIntents(ctx: ScenarioContext, providerSubscriptionId: string) {
-  const { ledger } = await readPendingChanges(ctx.db, ctx.organizationId, providerSubscriptionId, nowMs(ctx));
+  const { ledger } = await readPendingChanges(ctx.db, ctx.organizationId, providerSubscriptionId);
   return ledger.intents;
 }
 
-async function licenseRow(ctx: ScenarioContext, licenseId: string): Promise<{ tierId: string | null; revokedAt: string | null }> {
+async function licenseRow(ctx: ScenarioContext, licenseId: string): Promise<{ revokedAt: string | null }> {
   const [row] = await ctx.db
-    .select({ tierId: license.tierId, revokedAt: license.revokedAt })
+    .select({ revokedAt: license.revokedAt })
     .from(license)
     .where(eq(license.id, licenseId));
   check(row, `license ${licenseId} exists`);
   return row;
 }
 
-/**
- * Setup only: the operator's mint, without the route (which needs a
- * session). Not a usable key — the harness never enrolls a server.
- */
-async function mintLicense(ctx: ScenarioContext, tierId: string): Promise<string> {
+/** Ids of the organization's licenses that are still live — zero once the subscription ended. */
+async function activeLicenseIds(ctx: ScenarioContext): Promise<string[]> {
+  const rows = await ctx.db
+    .select({ id: license.id })
+    .from(license)
+    .where(and(eq(license.organizationId, ctx.organizationId), isNull(license.revokedAt)));
+  return rows.map((row) => row.id);
+}
+
+/** The derived tier a server sits on, as the reprojection last wrote it. */
+async function assignedTierOf(ctx: ScenarioContext, serverId: string): Promise<string | null> {
   const [row] = await ctx.db
-    .insert(license)
-    .values({
-      organizationId: ctx.organizationId,
-      tierId,
-      name: `harness ${ctx.name}`,
-      token: `$argon2id$harness$${crypto.randomUUID()}`,
-    })
-    .returning({ id: license.id });
-  check(row, "license insert returned no row");
-  return row.id;
+    .select({ assignedTierId: server.assignedTierId })
+    .from(server)
+    .where(eq(server.id, serverId));
+  check(row, `server ${serverId} exists`);
+  return row.assignedTierId;
 }
 
 /**
- * Subscribe on a good card, project, mint one license at `mintLabel`, swap
- * in the dunning card, and let the first renewal fail: the shared opening
- * of the two delinquency scenarios.
+ * Setup only: the operator's mint, without the route (which needs a
+ * session). A license carries no tier. The token is discarded — the
+ * harness never enrolls a server through the daemon.
+ */
+async function mintLicense(ctx: ScenarioContext): Promise<string> {
+  const { licenseId } = await createLicense(ctx.db, {
+    organizationId: ctx.organizationId,
+    name: `harness ${ctx.name}`,
+  });
+  return licenseId;
+}
+
+/**
+ * Setup only: the daemon's enroll, without the daemon. A `server` row whose
+ * reported hardware sits exactly at `sizedFor`'s placement ceilings, so
+ * `tier-placement` requires that rank and the greedy assignment puts it on
+ * the smallest purchased tier at or above it; the license is latched to it
+ * as enroll would (`license.server_id`). The assignment itself is written
+ * by the next projection or mutation, never here.
+ */
+async function bindLicenseToServer(ctx: ScenarioContext, licenseId: string, sizedFor: string): Promise<string> {
+  const entry = ladderEntry(sizedFor);
+  check(entry, `${sizedFor} is on the ladder`);
+  const [row] = await ctx.db
+    .insert(server)
+    .values({
+      organizationId: ctx.organizationId,
+      name: `harness ${ctx.name} (${sizedFor}-sized)`,
+      createdAt: nowIso(ctx),
+      updatedAt: nowIso(ctx),
+      metadata: {
+        resources: {
+          cpus: [{ cores: { total: entry.maxCores } }],
+          memory: { totalBytes: entry.maxMemoryBytes },
+        },
+      },
+    })
+    .returning({ id: server.id });
+  check(row, "server insert returned no row");
+  await ctx.db.update(license).set({ serverId: row.id, updatedAt: nowIso(ctx) }).where(eq(license.id, licenseId));
+  ctx.log(`license ${licenseId} bound to server ${row.id} sized for ${sizedFor}`);
+  return row.id;
+}
+
+/** Mint a license and bind it to a server sized for `sizedFor`, in one setup step. */
+async function mintBoundLicense(
+  ctx: ScenarioContext,
+  sizedFor: string,
+): Promise<{ licenseId: string; serverId: string }> {
+  const licenseId = await mintLicense(ctx);
+  const serverId = await bindLicenseToServer(ctx, licenseId, sizedFor);
+  return { licenseId, serverId };
+}
+
+/**
+ * Subscribe on a good card, mint one license bound to a server sized for
+ * `mintLabel`, project (which assigns the server that tier), swap in the
+ * dunning card, and let the first renewal fail: the shared opening of the
+ * two delinquency scenarios.
  */
 async function failRenewal(
   ctx: ScenarioContext,
@@ -571,19 +665,21 @@ async function failRenewal(
   providerCustomerId: string;
   providerSubscriptionId: string;
   licenseId: string;
+  serverId: string;
   state: OrganizationBillingState;
 }> {
   const { providerCustomerId } = await createClockCustomer(ctx);
   const { providerSubscriptionId } = await subscribe(ctx, providerCustomerId, [{ label: mintLabel, quantity: 1 }]);
+  const { licenseId, serverId } = await mintBoundLicense(ctx, mintLabel);
   await project(ctx, providerSubscriptionId);
-  const licenseId = await mintLicense(ctx, tierOf(ctx, mintLabel).id);
+  checkEqual(await assignedTierOf(ctx, serverId), tierOf(ctx, mintLabel).id, `server assigned ${mintLabel} on purchase`);
   await attachCard(ctx, providerCustomerId, true);
   await advanceAndSettle(ctx, HARNESS_FIRST_PERIOD_END_UNIX);
   const state = await project(ctx, providerSubscriptionId);
   checkEqual(state.subscription?.status, "past_due", "status after the failed renewal");
   check(state.subscription?.pastDueSince, "past_due_since latched");
   check(state.subscription?.graceExpiresAt, "grace_expires_at latched");
-  return { providerCustomerId, providerSubscriptionId, licenseId, state };
+  return { providerCustomerId, providerSubscriptionId, licenseId, serverId, state };
 }
 
 // ---------------------------------------------------------------------------
@@ -626,36 +722,36 @@ const midCycleUpgrade: Scenario = {
     const s5 = tierOf(ctx, "S5");
     const { providerCustomerId } = await createClockCustomer(ctx);
     const { providerSubscriptionId } = await subscribe(ctx, providerCustomerId, [{ label: "S3", quantity: 1 }]);
+    const { licenseId, serverId } = await mintBoundLicense(ctx, "S3");
     await project(ctx, providerSubscriptionId);
-    const licenseId = await mintLicense(ctx, s3.id);
+    checkEqual(await assignedTierOf(ctx, serverId), s3.id, "server assigned S3 on purchase");
 
     // The proration invoice for the upgrade must fail: the dunning card is the default.
     await attachCard(ctx, providerCustomerId, true);
     await pause(ctx);
-    const parked = await upgradeLicense(mutationDeps(ctx), {
+    const parked = await upgradeTier(mutationDeps(ctx), {
       organizationId: ctx.organizationId,
-      licenseId,
-      targetTierId: s5.id,
+      fromTierId: s3.id,
+      toTierId: s5.id,
       prorationDate: ctx.time.frozen,
     });
     check(parked.ok, `upgrade accepted: ${JSON.stringify(parked.body)}`);
     checkEqual(parked.body.pending, true, "upgrade parked under pending_update (pending_if_incomplete)");
 
-    // The mutation reprojected under its lease; read what it wrote.
+    // The mutation reprojected under its lease; read what it wrote. An
+    // upgrade is immediate, so it leaves no intent behind: its retry key
+    // is the seat-increase record, dropped once the reprojection landed.
     let state = await listSeatsForOrganization(ctx.db, ctx.organizationId);
     checkEqual(state.subscription?.status, "active", "status while the update is pending");
     checkEqual(quantity(state, s3.id), 1, "S3 seats unchanged while pending");
     checkEqual(quantity(state, s5.id), 0, "no S5 seat while pending");
-    checkEqual((await licenseRow(ctx, licenseId)).tierId, s3.id, "license.tier_id still S3 while pending");
-    const intents = await ledgerIntents(ctx, providerSubscriptionId);
-    checkEqual(intents.length, 1, "one outstanding upgrade intent");
-    checkEqual(intents[0]!.kind, "upgrade", "intent kind");
-    checkEqual(intents[0]!.id, parked.body.intentId, "intent id returned to the caller");
+    checkEqual(await assignedTierOf(ctx, serverId), s3.id, "server still assigned S3 while pending");
+    checkEqual((await ledgerIntents(ctx, providerSubscriptionId)).length, 0, "an upgrade writes no intent");
 
     // A replayed `updated` event changes nothing: pending_update is read for presence only.
     state = await project(ctx, providerSubscriptionId);
     checkEqual(quantity(state, s5.id), 0, "a reprojection while pending raises nothing");
-    checkEqual((await licenseRow(ctx, licenseId)).tierId, s3.id, "license untouched by the reprojection");
+    checkEqual(await assignedTierOf(ctx, serverId), s3.id, "assignment untouched by the reprojection");
 
     // Pay the parked proration with a good card: Stripe applies the pending
     // update, which is what `pending_update_applied` announces.
@@ -668,10 +764,9 @@ const midCycleUpgrade: Scenario = {
     state = await project(ctx, providerSubscriptionId);
     checkEqual(quantity(state, s3.id), 0, "S3 seats once applied");
     checkEqual(quantity(state, s5.id), 1, "S5 seats once applied");
-    const row = await licenseRow(ctx, licenseId);
-    checkEqual(row.tierId, s5.id, "license.tier_id moved to S5 by the ledger");
-    checkEqual(row.revokedAt, null, "license not revoked");
-    checkEqual((await ledgerIntents(ctx, providerSubscriptionId)).length, 0, "upgrade intent consumed");
+    checkEqual(await assignedTierOf(ctx, serverId), s5.id, "server assigned S5 by the reprojection");
+    checkEqual((await licenseRow(ctx, licenseId)).revokedAt, null, "license not revoked");
+    checkEqual((await ledgerIntents(ctx, providerSubscriptionId)).length, 0, "ledger still empty once applied");
 
     const invoices = await fetchInvoicesForSubscription(ctx.client, providerSubscriptionId);
     checkEqual(invoices.length, 2, "first invoice plus the proration");
@@ -687,14 +782,19 @@ const deferredDowngrade: Scenario = {
     const s5 = tierOf(ctx, "S5");
     const { providerCustomerId } = await createClockCustomer(ctx);
     const { providerSubscriptionId } = await subscribe(ctx, providerCustomerId, [{ label: "S5", quantity: 1 }]);
+    // Sized for S3, not S5: the server must still fit once the downgrade
+    // lands, or the coverage gate refuses it (`servers_uncovered`). Before
+    // the boundary it takes the smallest purchased tier at or above its
+    // rank, which is the S5 seat.
+    const { licenseId, serverId } = await mintBoundLicense(ctx, "S3");
     await project(ctx, providerSubscriptionId);
-    const licenseId = await mintLicense(ctx, s5.id);
+    checkEqual(await assignedTierOf(ctx, serverId), s5.id, "server assigned S5 on purchase");
     await pause(ctx);
 
-    const result = await downgradeLicense(mutationDeps(ctx), {
+    const result = await downgradeTier(mutationDeps(ctx), {
       organizationId: ctx.organizationId,
-      licenseId,
-      targetTierId: s3.id,
+      fromTierId: s5.id,
+      toTierId: s3.id,
     });
     check(result.ok, `downgrade accepted: ${JSON.stringify(result.body)}`);
     checkEqual(result.body.deferred, true, "downgrade is deferred");
@@ -704,21 +804,24 @@ const deferredDowngrade: Scenario = {
     checkEqual(state.subscription?.scheduleId, result.body.scheduleId, "projection records the schedule id");
     checkEqual(quantity(state, s5.id), 1, "S5 seat kept until the boundary");
     checkEqual(quantity(state, s3.id), 0, "no S3 seat before the boundary");
-    checkEqual((await licenseRow(ctx, licenseId)).tierId, s5.id, "license stays on S5 until the boundary");
+    checkEqual(await assignedTierOf(ctx, serverId), s5.id, "server stays on S5 until the boundary");
     const intents = await ledgerIntents(ctx, providerSubscriptionId);
     checkEqual(intents.length, 1, "downgrade intent outstanding before the boundary");
     checkEqual(intents[0]!.kind, "downgrade", "intent kind");
-    checkEqual(intents[0]!.licenseId, licenseId, "intent names the license it moves");
+    checkEqual(intents[0]!.id, result.body.intentId, "intent id returned to the caller");
+    checkEqual(intents[0]!.fromTierId, s5.id, "intent gives back one S5");
+    checkEqual(intents[0]!.toTierId, s3.id, "intent takes one S3");
+    checkEqual(intents[0]!.fromQuantity, 1, "intent records the S5 quantity it was written against");
+    checkEqual(intents[0]!.landsAt, state.subscription?.currentPeriodEnd ?? null, "intent lands at the period end");
 
     await advanceAndSettle(ctx, HARNESS_FIRST_PERIOD_END_UNIX);
     state = await project(ctx, providerSubscriptionId);
     checkEqual(state.subscription?.status, "active", "status after the boundary");
     checkEqual(quantity(state, s5.id), 0, "S5 seat gone at the boundary");
     checkEqual(quantity(state, s3.id), 1, "S3 seat present at the boundary");
-    const row = await licenseRow(ctx, licenseId);
-    checkEqual(row.tierId, s3.id, "license.tier_id moved to S3 by the ledger at the boundary");
-    checkEqual(row.revokedAt, null, "license not revoked");
-    checkEqual((await ledgerIntents(ctx, providerSubscriptionId)).length, 0, "downgrade intent consumed");
+    checkEqual(await assignedTierOf(ctx, serverId), s3.id, "server assigned S3 by the reprojection at the boundary");
+    checkEqual((await licenseRow(ctx, licenseId)).revokedAt, null, "license not revoked");
+    checkEqual((await ledgerIntents(ctx, providerSubscriptionId)).length, 0, "downgrade intent landed");
 
     const invoices = await fetchInvoicesForSubscription(ctx.client, providerSubscriptionId);
     checkEqual(invoices.length, 2, "exactly the first invoice and the renewal — no proration, no credit");
@@ -771,6 +874,10 @@ const quantityUpDown: Scenario = {
     const intents = await ledgerIntents(ctx, providerSubscriptionId);
     checkEqual(intents.length, 1, "one release-seat intent outstanding");
     checkEqual(intents[0]!.kind, "release-seat", "intent kind");
+    checkEqual(intents[0]!.fromTierId, s3.id, "intent gives back one S3");
+    checkEqual(intents[0]!.toTierId, null, "a release takes nothing in exchange");
+    checkEqual(intents[0]!.fromQuantity, 3, "intent records the S3 quantity it was written against");
+    checkEqual(intents[0]!.landsAt, state.subscription?.currentPeriodEnd ?? null, "intent lands at the period end");
 
     await advanceAndSettle(ctx, HARNESS_FIRST_PERIOD_END_UNIX);
     state = await project(ctx, providerSubscriptionId);
@@ -796,15 +903,18 @@ const upgradeWhilePastDue: Scenario = {
   async run(ctx) {
     const s3 = tierOf(ctx, "S3");
     const s5 = tierOf(ctx, "S5");
-    const { providerCustomerId, providerSubscriptionId, licenseId, state: pastDue } = await failRenewal(ctx, "S3");
+    const { providerCustomerId, providerSubscriptionId, licenseId, serverId, state: pastDue } = await failRenewal(
+      ctx,
+      "S3",
+    );
     const invoicesBefore = await fetchInvoicesForSubscription(ctx.client, providerSubscriptionId);
     const graceExpiresAt = pastDue.subscription!.graceExpiresAt;
 
     const counting = countingClient(ctx.client);
-    const upgrade = await upgradeLicense(mutationDeps(ctx, counting), {
+    const upgrade = await upgradeTier(mutationDeps(ctx, counting), {
       organizationId: ctx.organizationId,
-      licenseId,
-      targetTierId: s5.id,
+      fromTierId: s3.id,
+      toTierId: s5.id,
       prorationDate: ctx.time.frozen,
     });
     check(!upgrade.ok, "upgrade refused while past_due");
@@ -830,7 +940,8 @@ const upgradeWhilePastDue: Scenario = {
     checkEqual(lease, undefined, "the lease was released after the refusal");
     let state = await listSeatsForOrganization(ctx.db, ctx.organizationId);
     checkEqual(quantity(state, s3.id), 1, "entitlement unchanged by the refusals");
-    checkEqual((await licenseRow(ctx, licenseId)).tierId, s3.id, "license unchanged by the refusals");
+    checkEqual(await assignedTierOf(ctx, serverId), s3.id, "assignment unchanged by the refusals");
+    checkEqual((await licenseRow(ctx, licenseId)).revokedAt, null, "license live through the refusals");
     const invoicesAfter = await fetchInvoicesForSubscription(ctx.client, providerSubscriptionId);
     checkEqual(invoicesAfter.length, invoicesBefore.length, "no invoice issued behind a refusal");
 
@@ -844,10 +955,10 @@ const upgradeWhilePastDue: Scenario = {
     checkEqual(state.subscription?.pastDueSince, null, "past_due_since cleared on recovery");
     checkEqual(state.subscription?.graceExpiresAt, null, "grace_expires_at cleared on recovery");
 
-    const allowed = await upgradeLicense(mutationDeps(ctx), {
+    const allowed = await upgradeTier(mutationDeps(ctx), {
       organizationId: ctx.organizationId,
-      licenseId,
-      targetTierId: s5.id,
+      fromTierId: s3.id,
+      toTierId: s5.id,
       prorationDate: ctx.time.frozen,
     });
     check(allowed.ok, `upgrade accepted once active again: ${JSON.stringify(allowed.body)}`);
@@ -855,7 +966,7 @@ const upgradeWhilePastDue: Scenario = {
     state = await listSeatsForOrganization(ctx.db, ctx.organizationId);
     checkEqual(quantity(state, s5.id), 1, "S5 seat after the recovered upgrade");
     checkEqual(quantity(state, s3.id), 0, "S3 seat swapped out");
-    checkEqual((await licenseRow(ctx, licenseId)).tierId, s5.id, "license.tier_id moved to S5");
+    checkEqual(await assignedTierOf(ctx, serverId), s5.id, "server assigned S5 by the mutation's reprojection");
   },
 };
 
@@ -864,7 +975,7 @@ const dunningRetryWindow: Scenario = {
   covers: "C13 — past_due through Smart Retries' window with entitlement intact; the grace clock cancels at expiry",
   async run(ctx) {
     const s3 = tierOf(ctx, "S3");
-    const { providerSubscriptionId, licenseId, state: pastDue } = await failRenewal(ctx, "S3");
+    const { providerSubscriptionId, licenseId, serverId, state: pastDue } = await failRenewal(ctx, "S3");
     const pastDueSince = pastDue.subscription!.pastDueSince!;
     const graceExpiresAt = pastDue.subscription!.graceExpiresAt!;
     checkEqual(Date.parse(graceExpiresAt) - Date.parse(pastDueSince), BILLING_GRACE_WINDOW_MS, "grace window length");
@@ -885,6 +996,7 @@ const dunningRetryWindow: Scenario = {
       checkEqual(state.subscription?.graceExpiresAt, graceExpiresAt, `grace_expires_at holds at ${unixToIso(target)}`);
       checkEqual(quantity(state, s3.id), 1, `entitlement intact at ${unixToIso(target)}`);
       checkEqual((await licenseRow(ctx, licenseId)).revokedAt, null, `license live at ${unixToIso(target)}`);
+      checkEqual(await assignedTierOf(ctx, serverId), s3.id, `server still assigned S3 at ${unixToIso(target)}`);
     }
     check(steps >= 3, `the window was walked (${steps} steps)`);
     const invoices = await fetchInvoicesForSubscription(ctx.client, providerSubscriptionId);
@@ -922,6 +1034,8 @@ const dunningRetryWindow: Scenario = {
     checkEqual(state.subscription?.status, "canceled", "status after the grace clock");
     checkEqual(quantity(state, s3.id), 0, "seats read as zero once ended");
     check((await licenseRow(ctx, licenseId)).revokedAt, "license revoked by the reprojection");
+    checkEqual((await activeLicenseIds(ctx)).length, 0, "every license the organization held is revoked");
+    checkEqual(await assignedTierOf(ctx, serverId), null, "the server sits on nothing once ended");
 
     // A retried tick finds nothing: the reprojection moved the status.
     const again = await runGraceClockForSubscription({

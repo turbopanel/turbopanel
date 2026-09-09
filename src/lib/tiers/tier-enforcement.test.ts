@@ -5,8 +5,21 @@ import type {
   TopologySnapshot,
 } from "../../client/servers/topology-types.ts";
 import {
+  license,
+  payer,
+  server,
+  setting,
+  subscription,
+  subscriptionItem,
+  tier,
+} from "../db/schema.ts";
+import { createMemoryDb, type MemoryDb } from "../../test-fixtures/memory-db.ts";
+import {
+  evaluateHostedEnrollmentTier,
   evaluateTierFloor,
   evaluateTierPlacement,
+  LICENSE_TIER_BELOW_REQUIRED_ERROR,
+  LICENSE_TIER_UNASSIGNED_ERROR,
 } from "./tier-enforcement.ts";
 
 /**
@@ -261,4 +274,172 @@ test("a plan with no NIC slots leaves every discovered uplink unwatched, includi
     licenseLabel: "S1",
   });
   assertEquals(placement.unwatched.nics, ["nic-1"]);
+});
+
+// --- evaluateHostedEnrollmentTier ------------------------------------------
+
+const ORG = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+const PAYER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const SUB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const S1 = "11111111-1111-4111-8111-111111111111";
+const S3 = "33333333-3333-4333-8333-333333333333";
+const SERVER_A = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const LICENSE_A = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const LICENSE_NEW = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const NOW = "2026-09-07T12:00:00.000Z";
+
+const tierRow = (id: string, label: string, rank: number) => ({
+  id,
+  createdAt: NOW,
+  updatedAt: NOW,
+  label,
+  rank,
+  provider: "stripe",
+  providerProductId: `prod_${label}`,
+  priceCents: 1000 * rank,
+  currency: "usd",
+  isCustom: false,
+  isActive: true,
+});
+
+const licenseRow = (id: string, serverId: string | null) => ({
+  id,
+  organizationId: ORG,
+  serverId,
+  name: null,
+  token: "x",
+  revokedAt: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+});
+
+/**
+ * One organization with a subscription holding `quantity` seats per tier,
+ * one server bound to `LICENSE_A` (its hardware under `resources`), and an
+ * unbound `LICENSE_NEW` about to enroll.
+ */
+function enrollmentDb(opts: {
+  seats: { tierId: string; quantity: number }[];
+  resources?: ServerHostResources;
+  status?: string;
+}): MemoryDb {
+  return createMemoryDb([
+    [tier, [tierRow(S1, "S1", 1), tierRow(S3, "S3", 3)]],
+    // The self-hosted grant lives in a `setting` row; every entitlement read
+    // looks for one (`src/lib/tiers/self-hosted-grant.ts`).
+    [setting, []],
+    [payer, [{
+      id: PAYER,
+      organizationId: ORG,
+      userId: null,
+      provider: "stripe",
+      providerCustomerId: "cus_1",
+      taxId: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    }]],
+    [subscription, [{
+      id: SUB,
+      payerId: PAYER,
+      providerSubscriptionId: "sub_1",
+      status: opts.status ?? "active",
+      currentPeriodEnd: null,
+      scheduleId: null,
+      graceExpiresAt: null,
+      pastDueSince: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    }]],
+    [subscriptionItem, opts.seats.map((seat, index) => ({
+      id: `seat-${index}`,
+      subscriptionId: SUB,
+      tierId: seat.tierId,
+      providerItemId: `si_${index}`,
+      providerPriceId: `price_${index}`,
+      quantity: seat.quantity,
+      createdAt: NOW,
+      updatedAt: NOW,
+    }))],
+    [license, [licenseRow(LICENSE_A, SERVER_A), licenseRow(LICENSE_NEW, null)]],
+    [server, [{
+      id: SERVER_A,
+      organizationId: ORG,
+      createdAt: NOW,
+      updatedAt: NOW,
+      metadata: opts.resources ? { resources: opts.resources } : null,
+      assignedTierId: null,
+    }]],
+  ]);
+}
+
+test("evaluateHostedEnrollmentTier refuses a fresh enroll with 'License tier not assigned' when every purchased tier is taken", async () => {
+  // One S1 bought, one server already on it: the newcomer would be the one left out.
+  const db = enrollmentDb({ seats: [{ tierId: S1, quantity: 1 }] });
+  assertEquals(await evaluateHostedEnrollmentTier(db, LICENSE_NEW), {
+    ok: false,
+    error: LICENSE_TIER_UNASSIGNED_ERROR,
+  });
+  // Nothing bought at all reads the same way, as does an ended subscription.
+  assertEquals(
+    (await evaluateHostedEnrollmentTier(enrollmentDb({ seats: [] }), LICENSE_NEW)).ok,
+    false,
+  );
+  assertEquals(
+    (await evaluateHostedEnrollmentTier(
+      enrollmentDb({ seats: [{ tierId: S1, quantity: 5 }], status: "canceled" }),
+      LICENSE_NEW,
+    )).ok,
+    false,
+  );
+});
+
+test("evaluateHostedEnrollmentTier accepts a fresh enroll when a purchased tier is spare — hardware unknown needs only the entry rank", async () => {
+  assertEquals(
+    await evaluateHostedEnrollmentTier(enrollmentDb({ seats: [{ tierId: S1, quantity: 2 }] }), LICENSE_NEW),
+    { ok: true },
+  );
+  // A bigger spare tier covers the newcomer too: the smallest tier that fits, not an exact match.
+  assertEquals(
+    await evaluateHostedEnrollmentTier(
+      enrollmentDb({ seats: [{ tierId: S1, quantity: 1 }, { tierId: S3, quantity: 1 }] }),
+      LICENSE_NEW,
+    ),
+    { ok: true },
+  );
+});
+
+test("evaluateHostedEnrollmentTier evaluates a re-enrolling server in place and refuses 'License tier below required' when nothing bought covers it", async () => {
+  // 16 physical cores need rank 3; only S1 is bought, so the bound server is uncovered.
+  const uncovered = enrollmentDb({
+    seats: [{ tierId: S1, quantity: 2 }],
+    resources: resources({ cores: 16, memoryGib: 16 }),
+  });
+  assertEquals(await evaluateHostedEnrollmentTier(uncovered, LICENSE_A), {
+    ok: false,
+    error: LICENSE_TIER_BELOW_REQUIRED_ERROR,
+  });
+  // The re-enroll never adds a second server: with the S3 bought, it fits in place.
+  const covered = enrollmentDb({
+    seats: [{ tierId: S3, quantity: 1 }],
+    resources: resources({ cores: 16, memoryGib: 16 }),
+  });
+  assertEquals(await evaluateHostedEnrollmentTier(covered, LICENSE_A), { ok: true });
+  // And a fresh enroll beside that covered server is refused: nothing is spare.
+  assertEquals(await evaluateHostedEnrollmentTier(covered, LICENSE_NEW), {
+    ok: false,
+    error: LICENSE_TIER_UNASSIGNED_ERROR,
+  });
+});
+
+test("evaluateHostedEnrollmentTier refuses a license that does not exist or is revoked", async () => {
+  const db = enrollmentDb({ seats: [{ tierId: S1, quantity: 5 }] });
+  assertEquals(
+    await evaluateHostedEnrollmentTier(db, "ffffffff-ffff-4fff-8fff-ffffffffffff"),
+    { ok: false, error: LICENSE_TIER_UNASSIGNED_ERROR },
+  );
+  db.rows(license).find((row) => row.id === LICENSE_NEW)!.revokedAt = NOW;
+  assertEquals(await evaluateHostedEnrollmentTier(db, LICENSE_NEW), {
+    ok: false,
+    error: LICENSE_TIER_UNASSIGNED_ERROR,
+  });
 });

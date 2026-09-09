@@ -19,6 +19,7 @@ import {
   generateLicenseToken,
   invalidateLicense,
 } from "./license.ts";
+import { syncSelfHostedGrant } from "../../lib/tiers/self-hosted-grant-records.ts";
 import { clearServerDaemonState } from "../../daemon/authn/server-identity-db.ts";
 import { hashPassword } from "./password.ts";
 import { SUPERADMIN_ROLE } from "./session-store.ts";
@@ -1183,7 +1184,7 @@ export async function rotateColocatedLicenseCredentials(
     return rotateLicenseTokenInPlace(db, boundActive.id);
   }
 
-  return db.transaction(async (tx) => {
+  const created = await db.transaction(async (tx) => {
     const priorServerId = await findColocatedBoundServerId(tx, organizationId);
     await revokeActiveColocatedLicenses(tx, organizationId);
     const created = await createLicense(tx, {
@@ -1206,6 +1207,12 @@ export async function rotateColocatedLicenseCredentials(
 
     return created;
   });
+
+  // Revoke-then-mint leaves the active count where it was, but this is also
+  // the disk-recovery path: square the grant up so a restored control plane
+  // is entitled to the license it just rebuilt.
+  await syncSelfHostedGrant(db, organizationId, { allowGrow: true });
+  return created;
 }
 
 /** Active colocated license already latched to a server, if any. */
@@ -1494,6 +1501,11 @@ export async function completeInstanceInstall(
   });
 
   await clearColocatedDaemonIdentityFiles();
+
+  // The install wizard's license is the first the new organization holds:
+  // entitle it (`src/lib/tiers/self-hosted-grant.ts`) before the co-located
+  // daemon enrolls against it.
+  await syncSelfHostedGrant(db, result.organizationId, { allowGrow: true });
 
   // Always leave the root org with a latched colocated server seat so the
   // servers list is never empty after install. Prefer an already-enrolled

@@ -18,7 +18,6 @@
 import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
-  bigint,
   boolean,
   check,
   foreignKey,
@@ -368,6 +367,74 @@ export const datacenter = pgTable(
   ],
 );
 /**
+ * Platform-global billed offering: a ladder label (`S1`…`S7`, `SX`) bound
+ * to the payment provider's Product. Everything a tier *entitles* lives in
+ * code (`src/lib/tiers/ladder.ts`, keyed by `label`); the row holds only
+ * what the code cannot know — which provider product the label bills
+ * against — plus a cached display price. Rows are deactivated
+ * (`is_active = false`), never deleted. No `organization_id`: every org
+ * sees the same catalogue. Defined before `server` so
+ * `server.assigned_tier_id` can reference it.
+ */
+export const tier = pgTable(
+  "tier",
+  {
+    id: uuid()
+      .default(sql`uuidv7()`)
+      .primaryKey()
+      .notNull(),
+    createdAt: timestamp("created_at", {
+      precision: 3,
+      withTimezone: true,
+      mode: "string",
+    })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", {
+      precision: 3,
+      withTimezone: true,
+      mode: "string",
+    })
+      .defaultNow()
+      .notNull(),
+    /** `"S1"`…`"S7"`, `"SX"` — the key into the in-code ladder; unique. */
+    label: text().notNull(),
+    /** Copied from the ladder on insert, never from a request; orders tiers and decides upgrade vs downgrade. */
+    rank: integer().notNull(),
+    /** `stripe` today; `apple` reserved — matches `payer_provider_check`. */
+    provider: text().default("stripe").notNull(),
+    /**
+     * The provider's Product this tier bills against, chosen from the
+     * provider's catalogue and verified before the row is written. Null on
+     * a custom / SX row, which is therefore never purchasable.
+     */
+    providerProductId: text("provider_product_id"),
+    /**
+     * Display cache of the product's default price (minor units), written
+     * on verify and refreshed by the provider's price webhooks. Nothing
+     * does arithmetic on it: the provider owns the price.
+     */
+    priceCents: integer("price_cents"),
+    /** Display cache beside `price_cents`; lower-case ISO code. */
+    currency: text(),
+    isCustom: boolean("is_custom").default(false).notNull(),
+    isActive: boolean("is_active").default(true).notNull(),
+  },
+  (table) => [
+    uniqueIndex("uniq_tier_label").on(table.label),
+    // Rank decides upgrade-versus-downgrade direction and the greedy
+    // assignment order, so a tie would make both undefined.
+    uniqueIndex("uniq_tier_rank").on(table.rank),
+    // At most one tier per provider product: the product→tier map the
+    // projection builds is keyed on this pair, and a duplicate would resolve
+    // to whichever row it happened to see last — silently moving entitlement.
+    uniqueIndex("uniq_tier_provider_product")
+      .on(table.provider, table.providerProductId)
+      .where(sql`${table.providerProductId} IS NOT NULL`),
+    check("tier_provider_check", sql`provider IN ('stripe', 'apple')`),
+  ],
+);
+/**
  * Enrolled host. Membership in datacenters is **not** a home FK here — a
  * server may pin into many sites via `ip` rows (`scope='datacenter'` +
  * `server_id` + `datacenter_id`).
@@ -443,6 +510,15 @@ export const server = pgTable(
      * `is_connected` + `status_changed_at` (never stored). API JSON still
      * serializes as `connected`.
      */
+    /**
+     * The tier this server is assigned from the organization's purchased
+     * quantities — **derived**, never chosen: recomputed by
+     * `src/lib/tiers/assignment-records.ts` whenever seats or hardware
+     * change, and read on every ingest sample for the capability plan.
+     * Null on self-hosted, on a server with no active license, and on a
+     * server nothing purchased covers.
+     */
+    assignedTierId: uuid("assigned_tier_id"),
     isConnected: boolean("is_connected").default(false).notNull(),
     /**
      * Last status transition (`is_connected` flip). Feeds derived `connectedAt`
@@ -478,83 +554,19 @@ export const server = pgTable(
       foreignColumns: [organization.id],
       name: "server_organization_id_organization_id_fk",
     }).onDelete("restrict"),
+    index("idx_server_assigned_tier_id").using(
+      "btree",
+      table.assignedTierId.asc().nullsLast().op("uuid_ops"),
+    ),
+    foreignKey({
+      columns: [table.assignedTierId],
+      foreignColumns: [tier.id],
+      name: "server_assigned_tier_id_tier_id_fk",
+    }).onDelete("set null"),
     check(
       "server_machine_class_check",
       sql`${table.machineClass} IN ('physical', 'virtual')`,
     ),
-  ],
-);
-/**
- * Platform-global billed offering. Tiers are rows, not an enum — a new
- * generation is a new set of rows, `rank` orders them within a generation,
- * and `successor_id` points at the replacement when a generation is
- * superseded. Rows are deactivated (`is_active = false`), never deleted.
- * No `organization_id`: every org sees the same catalog. Defined before
- * `license` so `license.tier_id` can reference it.
- */
-export const tier = pgTable(
-  "tier",
-  {
-    id: uuid()
-      .default(sql`uuidv7()`)
-      .primaryKey()
-      .notNull(),
-    createdAt: timestamp("created_at", {
-      precision: 3,
-      withTimezone: true,
-      mode: "string",
-    })
-      .defaultNow()
-      .notNull(),
-    updatedAt: timestamp("updated_at", {
-      precision: 3,
-      withTimezone: true,
-      mode: "string",
-    })
-      .defaultNow()
-      .notNull(),
-    generation: integer().notNull(),
-    rank: integer().notNull(),
-    /** `"S1"`…`"S7"`, `"SX"` — unique with `generation`. */
-    label: text().notNull(),
-    /** Null for custom / SX negotiated offerings. */
-    priceCents: integer("price_cents"),
-    /**
-     * The Stripe Price this tier bills against. Entered by a superadmin
-     * and verified against Stripe before the row is written; null on a
-     * custom / negotiated row, which is therefore never purchasable.
-     */
-    providerPriceId: text("provider_price_id"),
-    isCustom: boolean("is_custom").default(false).notNull(),
-    isActive: boolean("is_active").default(true).notNull(),
-    successorId: uuid("successor_id"),
-    maxCores: integer("max_cores").notNull(),
-    maxMemoryBytes: bigint("max_memory_bytes", { mode: "number" }).notNull(),
-    nicSlots: integer("nic_slots").notNull(),
-    driveSlots: integer("drive_slots").notNull(),
-    gpuSlots: integer("gpu_slots").notNull(),
-    filesystemSlots: integer("filesystem_slots").notNull(),
-  },
-  (table) => [
-    uniqueIndex("uniq_tier_generation_label").on(table.generation, table.label),
-    // Rank decides upgrade-versus-downgrade direction, so a tie inside one
-    // generation would make that direction undefined.
-    uniqueIndex("uniq_tier_generation_rank").on(table.generation, table.rank),
-    // At most one tier per Stripe Price: the price→tier map the projection
-    // builds is keyed on this id, and a duplicate would resolve to whichever
-    // row it happened to see last — silently moving entitlement.
-    uniqueIndex("uniq_tier_provider_price_id")
-      .on(table.providerPriceId)
-      .where(sql`${table.providerPriceId} IS NOT NULL`),
-    index("idx_tier_successor_id").using(
-      "btree",
-      table.successorId.asc().nullsLast().op("uuid_ops"),
-    ),
-    foreignKey({
-      columns: [table.successorId],
-      foreignColumns: [table.id],
-      name: "tier_successor_id_tier_id_fk",
-    }).onDelete("set null"),
   ],
 );
 /**
@@ -585,8 +597,6 @@ export const license = pgTable(
     organizationId: uuid("organization_id").notNull(),
     /** Set on first successful enroll — one-shot seat latch. */
     serverId: uuid("server_id"),
-    /** Hosted billing tier; null on self-hosted / unlicensed seats. */
-    tierId: uuid("tier_id"),
     name: varchar({ length: 255 }),
     /** Argon2id PHC hashed token — same format as account.password */
     token: text().notNull(),
@@ -602,10 +612,6 @@ export const license = pgTable(
       "btree",
       table.organizationId.asc().nullsLast().op("uuid_ops"),
     ),
-    index("idx_license_tier_id").using(
-      "btree",
-      table.tierId.asc().nullsLast().op("uuid_ops"),
-    ),
     // One license per server once consumed (revoked rows keep server_id for audit).
     uniqueIndex("uniq_license_server_id")
       .on(table.serverId)
@@ -620,11 +626,6 @@ export const license = pgTable(
       foreignColumns: [server.id],
       name: "license_server_id_server_id_fk",
     }).onDelete("set null"),
-    foreignKey({
-      columns: [table.tierId],
-      foreignColumns: [tier.id],
-      name: "license_tier_id_tier_id_fk",
-    }).onDelete("restrict"),
   ],
 );
 /**
@@ -819,6 +820,15 @@ export const subscriptionItem = pgTable(
     tierId: uuid("tier_id").notNull(),
     /** Provider-side subscription item id (Stripe `si_…`). */
     providerItemId: text("provider_item_id").notNull(),
+    /**
+     * The provider price the item bills at (Stripe `price_…`), as projected
+     * from the item itself — the price a mutation restates when it rewrites
+     * `items[]` or a schedule phase. A tier knows its product, not its
+     * price; the price lives here because it is the item's, not the tier's.
+     * Nullable only so the column could be added under existing rows; the
+     * next projection fills it, and a line without one is skipped.
+     */
+    providerPriceId: text("provider_price_id"),
     quantity: integer().notNull(),
   },
   (table) => [
@@ -842,7 +852,7 @@ export const subscriptionItem = pgTable(
       foreignColumns: [subscription.id],
       name: "seat_subscription_id_subscription_id_fk",
     }).onDelete("cascade"),
-    // Tiers are immutable priced offerings — same rule as `license.tier_id`.
+    // A tier a seat once counted against must stay readable.
     foreignKey({
       columns: [table.tierId],
       foreignColumns: [tier.id],

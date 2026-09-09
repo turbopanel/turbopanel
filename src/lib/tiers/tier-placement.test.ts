@@ -13,12 +13,18 @@ import {
   ramBand,
   resolveRecommendedTier,
   resolveRequiredTier,
+  TIER_CPU_CORE_THRESHOLDS,
   TIER_DRIVE_SLOT_THRESHOLDS,
+  TIER_GPU_SLOT_THRESHOLDS,
   TIER_NIC_SLOT_THRESHOLDS,
   TIER_RAM_BYTE_THRESHOLDS,
   totalPhysicalCores,
 } from "./tier-placement.ts";
-import { metricsCapabilityTierEntitlementsFromRow } from "./tier-entitlements.ts";
+import { ladderEntitlements, PRICED_LADDER } from "./ladder.ts";
+import {
+  metricsCapabilityTierEntitlementsForLabel,
+  metricsCapabilityTierEntitlementsForRank,
+} from "./tier-entitlements.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -86,10 +92,41 @@ test("cpuBand / ramBand pin every band edge, including SX above S7", () => {
   assertEquals(cpuBand(256).label, "S7");
   assertEquals(cpuBand(257).label, "SX");
 
-  assertEquals(ramBand(TIER_RAM_BYTE_THRESHOLDS[0]).label, "S1");
-  assertEquals(ramBand(TIER_RAM_BYTE_THRESHOLDS[0] + 1).label, "S2");
-  assertEquals(ramBand(TIER_RAM_BYTE_THRESHOLDS[6]).label, "S7");
-  assertEquals(ramBand(TIER_RAM_BYTE_THRESHOLDS[6] + 1).label, "SX");
+  assertEquals(ramBand(TIER_RAM_BYTE_THRESHOLDS[0]!).label, "S1");
+  assertEquals(ramBand(TIER_RAM_BYTE_THRESHOLDS[0]! + 1).label, "S2");
+  assertEquals(ramBand(TIER_RAM_BYTE_THRESHOLDS[6]!).label, "S7");
+  assertEquals(ramBand(TIER_RAM_BYTE_THRESHOLDS[6]! + 1).label, "SX");
+});
+
+test("every placement threshold list is read from the priced ladder, one entry per rank S1…S7", () => {
+  assertEquals(PRICED_LADDER.map((entry) => entry.label), [
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "S5",
+    "S6",
+    "S7",
+  ]);
+  assertEquals(
+    TIER_CPU_CORE_THRESHOLDS,
+    PRICED_LADDER.map((entry) => entry.maxCores),
+  );
+  assertEquals(
+    TIER_RAM_BYTE_THRESHOLDS,
+    PRICED_LADDER.map((entry) => entry.maxMemoryBytes),
+  );
+  assertEquals(
+    TIER_NIC_SLOT_THRESHOLDS,
+    PRICED_LADDER.map((entry) => entry.nicSlots),
+  );
+  assertEquals(
+    TIER_DRIVE_SLOT_THRESHOLDS,
+    PRICED_LADDER.map((entry) => entry.driveSlots),
+  );
+  // GPU counts repeat across neighbouring rungs; the band is the first rank selling each count.
+  assertEquals(TIER_GPU_SLOT_THRESHOLDS, [2, 4, 6, 8]);
+  assertEquals(TIER_CPU_CORE_THRESHOLDS, [4, 10, 16, 32, 64, 128, 256]);
 });
 
 test("a 4-core NAS with 12 monitored drives is required S1 / recommended S5", () => {
@@ -163,41 +200,29 @@ test("monitoredEntityCountsFromSlotMapping reads SlotMapping lengths", () => {
   });
 });
 
-test("metricsCapabilityTierEntitlementsFromRow treats rank 1 as the entry tier", () => {
-  assertEquals(
-    metricsCapabilityTierEntitlementsFromRow({
-      nicSlots: 2,
-      driveSlots: 2,
-      gpuSlots: 1,
-      filesystemSlots: 3,
-      rank: 1,
-    }),
-    {
-      nicSlots: 2,
-      driveSlots: 2,
-      gpuSlots: 1,
-      filesystemSlots: 3,
-      isEntryTier: true,
-    },
-  );
-  assertEquals(
-    metricsCapabilityTierEntitlementsFromRow({
-      nicSlots: 5,
-      driveSlots: 4,
-      gpuSlots: 2,
-      filesystemSlots: 3,
-      rank: 2,
-    })?.isEntryTier,
-    false,
-  );
-  assertEquals(
-    metricsCapabilityTierEntitlementsFromRow({
-      nicSlots: null,
-      driveSlots: 2,
-      gpuSlots: 1,
-      filesystemSlots: 0,
-      rank: 1,
-    }),
-    undefined,
-  );
+test("metricsCapabilityTierEntitlementsForRank reads the ladder by rank and treats rank 1 as the entry tier", () => {
+  assertEquals(metricsCapabilityTierEntitlementsForRank(1), {
+    nicSlots: 2,
+    driveSlots: 2,
+    gpuSlots: 2,
+    filesystemSlots: 9,
+    isEntryTier: true,
+  });
+  assertEquals(metricsCapabilityTierEntitlementsForRank(1), ladderEntitlements("S1"));
+  assertEquals(metricsCapabilityTierEntitlementsForRank(2)?.isEntryTier, false);
+  assertEquals(metricsCapabilityTierEntitlementsForRank(2), ladderEntitlements("S2"));
+  // SX is the last rung: every slot the daemon can monitor.
+  assertEquals(metricsCapabilityTierEntitlementsForRank(8)?.nicSlots, MAX_NIC_SLOTS);
+  // No rank, or a rank off the ladder, is "no tier": the platform default plan.
+  assertEquals(metricsCapabilityTierEntitlementsForRank(null), undefined);
+  assertEquals(metricsCapabilityTierEntitlementsForRank(undefined), undefined);
+  assertEquals(metricsCapabilityTierEntitlementsForRank(0), undefined);
+  assertEquals(metricsCapabilityTierEntitlementsForRank(99), undefined);
+});
+
+test("metricsCapabilityTierEntitlementsForLabel is the ladder lookup by label", () => {
+  assertEquals(metricsCapabilityTierEntitlementsForLabel("S3"), ladderEntitlements("S3"));
+  assertEquals(metricsCapabilityTierEntitlementsForLabel("S3")?.isEntryTier, false);
+  assertEquals(metricsCapabilityTierEntitlementsForLabel("S9"), undefined);
+  assertEquals(metricsCapabilityTierEntitlementsForLabel(null), undefined);
 });

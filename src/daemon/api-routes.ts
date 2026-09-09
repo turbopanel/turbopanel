@@ -59,12 +59,16 @@ import {
   parseServerOptions,
   resolveEffectiveMetricsCapabilityPlan,
 } from "../lib/db/server-metadata.ts";
-import { metricsCapabilityTierEntitlementsFromRow } from "../lib/tiers/tier-entitlements.ts";
+import { metricsCapabilityTierEntitlementsForRank } from "../lib/tiers/tier-entitlements.ts";
+import { recomputeAssignmentsForServer } from "../lib/tiers/assignment-records.ts";
+import {
+  syncSelfHostedGrantForLicense,
+  syncSelfHostedGrantForServer,
+} from "../lib/tiers/self-hosted-grant-records.ts";
 import {
   evaluateHostedEnrollmentTier,
   evaluateTierFloor,
   LICENSE_TIER_BELOW_REQUIRED_ERROR,
-  LICENSE_TIER_UNASSIGNED_ERROR,
   loadServerLicenseTierJoin,
 } from "../lib/tiers/tier-enforcement.ts";
 import {
@@ -476,7 +480,21 @@ async function loadActiveDaemonKeyState(
   return { ok: true, daemonState };
 }
 
-/** Confirms the server's bound license (if any) is still active and, on the hosted path, meets the hardware floor. */
+/**
+ * Confirms the server's bound license (if any) is still active and that an
+ * entitled tier covers it. The assignment is derived
+ * (`assignment-records.ts`); a licensed server assigned nothing gets one
+ * recompute here — the hardware report and the projection may have raced
+ * this session — and is refused only when it still ends uncovered. The
+ * error string is byte-identical to the daemon's permanent-auth list.
+ *
+ * **The same check runs on both runtimes.** Self-hosted is not exempted;
+ * it is entitled instead, by the grant (`self-hosted-grant.ts`) that is
+ * brought in line here before anything is read. Reconnecting is therefore
+ * also the backfill path for an organization licensed before the grant
+ * existed, and for one whose control plane has just moved from Deno to
+ * Workers — the grant it left behind is what keeps its daemons connected.
+ */
 async function checkServerLicenseEntitlement(
   db: Db,
   serverId: string,
@@ -488,14 +506,25 @@ async function checkServerLicenseEntitlement(
     if (!activeLicense) {
       return { ok: false, status: 400, error: "License is inactive" };
     }
+    // Deliberately unguarded, like the recompute below: this decides the
+    // daemon's fate, so a database error must surface as a 500 the daemon
+    // retries rather than as a permanent refusal.
+    await syncSelfHostedGrantForServer(db, serverId, deployment);
   }
-  if (deployment === "self-hosted") return { ok: true };
 
-  const row = await loadServerLicenseTierJoin(db, serverId);
-  if (row?.licenseId && !row.licenseTierId) {
-    return { ok: false, status: 400, error: LICENSE_TIER_UNASSIGNED_ERROR };
+  let row = await loadServerLicenseTierJoin(db, serverId);
+  if (row?.licenseId && !row.assignedTierId) {
+    // Deliberately unguarded: this decides the daemon's fate. A refusal here
+    // is a 400, which the daemon treats as permanent and parks on, so a
+    // transient database error must surface as a 500 (transient, retried)
+    // rather than be swallowed into "still unassigned, refuse permanently".
+    await recomputeAssignmentsForServer(db, serverId);
+    row = await loadServerLicenseTierJoin(db, serverId);
   }
-  if (row?.licenseTierId && row.tierRank != null) {
+  if (row?.licenseId && !row.assignedTierId) {
+    return { ok: false, status: 400, error: LICENSE_TIER_BELOW_REQUIRED_ERROR };
+  }
+  if (row?.assignedTierId && row.tierRank != null) {
     const metadata = isPlainObject(row.serverMetadata)
       ? row.serverMetadata
       : undefined;
@@ -518,6 +547,7 @@ async function checkServerLicenseEntitlement(
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
 
 /**
  * A snapshot is only usable for slot mapping once it carries every array
@@ -605,7 +635,7 @@ async function loadIngestServerPlanRow(
   deployment: MetricsDeploymentKind,
 ): Promise<
   | (IngestServerPlanRow & {
-    tier: ReturnType<typeof metricsCapabilityTierEntitlementsFromRow>;
+    tier: ReturnType<typeof metricsCapabilityTierEntitlementsForRank>;
   })
   | undefined
 > {
@@ -633,13 +663,7 @@ async function loadIngestServerPlanRow(
     orgOptions: joined.orgOptions,
     serverMetadata: joined.serverMetadata,
     machineClass: joined.machineClass,
-    tier: metricsCapabilityTierEntitlementsFromRow({
-      nicSlots: joined.nicSlots,
-      driveSlots: joined.driveSlots,
-      gpuSlots: joined.gpuSlots,
-      filesystemSlots: joined.filesystemSlots,
-      rank: joined.tierRank,
-    }),
+    tier: metricsCapabilityTierEntitlementsForRank(joined.tierRank),
   };
 }
 
@@ -792,6 +816,8 @@ async function primeCapabilityPlanAfterEnroll(
 ): Promise<void> {
   if (deployment === "self-hosted") return;
   try {
+    // The server just bound a license: place it before reading its plan.
+    await recomputeAssignmentsForServer(db, serverId);
     const planRow = await loadIngestServerPlanRow(db, serverId, deployment);
     const machineClass = resolveServerMachineClass(
       planRow?.machineClass,
@@ -1189,11 +1215,16 @@ export function registerDaemonApiRoutes<E extends Env>(
       return c.json({ ok: false, error: "Invalid signature" }, 403);
     }
 
-    if (deployment !== "self-hosted") {
-      const tierGate = await evaluateHostedEnrollmentTier(db, licenseId);
-      if (!tierGate.ok) {
-        return c.json({ ok: false, error: tierGate.error }, 400);
-      }
+    // Same gate on both runtimes. Self-hosted grants itself the coverage
+    // first (`self-hosted-grant.ts`), so the check passes there by being
+    // entitled rather than by being skipped — and the row it writes is what
+    // still covers this server after a switch to the hosted runtime.
+    if (deployment === "self-hosted") {
+      await syncSelfHostedGrantForLicense(db, licenseId);
+    }
+    const tierGate = await evaluateHostedEnrollmentTier(db, licenseId);
+    if (!tierGate.ok) {
+      return c.json({ ok: false, error: tierGate.error }, 400);
     }
 
     const fabricDeps = enrollFabricDepsFromContext(c);

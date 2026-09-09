@@ -282,7 +282,7 @@ Stripe's table, this phase (`src/webhook/billing/stripe-projection.ts`):
 | `type` | Handling |
 | --- | --- |
 | `customer.subscription.created` / `.updated` / `.deleted` | refetch the subscription (customer + tax ids expanded); upsert `payer` → `subscription` → `seat`; then sync entitlements |
-| `customer.subscription.pending_update_applied` | same refetch — the committed items now carry the change, so the upgrade intent is consumed and `license.tier_id` moves |
+| `customer.subscription.pending_update_applied` | same refetch — the committed items now carry the change, so the derived server assignment moves onto the new tier |
 | `customer.subscription.pending_update_expired` | same refetch (items never changed); the ledger's upgrade intents are dropped and logged — the console offers a retry |
 | `checkout.session.completed` | refetch the session; project its subscription when it has one |
 | `invoice.paid` / `invoice.payment_failed` | refetch the invoice, resolve its subscription, project that — the subscription's own status carries the payment outcome and moves `past_due_since` |

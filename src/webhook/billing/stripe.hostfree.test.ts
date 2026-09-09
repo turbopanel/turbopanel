@@ -16,11 +16,11 @@ import type { BillingConfig } from '../../lib/billing/config.ts'
 import { createStripeClient, type StripeFetch } from '../../lib/billing/client.ts'
 import { computeStripeSignature } from '../../lib/billing/webhook-signature.ts'
 import { STRIPE_CUSTOMER_ORGANIZATION_METADATA_KEY } from '../../lib/billing/customer-subject.ts'
-import { license, payer, setting, subscription, subscriptionItem, tier, webhookDelivery } from '../../lib/db/schema.ts'
+import { license, payer, server, setting, subscription, subscriptionItem, tier, webhookDelivery } from '../../lib/db/schema.ts'
 import { createMemoryDb, type MemoryDb } from '../../test-fixtures/memory-db.ts'
-import { emptyLedger, newUpgradeIntent, readPendingChanges, withIntent, writePendingChanges } from '../../lib/billing/pending-changes.ts'
+import { emptyLedger, newDeferredIntent, readPendingChanges, withIntent, writePendingChanges } from '../../lib/billing/pending-changes.ts'
 import { registerWebhookRoutes } from '../routes.ts'
-import { projectSubscriptionById } from './stripe-projection.ts'
+import { PROJECTED_STRIPE_EVENT_TYPES, projectSubscriptionById } from './stripe-projection.ts'
 import {
   registerStripeWebhookRoutes,
   STRIPE_WEBHOOK_MAX_BODY_BYTES,
@@ -59,10 +59,10 @@ function tableName(table: unknown): string {
   return 'unknown'
 }
 
+/** A tier row is a ladder label bound to a provider product; the item's price names that product. */
 const TIER_ROW = {
-  id: TIER_ID, label: 'S1', generation: 1, rank: 1, priceCents: 1000, providerPriceId: 'price_s1', isCustom: false, isActive: true,
-  successorId: null, maxCores: 4, maxMemoryBytes: 1, nicSlots: 1, driveSlots: 1, gpuSlots: 0, filesystemSlots: 1,
-  createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
+  id: TIER_ID, createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
+  label: 'S1', rank: 1, provider: 'stripe', providerProductId: 'prod_s1', priceCents: 1000, currency: 'usd', isCustom: false, isActive: true,
 }
 
 /**
@@ -79,6 +79,7 @@ function stubDb(trace: Trace, opts: { claimed?: boolean; licenses?: Record<strin
     [subscriptionItem, []],
     [tier, [TIER_ROW]],
     [license, opts.licenses ?? []],
+    [server, []],
     [setting, []],
   ])
   const inserts: { table: string; values: Record<string, unknown> }[] = []
@@ -123,8 +124,21 @@ const SUBSCRIPTION_FROM_STRIPE = {
     object: 'list',
     has_more: false,
     data: [
-      { id: 'si_1', object: 'subscription_item', quantity: 4, price: { id: 'price_s1' }, current_period_end: 1_800_000_000 },
+      { id: 'si_1', object: 'subscription_item', quantity: 4, price: { id: 'price_s1', product: 'prod_s1' }, current_period_end: 1_800_000_000 },
     ],
+  },
+}
+
+/** `GET /v1/products/prod_s1?expand[]=default_price`: the Dashboard now says 15.00. */
+const PRODUCT_FROM_STRIPE = {
+  id: 'prod_s1',
+  object: 'product',
+  active: true,
+  name: 'S1',
+  metadata: { turbopanel_tier: 'S1' },
+  default_price: {
+    id: 'price_s1', object: 'price', active: true, type: 'recurring', currency: 'usd', unit_amount: 1500,
+    recurring: { interval: 'month', interval_count: 1 }, billing_scheme: 'per_unit', tax_behavior: 'exclusive', livemode: false,
   },
 }
 
@@ -137,6 +151,9 @@ function stripeFetchDouble(calls: string[], subscriptionFromStripe: Record<strin
     }
     if (url.pathname === '/v1/invoices/in_1') {
       return Promise.resolve(new Response(JSON.stringify({ id: 'in_1', subscription: 'sub_1' }), { status: 200 }))
+    }
+    if (url.pathname === '/v1/products/prod_s1') {
+      return Promise.resolve(new Response(JSON.stringify(PRODUCT_FROM_STRIPE), { status: 200 }))
     }
     return Promise.resolve(new Response(JSON.stringify({ error: { type: 'invalid_request_error', message: 'no' } }), { status: 404 }))
   }
@@ -316,6 +333,8 @@ test('a valid delivery answers 200 immediately, without awaiting the projection'
   assertEquals(seatInsert?.values.tierId, TIER_ID)
   assertEquals(seatInsert?.values.quantity, 4)
   assertEquals(seatInsert?.values.providerItemId, 'si_1')
+  // The seat carries the item's own price: what a mutation restates in `items[]`.
+  assertEquals(seatInsert?.values.providerPriceId, 'price_s1')
 })
 
 test('an invoice event resolves its subscription and projects that', async () => {
@@ -329,7 +348,6 @@ test('an invoice event resolves its subscription and projects that', async () =>
 })
 
 const LICENSE_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
-const TIER_S5 = '55555555-5555-4555-8555-555555555555'
 
 test('a subscription carrying a pending_update projects the OLD quantities — entitlement is raised by committed items only', async () => {
   const h = await buildApp({
@@ -347,45 +365,65 @@ test('a subscription carrying a pending_update projects the OLD quantities — e
   assertEquals(seats[0]?.quantity, 4)
 })
 
-test('pending_update_applied consumes the upgrade intent and repoints the license; pending_update_expired drops it', async () => {
-  h5: {
-    // S5 is the upgrade target; the committed items now show one S5 seat.
+test('pending_update_applied lands the intent the committed items now show; pending_update_expired only reprojects and the intent survives', async () => {
+  const licenses = [{ id: LICENSE_ID, organizationId: ORG_ID, serverId: null, name: null, token: 'x', revokedAt: null, createdAt: 'c', updatedAt: 'c' }]
+  // One S1 seat given back at the boundary, written when the tier counted 4.
+  const intent = () => newDeferredIntent('release-seat', { fromTierId: TIER_ID, toTierId: null, landsAt: null, fromQuantity: 4 })
+  applied: {
+    // The committed items now count 3: the release has landed.
     const h = await buildApp({
-      licenses: [{ id: LICENSE_ID, organizationId: ORG_ID, serverId: null, tierId: TIER_ID, name: null, token: 'x', revokedAt: null, createdAt: 'c', updatedAt: 'c' }],
+      licenses,
       subscriptionFromStripe: {
         ...SUBSCRIPTION_FROM_STRIPE,
         items: { object: 'list', has_more: false, data: [
-          { id: 'si_1', object: 'subscription_item', quantity: 3, price: { id: 'price_s1' }, current_period_end: 1_800_000_000 },
-          { id: 'si_5', object: 'subscription_item', quantity: 1, price: { id: 'price_s5' }, current_period_end: 1_800_000_000 },
+          { id: 'si_1', object: 'subscription_item', quantity: 3, price: { id: 'price_s1', product: 'prod_s1' }, current_period_end: 1_800_000_000 },
         ] },
       },
     })
-    h.db.rows(tier).push({ ...TIER_ROW, id: TIER_S5, label: 'S5', rank: 5, providerPriceId: 'price_s5' })
-    const intent = newUpgradeIntent({ licenseId: LICENSE_ID, fromTierId: TIER_ID, toTierId: TIER_S5 })
-    await writePendingChanges(h.db, ORG_ID, withIntent(emptyLedger('sub_1'), intent))
+    await writePendingChanges(h.db, ORG_ID, withIntent(emptyLedger('sub_1'), intent()))
 
     const res = await h.app.request(await signedPost(event('customer.subscription.pending_update_applied', { id: 'sub_1', object: 'subscription' }, 'evt_5')))
     assertEquals(res.status, 200)
     await h.scheduled[0]!()
-    assertEquals(h.db.rows(license)[0]?.tierId, TIER_S5)
+    assertEquals(h.db.rows(subscriptionItem).map((row) => row.quantity), [3])
     const { ledger } = await readPendingChanges(h.db, ORG_ID, 'sub_1')
     assertEquals(ledger.intents, [])
-    break h5
+    // The unbound license is untouched: a license carries no tier to repoint.
+    assertEquals(h.db.rows(license)[0]?.revokedAt, null)
+    break applied
   }
   {
+    // Items never changed (still 4) and the schedule still carries the phase:
+    // nothing landed, nothing dropped — expiry is a plain reprojection.
     const h = await buildApp({
-      licenses: [{ id: LICENSE_ID, organizationId: ORG_ID, serverId: null, tierId: TIER_ID, name: null, token: 'x', revokedAt: null, createdAt: 'c', updatedAt: 'c' }],
+      licenses,
+      subscriptionFromStripe: { ...SUBSCRIPTION_FROM_STRIPE, schedule: 'sub_sched_1' },
     })
-    const intent = newUpgradeIntent({ licenseId: LICENSE_ID, fromTierId: TIER_ID, toTierId: TIER_S5 })
-    await writePendingChanges(h.db, ORG_ID, withIntent(emptyLedger('sub_1'), intent))
+    const written = intent()
+    await writePendingChanges(h.db, ORG_ID, withIntent(emptyLedger('sub_1'), written))
     const res = await h.app.request(await signedPost(event('customer.subscription.pending_update_expired', { id: 'sub_1', object: 'subscription' }, 'evt_6')))
     assertEquals(res.status, 200)
     await h.scheduled[0]!()
-    // Items never changed; the intent is gone; the license stayed where it was.
-    assertEquals(h.db.rows(license)[0]?.tierId, TIER_ID)
+    assertEquals(h.stripeCalls, ['/v1/subscriptions/sub_1?expand%5B0%5D=customer&expand%5B1%5D=customer.tax_ids'])
+    assertEquals(h.db.rows(subscriptionItem).map((row) => row.quantity), [4])
     const { ledger } = await readPendingChanges(h.db, ORG_ID, 'sub_1')
-    assertEquals(ledger.intents, [])
+    assertEquals(ledger.intents.map((i) => i.id), [written.id])
   }
+})
+
+test('the two catalogue events are projected: product.updated refreshes the tier cache through the same deferred task', async () => {
+  assertEquals(PROJECTED_STRIPE_EVENT_TYPES.includes('product.updated'), true)
+  assertEquals(PROJECTED_STRIPE_EVENT_TYPES.includes('price.updated'), true)
+  const h = await buildApp()
+  const res = await h.app.request(await signedPost(event('product.updated', { id: 'prod_s1', object: 'product' }, 'evt_7')))
+  assertEquals(res.status, 200)
+  assertEquals(h.trace, ['limiter', 'insert:delivery', 'scheduled'])
+  await h.scheduled[0]!()
+  assertEquals(h.stripeCalls, ['/v1/products/prod_s1?expand%5B0%5D=default_price'])
+  assertEquals(h.db.rows(tier)[0]?.priceCents, 1500)
+  assertEquals(h.db.rows(tier)[0]?.currency, 'usd')
+  // No subscription was projected and no lease was taken.
+  assertEquals(h.trace.filter((t) => t.startsWith('insert:')), ['insert:delivery'])
 })
 
 test('an unhandled event type is a logged no-op after the 200', async () => {
@@ -424,7 +462,7 @@ test('registerWebhookRoutes does not mount the Stripe kind on Deno: self-hosted 
 })
 
 const TIER_S2 = '22222222-2222-4222-8222-222222222222'
-const TIER_S2_ROW = { ...TIER_ROW, id: TIER_S2, label: 'S2', rank: 2, providerPriceId: 'price_s2' }
+const TIER_S2_ROW = { ...TIER_ROW, id: TIER_S2, label: 'S2', rank: 2, providerProductId: 'prod_s2' }
 
 /** A projected org with one seat row on `sub_1`, before the two-item refetch lands. */
 function projectedDb(): MemoryDb {
@@ -432,9 +470,10 @@ function projectedDb(): MemoryDb {
   return createMemoryDb([
     [payer, [{ id: 'payer-1', provider: 'stripe', providerCustomerId: 'cus_1', organizationId: ORG_ID, userId: null, taxId: null, createdAt: at, updatedAt: at }]],
     [subscription, [{ id: 'sub-row', payerId: 'payer-1', providerSubscriptionId: 'sub_1', status: 'active', currentPeriodEnd: null, scheduleId: null, pastDueSince: null, graceExpiresAt: null, createdAt: at, updatedAt: at }]],
-    [subscriptionItem, [{ id: 'seat-old', subscriptionId: 'sub-row', tierId: TIER_ID, providerItemId: 'si_old', quantity: 4, createdAt: at, updatedAt: at }]],
+    [subscriptionItem, [{ id: 'seat-old', subscriptionId: 'sub-row', tierId: TIER_ID, providerItemId: 'si_old', providerPriceId: 'price_s1', quantity: 4, createdAt: at, updatedAt: at }]],
     [tier, [TIER_ROW, TIER_S2_ROW]],
     [license, []],
+    [server, []],
     [setting, []],
   ])
 }
@@ -445,8 +484,8 @@ const TWO_ITEM_SUBSCRIPTION = {
     object: 'list',
     has_more: false,
     data: [
-      { id: 'si_1', object: 'subscription_item', quantity: 2, price: { id: 'price_s1' } },
-      { id: 'si_2', object: 'subscription_item', quantity: 1, price: { id: 'price_s2' } },
+      { id: 'si_1', object: 'subscription_item', quantity: 2, price: { id: 'price_s1', product: 'prod_s1' } },
+      { id: 'si_2', object: 'subscription_item', quantity: 1, price: { id: 'price_s2', product: 'prod_s2' } },
     ],
   },
 }
@@ -456,8 +495,8 @@ test('the projection writes payer, subscription and seats inside one transaction
   const client = createStripeClient(CONFIG, { fetch: stripeFetchDouble([], TWO_ITEM_SUBSCRIPTION) })
   const outcome = await projectSubscriptionById({ db, client, now: '2026-09-07T12:00:00.000Z' }, 'sub_1')
   assertEquals(outcome.action, 'projected')
-  const seats = db.rows(subscriptionItem).map((row) => [row.providerItemId, row.quantity])
-  assertEquals(seats, [['si_1', 2], ['si_2', 1]])
+  const seats = db.rows(subscriptionItem).map((row) => [row.providerItemId, row.tierId, row.providerPriceId, row.quantity])
+  assertEquals(seats, [['si_1', TIER_ID, 'price_s1', 2], ['si_2', TIER_S2, 'price_s2', 1]])
   // Every projection write sits between `begin` and `commit`; nothing lands outside.
   const begin = db.ops.indexOf('begin')
   const commit = db.ops.indexOf('commit')

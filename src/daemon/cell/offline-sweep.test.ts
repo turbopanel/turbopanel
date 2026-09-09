@@ -1445,7 +1445,7 @@ function billingSweepDb(opts: { withSubscription: boolean }): MemoryDb {
     [license, []],
     [tier, []],
     [payer, []],
-    ...(opts.withSubscription ? [[subscription, []] as const] : []),
+    ...(opts.withSubscription ? [[subscription, []] as [typeof subscription, Record<string, unknown>[]]] : []),
     [subscriptionItem, []],
   ]);
 }

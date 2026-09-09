@@ -26,8 +26,6 @@ const test = Deno.test.bind(Deno)
 
 const S3 = '33333333-3333-4333-8333-333333333333'
 const S5 = '55555555-5555-4555-8555-555555555555'
-const LICENSE_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
-const LICENSE_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const PRICES = new Map([[S3, 'price_s3'], [S5, 'price_s5']])
 const CURRENT: SeatLine[] = [
   { providerItemId: 'si_3', providerPriceId: 'price_s3', tierId: S3, quantity: 2 },
@@ -64,8 +62,8 @@ function scheduleResponder(calls: string[]) {
 
 test('computeDeferredItems applies every outstanding intent from scratch and drops zero tiers', () => {
   let ledger = emptyLedger('sub_1')
-  ledger = withIntent(ledger, newDeferredIntent('downgrade', { licenseId: LICENSE_A, fromTierId: S5, toTierId: S3 }))
-  ledger = withIntent(ledger, newDeferredIntent('downgrade', { licenseId: LICENSE_B, fromTierId: S5, toTierId: S3 }))
+  ledger = withIntent(ledger, newDeferredIntent('downgrade', { fromTierId: S5, toTierId: S3, landsAt: null, fromQuantity: 2 }))
+  ledger = withIntent(ledger, newDeferredIntent('downgrade', { fromTierId: S5, toTierId: S3, landsAt: null, fromQuantity: 2 }))
   const items = computeDeferredItems(CURRENT, deferredDeltasByTier(ledger), PRICES)
   // Two stacked downgrades: S5 2 → 0 (dropped), S3 2 → 4. No incremental patch.
   assertEquals(items, [{ price: 'price_s3', quantity: 4 }])

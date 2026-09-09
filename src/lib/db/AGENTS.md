@@ -30,8 +30,12 @@ repository inspection columns into `0000_init.sql` (replacing
 `0001_add_repository_inspection_columns`), then again to fold the `generation`
 (server topology) and `capability` (metrics capability-plan) tables into
 `0000_init.sql` (replacing `0001_add_server_topology_generation` and
-`0002_add_capability_plan_generation`). Each of those is a deliberate pre-MVP
-exception, **not** a precedent: the policy above is what holds going forward.
+`0002_add_capability_plan_generation`), then again to fold the product-tier
+reshape into `0000_init.sql` (replacing `0001_product_tiers`: no `tier_id` on
+`license`, derived `server.assigned_tier_id`, provider product + display
+currency on `tier`, entitlements in code). Each of those is a deliberate
+pre-MVP exception, **not** a precedent: the policy above is what holds going
+forward.
 Additive forward migrations, `0000_init.sql` is the squashed baseline and
 nothing else, and applying a regenerated baseline requires wiping the database
 because `public.migration` replay follows the migration journal timestamps/order
@@ -342,7 +346,7 @@ letter-first alphanumeric token, **no underscores**. Guarded by
 | `delivery`     | `webhookDelivery` | Inbound provider-webhook delivery ledger — replay protection only. Org-agnostic on purpose: the delivery id arrives before the payload is matched to a connection. `provider` CHECK `github` / `gitlab` / `stripe` — not git-only; unique `(provider, external_delivery_id)`; `created_at` is the received time and the sweep cursor. Holds no payload and no secret. Claimed by `claimWebhookDelivery`, pruned after `WEBHOOK_DELIVERY_RETENTION_MS` (`src/lib/db/webhook-delivery-records.ts`).                                                                                                                                                                                                                                                                   |
 | `payer`        | `payer`           | Billing projection — who pays. Polymorphic over its subject: `organization_id` **or** `user_id`, exactly one (`payer_subject_check`: `(organization_id IS NULL) <> (user_id IS NULL)`), so an in-app subscription tied to a person stays expressible without rewriting every FK that points at billing. Columns are `provider_*`, never `stripe_*` (`payer_provider_check`: `stripe` / `apple`). Unique `(provider, provider_customer_id)` is the webhook upsert target; partial uniques give one payer per provider per subject. Written only by `src/lib/db/billing-records.ts` from the Stripe webhook — **Stripe owns money, Postgres owns entitlement** (`src/lib/billing/AGENTS.md`). |
 | `subscription` | `subscription`    | One provider subscription per `payer` (cascade). Unique `provider_subscription_id` is the upsert target. **No CHECK on `status`** — Stripe adds statuses, and a CHECK would turn a product change into a webhook that 500s; narrowed in code (`parseSubscriptionStatus`). `past_due_since` latches on the first delinquent status (`past_due` / `unpaid`) and `grace_expires_at` latches beside it as `past_due_since + BILLING_GRACE_WINDOW_MS` (cleared together on recovery); the grace clock (`src/lib/billing/grace-clock.ts`) cancels what is still delinquent after it. `schedule_id` is the provider schedule a deferred change (downgrade / seat release) is parked on; `null` when none. |
-| `seat`         | `subscriptionItem` | One line of a subscription: `quantity` seats at one `tier`. Physical name `seat` because `subscription_item` breaks the one-word rule and a row *is* N seats at one tier (reads correctly beside `license`); the export keeps the provider's vocabulary. Unique `provider_item_id` (upsert target) **and** unique `(subscription_id, tier_id)` — the reconciliation invariant compares seats to licenses per tier, so two rows for one tier must be impossible. `tier_id` is `ON DELETE RESTRICT` like `license.tier_id`. Projection is delete-then-insert per subscription (`replaceSubscriptionItems`), in that order, because a replaced item at the same tier would otherwise trip the per-tier unique. An item whose price maps to no `tier.provider_price_id` is logged and skipped, never inserted with a null tier. |
+| `seat`         | `subscriptionItem` | One line of a subscription: `quantity` seats at one `tier`. Physical name `seat` because `subscription_item` breaks the one-word rule and a row *is* N seats at one tier (reads correctly beside `license`); the export keeps the provider's vocabulary. Unique `provider_item_id` (upsert target) **and** unique `(subscription_id, tier_id)` — the reconciliation invariant compares seats to licenses per tier, so two rows for one tier must be impossible. `tier_id` is `ON DELETE RESTRICT`. `provider_price_id` is the item's own price (what a mutation restates when it rewrites `items[]` or a schedule phase); nullable only so it could be added under existing rows. Projection is delete-then-insert per subscription (`replaceSubscriptionItems`), in that order, because a replaced item at the same tier would otherwise trip the per-tier unique. Items map to tiers by **product** (`item.price.product` → `tier.provider_product_id`); an item whose product maps to no tier is logged and skipped, never inserted with a null tier, and two items on one tier are summed under the first item's id. |
 | `grant`        | `grant`           | Authz grant row. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `session`      | `session`         | Opaque DB-backed user session. Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `setting`      | `setting`         | Instance settings (`value` is `jsonb`). Unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -606,33 +610,29 @@ every teammate of a team in that organization.
 
 ## `tier` table
 
-Platform-global billed offerings. Tiers are **rows, not an enum**: a new
-pricing generation is a new set of rows rather than an in-place rewrite, so
-historical `license.tier_id` pointers stay valid. There is no
-`organization_id` — every org sees the same catalog. This table ships in both
-hosted and self-hosted editions; runtime gating (who may bind a license to a
-tier) is behavioral and lands in a later Stripe phase, not in the schema.
+Platform-global billed offerings: a ladder label bound to a payment-provider
+**product**. Everything a tier *entitles* lives in code —
+`src/lib/tiers/ladder.ts`, keyed by `label` (cores / RAM ceilings, NIC /
+drive / GPU / filesystem slots, list price) — so the row holds only what the
+code cannot know: which provider product the label bills against, plus a
+cached display price. There is no `organization_id` — every org sees the
+same catalogue. Rows are chosen from the provider's product list under
+Admin → Tiers and verified before they are written; nothing seeds them.
 
-| Column              | Notes                                                                                                                                                          |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `generation`        | Integer pricing generation. Tiers of the same generation form one catalog.                                                                                     |
-| `rank`              | Order within a generation (`1` = entry). Unique with `generation` (`uniq_tier_generation_rank`) — rank decides upgrade-versus-downgrade direction, so a tie would make it undefined. Also decides entry-tier carve-outs without hardcoding the `"S1"` label in capability-plan code. |
-| `label`             | `"S1"`…`"S7"`, `"SX"`. Unique with `generation` (`uniq_tier_generation_label`).                                                                                |
-| `price_cents`       | Integer cents; **null** for custom / SX negotiated offerings.                                                                                                  |
-| `provider_price_id` | Provider price id. Entered by a superadmin and verified against Stripe before the row is written; **null** on a custom row. Unique where not null.      |
-| `is_custom`         | Custom / negotiated offering (typically SX).                                                                                                                   |
-| `is_active`         | Tiers are deactivated, never deleted — `is_active = false` hides a row from new binding without breaking existing licenses.                                    |
-| `successor_id`      | Self-FK → `tier.id`, `ON DELETE SET NULL`. Points at the replacement row when a generation is superseded.                                                      |
-| `max_cores`         | Hard CPU entitlement (physical cores).                                                                                                                         |
-| `max_memory_bytes`  | Hard RAM entitlement (`bigint`).                                                                                                                               |
-| `nic_slots`         | Monitored NIC entitlement mapped onto `MetricsCapabilityPlan.normalNicSlots`.                                                                                  |
-| `drive_slots`       | Mapped onto `detailedBlockDeviceSlots`.                                                                                                                        |
-| `gpu_slots`         | Mapped onto `gpuSlots`.                                                                                                                                        |
-| `filesystem_slots`  | Mapped onto `extraFilesystemSlots` (entry-tier carve-out forces `0`).                                                                                          |
+| Column                | Notes                                                                                                                                                    |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `label`               | `"S1"`…`"S7"`, `"SX"` — the key into the ladder. Unique (`uniq_tier_label`).                                                                             |
+| `rank`                | Copied from the ladder on insert, never from a request. Unique (`uniq_tier_rank`): rank orders tiers, decides upgrade-versus-downgrade direction and the greedy assignment. |
+| `provider`            | `stripe` today, `apple` reserved — `tier_provider_check` matches `payer_provider_check`.                                                                 |
+| `provider_product_id` | The provider's Product. **Null** on the custom / SX row, which is therefore never purchasable. Unique with `provider` where not null (`uniq_tier_provider_product`): the projection's product→tier map is keyed on it. |
+| `price_cents`         | Display cache of the product's default price, written on verify and refreshed by the provider's `product.updated` / `price.updated` webhooks. Nothing does arithmetic on it. |
+| `currency`            | Display cache beside `price_cents`; lower-case ISO code.                                                                                                 |
+| `is_custom`           | Copied from the ladder (true for SX).                                                                                                                    |
+| `is_active`           | Tiers are deactivated, never deleted — `is_active = false` hides a row from new purchases without breaking the seats that count against it.             |
 
-No `metadata` / `options` pair — there is no operator jsonb on a priced
-offering (same skip as `marker` / `label`). `license.tier_id` uses
-`ON DELETE RESTRICT` because these rows are immutable priced offerings.
+No `metadata` / `options` pair. `seat.tier_id` and `server.assigned_tier_id`
+reference it (`RESTRICT` and `SET NULL` respectively). A re-price is a new
+default price on the product in the provider's Dashboard; no row changes.
 
 ## `license` table
 
@@ -649,27 +649,15 @@ inactive.
 enforces one license per server. Unconsumed seats have `server_id IS NULL`.
 Revoked rows may keep `server_id` until the server is deleted (SET NULL).
 
-**Hosted tier:** `license.tier_id` (nullable FK → `tier.id`,
-`ON DELETE RESTRICT`) binds a seat to a platform-global offering. Null on
-self-hosted installs and on hosted seats that have not been assigned a tier
-yet — capability-plan resolution then falls back to the platform default.
-Tiers are deactivated rather than deleted, so `RESTRICT` is the safe action
-(a delete would otherwise silently strip billing).
-
-On hosted, `tier_id` is **billing-managed**: `POST /licenses` writes it from
-the required `tierId` against a free seat, and after that the only thing that
-moves it is `applySeatEntitlements` (`billing-records.ts`), driven by the
-pending-change ledger and the committed `seat` rows. Its rule: an intent
-repoints exactly the license it names, once the seats show the change
-landed; a residual gap between seats and active licenses is closed with
-**unbound** licenses only (`server_id IS NULL` — repoint to a tier with a
-free seat, else revoke); a gap only a **bound** license could close is never
-touched and is returned as drift for the reconciliation sweep. An ended
-subscription (seats → 0) is the one case that revokes bound licenses too.
-Tier reads for billing go through `tier-records.ts` (`listActiveTiers`,
-`resolvePurchasableTier` — active **and** catalogued on the provider —
-and `countActiveLicensesByTier`, the one helper both the free-seat check and
-the reconciliation invariant read).
+**No tier on a license.** A license is the key that ties one server to
+this instance and nothing more. Which purchased tier the server sits on is
+derived per organization (`server.assigned_tier_id`, below), so a mint never
+names a tier: on hosted, `POST /licenses` is gated only on
+`purchased − releasing − held > 0` (`summarizeLicenses` in
+`src/client/billing/routes-helpers.ts`, read under the quantity lease), and a
+revoke never calls the provider — what was bought stays bought until the
+billing page reduces it. The one case billing revokes licenses is an ended
+subscription (`revokeAllLicensesForOrganization`, bound ones included).
 
 **Colocated control-plane license:** install and Deno boot recovery mint a
 license with `name = 'this server'` (`COLOCATED_SERVER_DISPLAY_NAME`).
@@ -731,6 +719,21 @@ timestamp (see "Fleet status columns" below). `organization_id` FK uses
 `ip.server_id` and `relay.server_id`). Deleting a server clears
 `license.server_id` via `ON DELETE SET NULL`; the app soft-revokes the bound
 license after delete.
+
+**Derived tier:** `server.assigned_tier_id` (nullable FK → `tier.id`,
+`ON DELETE SET NULL`, `idx_server_assigned_tier_id`) is the tier this server
+sits on — **computed, never chosen**. `src/lib/tiers/assignment.ts` takes
+the organization's committed `seat` quantities and its licensed servers in
+bind order (`created_at`), gives each the smallest purchased tier whose rank
+covers its hardware requirement (`tier-placement`; unknown hardware needs the
+entry rank), and leaves the newest uncovered when nothing fits.
+`assignment-records.ts` writes the column after every seat projection and
+mutation, on every hardware report (`touchServerMetadata`), on enroll, on
+server delete and on license revoke. Ingest, the capability plan, placement
+and the notice sweep read this column; nothing on those paths recomputes.
+Null on self-hosted, on an unlicensed server, and on a licensed server
+nothing purchased covers — the daemon's next session is then refused with
+`License tier below required`.
 
 **Cell metadata fields** (stored in `server.metadata` and/or `server.options`
 JSONB):

@@ -366,6 +366,46 @@ In Deno mode (development and production), the Hono instance listens on a **Unix
 domain socket** instead of a TCP port. Caddy terminates TLS and proxies `/api/*`
 and `/ws/*` to that socket.
 
+### Co-location is not the transport
+
+A **co-located** daemon runs on the control plane's own host. Whether it
+*reaches* the instance over the Unix socket is a separate fact, and it follows
+the runtime:
+
+| Runtime            | Co-located daemon connects via | Stored peer address |
+| ------------------ | ------------------------------ | ------------------- |
+| Deno (self-hosted) | `/run/turbopanel/instance.sock` | `__direct__` (`DIRECT_ATTACH_SENTINEL`) |
+| Workers (High Availability) | HTTPS/WSS to the hosted URL, like any remote daemon | its real peer address |
+
+`shapeServerPresenceFields` therefore takes the transport from
+`presence.directAttach` (the stored peer address *was* the sentinel), narrowed
+by the deployment — never from `colocated`:
+
+- **`colocated` must not substitute the sentinel.** It used to, which labelled
+  a co-located host on Workers "via Local Unix Socket" for a connection that
+  never touched a socket.
+- **`directAttach` is ignored when the deployment is hosted.** Only the Deno
+  transport writes the sentinel, so on Workers it is necessarily a stale row
+  from a control plane that used to run on Deno — precisely what a development
+  instance switching runtimes leaves behind. Believing it pins the co-located
+  host to the socket label until something else rewrites the projection, and
+  under `wrangler dev` nothing does: `resolvePeerAddress(…, {runtime:'workers'})`
+  reads `CF-Connecting-IP` only, and the dev Caddy in front of wrangler sends
+  `X-Real-IP`, so `identity.remoteAddress` arrives undefined and
+  `postgres-projection.ts` keeps whatever was there.
+
+The console's connection line follows `addressSource === 'local'` for the same
+reason.
+
+Identity guards are the other way round: "you may not delete, or remotely
+update, the host this control plane runs on" must hold on **both** runtimes, so
+they pass `includeSelfHostPin: true` to `resolveColocatedServerIdSet`. The pin
+is the `turbopanel` system environment — plain SQL that works on Workers, where
+the transport probes (`__direct__`, `/etc/machine-id`, `Deno.hostname()`) all
+come up empty. The cached read models deliberately do *not* pass it, so their
+approved-SQL profile stays unchanged; their `colocatedWithInstance` is a display
+badge, not a guard.
+
 ### Directory layout
 
 All TurboPanel runtime sockets live under **`/run/turbopanel/`** (on Linux,

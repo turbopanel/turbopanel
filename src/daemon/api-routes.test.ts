@@ -27,12 +27,17 @@ import {
   environment,
   license,
   organization,
+  payer,
   project,
   server,
   service,
+  subscription,
+  subscriptionItem,
   tier,
   workspace,
 } from "../lib/db/schema.ts";
+import { getTierByLabel, insertTier } from "../lib/db/tier-records.ts";
+import { recomputeOrganizationAssignments } from "../lib/tiers/assignment-records.ts";
 import {
   MAX_AUTH_CHALLENGE_BODY_BYTES,
   MAX_AUTH_SESSION_BODY_BYTES,
@@ -122,12 +127,13 @@ type EnrollFixture = {
   key: KeyMaterial;
   machineKey: string;
   hostname: string;
+  /** Tier rows this fixture created (an existing row for the label is reused, never deleted). */
   extraTierIds: string[];
 };
 
 type EnrollFixtureOptions = {
   runtime?: "workers" | "deno";
-  /** Hosted default is rank 1 (S1). `null` leaves `license.tier_id` unset. */
+  /** Hosted default buys one seat at rank 1 (S1). `null` buys nothing: no payer, no seats. */
   tierRank?: number | null;
   enroll?: boolean;
 };
@@ -141,27 +147,118 @@ function hostResourcesPayload(cores: number, memoryGib: number) {
   };
 }
 
-async function insertTestTier(
+/**
+ * The tier row for a ladder rank. `tier.label` / `tier.rank` are unique, so
+ * the instance's own row is reused when present and created only otherwise;
+ * a created id is pushed to `extraTierIds` for cleanup.
+ */
+async function ensureTestTier(
   db: ReturnType<typeof createDenoDb>,
   rank: number,
+  extraTierIds: string[],
 ): Promise<string> {
   const label = rank >= 8 ? "SX" : `S${rank}`;
-  const generation = Math.floor(Math.random() * 2_000_000_000);
-  const [row] = await db
-    .insert(tier)
+  const existing = await getTierByLabel(db, label);
+  if (existing) return existing.id;
+  const row = await insertTier(db, {
+    label,
+    providerProductId: label === "SX" ? null : `prod_test_${label.toLowerCase()}`,
+    priceCents: null,
+    currency: null,
+  });
+  extraTierIds.push(row.id);
+  return row.id;
+}
+
+/**
+ * What a projected purchase leaves behind: payer → subscription → one seat
+ * row per tier at `quantity`, then the derived assignment recomputed the
+ * way the entitlement sync does after every projection. A license carries
+ * no tier; the servers it binds are covered by what the organization bought.
+ */
+async function purchaseTier(
+  db: ReturnType<typeof createDenoDb>,
+  fixture: { organizationId: string; extraTierIds: string[] },
+  rank: number,
+  quantity: number,
+): Promise<string> {
+  const tierId = await ensureTestTier(db, rank, fixture.extraTierIds);
+  const now = new Date().toISOString();
+  let [payerRow] = await db
+    .select({ id: payer.id })
+    .from(payer)
+    .where(eq(payer.organizationId, fixture.organizationId))
+    .limit(1);
+  if (!payerRow) {
+    [payerRow] = await db
+      .insert(payer)
+      .values({
+        organizationId: fixture.organizationId,
+        provider: "stripe",
+        providerCustomerId: `cus_test_${crypto.randomUUID()}`,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: payer.id });
+  }
+  let [subscriptionRow] = await db
+    .select({ id: subscription.id })
+    .from(subscription)
+    .where(eq(subscription.payerId, payerRow!.id))
+    .limit(1);
+  if (!subscriptionRow) {
+    [subscriptionRow] = await db
+      .insert(subscription)
+      .values({
+        payerId: payerRow!.id,
+        providerSubscriptionId: `sub_test_${crypto.randomUUID()}`,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: subscription.id });
+  }
+  await db
+    .insert(subscriptionItem)
     .values({
-      generation,
-      rank,
-      label,
-      maxCores: 4,
-      maxMemoryBytes: 16 * GIBIBYTE,
-      nicSlots: 2,
-      driveSlots: 2,
-      gpuSlots: 1,
-      filesystemSlots: 1,
+      subscriptionId: subscriptionRow!.id,
+      tierId,
+      providerItemId: `si_test_${crypto.randomUUID()}`,
+      providerPriceId: `price_test_${rank}`,
+      quantity,
+      createdAt: now,
+      updatedAt: now,
     })
-    .returning({ id: tier.id });
-  return row!.id;
+    .onConflictDoUpdate({
+      target: [subscriptionItem.subscriptionId, subscriptionItem.tierId],
+      set: { quantity, updatedAt: now },
+    });
+  await recomputeOrganizationAssignments(db, fixture.organizationId);
+  return tierId;
+}
+
+/** Remove the purchase `purchaseTier` projected: seats → subscription → payer. */
+async function deleteOrganizationPurchase(
+  db: ReturnType<typeof createDenoDb>,
+  organizationId: string,
+): Promise<void> {
+  const payerRows = await db
+    .select({ id: payer.id })
+    .from(payer)
+    .where(eq(payer.organizationId, organizationId));
+  for (const payerRow of payerRows) {
+    const subscriptionRows = await db
+      .select({ id: subscription.id })
+      .from(subscription)
+      .where(eq(subscription.payerId, payerRow.id));
+    for (const subscriptionRow of subscriptionRows) {
+      await db
+        .delete(subscriptionItem)
+        .where(eq(subscriptionItem.subscriptionId, subscriptionRow.id));
+    }
+    await db.delete(subscription).where(eq(subscription.payerId, payerRow.id));
+  }
+  await db.delete(payer).where(eq(payer.organizationId, organizationId));
 }
 
 async function mergeServerResources(
@@ -552,12 +649,7 @@ async function withEnrollFixture(
   });
 
   if (tierRank != null) {
-    const insertedTierId = await insertTestTier(db, tierRank);
-    extraTierIds.push(insertedTierId);
-    await db
-      .update(license)
-      .set({ tierId: insertedTierId, updatedAt: new Date().toISOString() })
-      .where(eq(license.id, licenseId));
+    await purchaseTier(db, { organizationId, extraTierIds }, tierRank, 1);
   }
 
   const key = await generateKeyMaterial();
@@ -606,6 +698,7 @@ async function withEnrollFixture(
       await deleteOrganizationServerTree(db, organizationId, row.id);
     }
     await db.delete(license).where(eq(license.organizationId, organizationId));
+    await deleteOrganizationPurchase(db, organizationId);
     for (const id of extraTierIds) {
       await db.delete(tier).where(eq(tier.id, id));
     }
@@ -1162,13 +1255,8 @@ test("POST /enroll with a fresh license creates a new server even on the same ho
             name: "Fresh One-Shot License",
           },
         );
-      const boundTierId = extraTierIds[0];
-      if (boundTierId) {
-        await db
-          .update(license)
-          .set({ tierId: boundTierId, updatedAt: new Date().toISOString() })
-          .where(eq(license.id, freshLicenseId));
-      }
+      // A second server needs a second purchased seat; the fixture bought one.
+      await purchaseTier(db, { organizationId, extraTierIds }, 1, 2);
 
       const challengeResponse = await app.request(
         "/api/daemon/v1/auth/challenge",
@@ -1550,7 +1638,7 @@ test("fresh enroll with no recorded hardware succeeds", async () => {
   });
 });
 
-test("hosted enroll is refused when the license has no tier", async () => {
+test("hosted enroll is refused when nothing bought covers one more server", async () => {
   await withEnrollFixture(
     async (fixture) => {
       const response = await postEnroll(fixture.app, fixture);
@@ -1588,15 +1676,8 @@ test("a hosted 400 tier refusal does not consume the license so a later retry wi
         .where(eq(server.organizationId, fixture.organizationId));
       assertEquals(orgServers.length, 0);
 
-      const assignedTierId = await insertTestTier(fixture.db, 1);
-      fixture.extraTierIds.push(assignedTierId);
-      await fixture.db
-        .update(license)
-        .set({
-          tierId: assignedTierId,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(license.id, fixture.licenseId));
+      // The purchase lands: one S1 seat now covers the newcomer.
+      await purchaseTier(fixture.db, fixture, 1, 1);
 
       const recovered = await postEnroll(fixture.app, {
         licenseId: fixture.licenseId,
@@ -1618,7 +1699,7 @@ test("a hosted 400 tier refusal does not consume the license so a later retry wi
   );
 });
 
-test("self-hosted enroll accepts a license with no tier", async () => {
+test("self-hosted enroll accepts a license with nothing bought — self-hosted never joins tiers", async () => {
   await withEnrollFixture(
     async ({ enrollBody }) => {
       assertEquals(typeof enrollBody.serverId, "string");
@@ -1643,18 +1724,38 @@ test("POST /auth/session refuses after a resize past the license band", async ()
     const refusedBody = (await refused.json()) as { error: string };
     assertEquals(refusedBody.error, LICENSE_TIER_BELOW_REQUIRED_ERROR);
 
-    const sufficientTierId = await insertTestTier(fixture.db, 5);
-    fixture.extraTierIds.push(sufficientTierId);
-    await fixture.db
-      .update(license)
-      .set({
-        tierId: sufficientTierId,
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(license.id, fixture.licenseId));
+    // Buying an S5 moves the server onto it (the projection's recompute).
+    await purchaseTier(fixture.db, fixture, 5, 1);
 
     const recovered = await postAuthSession(fixture.app, fixture);
     assertEquals(recovered.status, 200);
+  });
+});
+
+test("POST /auth/session recomputes a licensed server assigned nothing, and refuses it only when nothing bought covers it", async () => {
+  await withEnrollFixture(async (fixture) => {
+    // The one S1 given back: the recompute leaves the server on nothing.
+    await purchaseTier(fixture.db, fixture, 1, 0);
+    const refused = await postAuthSession(fixture.app, fixture);
+    assertEquals(refused.status, 400);
+    const refusedBody = (await refused.json()) as { error: string };
+    assertEquals(refusedBody.error, LICENSE_TIER_BELOW_REQUIRED_ERROR);
+
+    // Bought back — but the projection and this session raced, so the
+    // derived column is still empty: the gate's one recompute places it.
+    const tierId = await purchaseTier(fixture.db, fixture, 1, 1);
+    await fixture.db
+      .update(server)
+      .set({ assignedTierId: null })
+      .where(eq(server.id, fixture.serverId));
+    const recovered = await postAuthSession(fixture.app, fixture);
+    assertEquals(recovered.status, 200);
+    const [row] = await fixture.db
+      .select({ assignedTierId: server.assignedTierId })
+      .from(server)
+      .where(eq(server.id, fixture.serverId))
+      .limit(1);
+    assertEquals(row?.assignedTierId, tierId);
   });
 });
 

@@ -2,8 +2,8 @@
  * The seat-increase record — the idempotency key of an in-flight immediate
  * seat raise, persisted **before** Stripe is called.
  *
- * `POST /billing/seats` with a positive delta is the one entitlement-raising
- * mutation that names no license, so it has no `PendingIntent` in the ledger
+ * Every **immediate** mutation — a seat raise, and an upgrade's item swap —
+ * is a quantity change with no `PendingIntent` in the ledger
  * (`pending-changes.ts`) to carry its key. Minting a fresh key per attempt
  * would make a retry a second purchase: Stripe accepts the update, the
  * reprojection (`syncAfterMutation`) fails on a transient error, the console
@@ -20,8 +20,8 @@
  *
  * A retry must replay the **same** request: Stripe rejects a reused key whose
  * parameters differ (`idempotency_error`). The record therefore pins the
- * `items` array and the `prorationDate` Stripe saw, alongside the tier and
- * delta, and `changeSeats` sends the stored values rather than rebuilding
+ * `items` array and the `prorationDate` Stripe saw, alongside the per-tier
+ * deltas, and the mutation sends the stored values rather than rebuilding
  * them — the seat rows can move between attempts (a webhook projecting the
  * very update the first attempt made), and items rebuilt from them would
  * not match the key.
@@ -32,22 +32,21 @@
 import { eq } from 'drizzle-orm'
 import type { Db } from '../../db.ts'
 import { setting } from '../db/schema.ts'
-import type { ItemMutation } from './subscriptions.ts'
+import type { ItemMutation, TierDelta } from './subscriptions.ts'
 
 export const BILLING_SEAT_INCREASE_KEY_PREFIX = 'BILLING_SEAT_INCREASE:'
 
 /** Stripe replays a request under the same key for 24 h. */
 export const SEAT_INCREASE_TTL_MS = 24 * 60 * 60 * 1000
 
-export const SEAT_INCREASE_RECORD_VERSION = 1
+export const SEAT_INCREASE_RECORD_VERSION = 2
 
 export type SeatIncreaseRecord = Readonly<{
   version: typeof SEAT_INCREASE_RECORD_VERSION
   /** Guards against a record surviving a re-subscribe. */
   providerSubscriptionId: string
-  tierId: string
-  /** Always positive: decreases are ledger intents, never this record. */
-  delta: number
+  /** The per-tier deltas of the request, in the order given; the identity a retry is matched on. */
+  deltas: readonly TierDelta[]
   /** The `items[]` Stripe saw; replayed verbatim on retry, never rebuilt. */
   items: readonly ItemMutation[]
   /** The proration timestamp Stripe saw; replayed verbatim on retry. */
@@ -64,23 +63,21 @@ export function billingSeatIncreaseKey(organizationId: string): string {
 
 export type NewSeatIncreaseInput = Readonly<{
   providerSubscriptionId: string
-  tierId: string
-  delta: number
+  deltas: readonly TierDelta[]
   items: readonly ItemMutation[]
   prorationDate: number
   nowMs?: number
 }>
 
 export function newSeatIncreaseRecord(input: NewSeatIncreaseInput): SeatIncreaseRecord {
-  if (!Number.isInteger(input.delta) || input.delta <= 0) {
-    throw new TypeError('a seat-increase record needs a positive integer delta')
+  if (input.deltas.length === 0 || input.deltas.some((d) => !Number.isInteger(d.delta) || d.delta === 0)) {
+    throw new TypeError('a seat-increase record needs at least one non-zero integer delta')
   }
   const nowMs = input.nowMs ?? Date.now()
   return {
     version: SEAT_INCREASE_RECORD_VERSION,
     providerSubscriptionId: input.providerSubscriptionId,
-    tierId: input.tierId,
-    delta: input.delta,
+    deltas: input.deltas.map((d) => ({ tierId: d.tierId, delta: d.delta })),
     items: input.items.map((item) => ({ ...item })),
     prorationDate: input.prorationDate,
     idempotencyKey: crypto.randomUUID(),
@@ -108,20 +105,34 @@ function parseItemMutation(value: unknown): ItemMutation | null {
   return null
 }
 
+function parseDelta(value: unknown): TierDelta | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const r = value as Record<string, unknown>
+  if (typeof r.tierId !== 'string' || r.tierId.length === 0) return null
+  if (typeof r.delta !== 'number' || !Number.isInteger(r.delta) || r.delta === 0) return null
+  return { tierId: r.tierId, delta: r.delta }
+}
+
 /** `null` when the stored value is not a record this code understands. */
 export function parseSeatIncreaseRecord(value: unknown): SeatIncreaseRecord | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
   const r = value as Record<string, unknown>
   if (r.version !== SEAT_INCREASE_RECORD_VERSION) return null
   if (
-    typeof r.providerSubscriptionId !== 'string' || typeof r.tierId !== 'string' ||
-    typeof r.delta !== 'number' || !Number.isInteger(r.delta) || r.delta <= 0 ||
+    typeof r.providerSubscriptionId !== 'string' ||
+    !Array.isArray(r.deltas) || r.deltas.length === 0 ||
     typeof r.prorationDate !== 'number' || !Number.isFinite(r.prorationDate) ||
     typeof r.idempotencyKey !== 'string' || r.idempotencyKey.length === 0 ||
     typeof r.createdAt !== 'string' || typeof r.expiresAt !== 'string' ||
     !Array.isArray(r.items) || r.items.length === 0
   ) {
     return null
+  }
+  const deltas: TierDelta[] = []
+  for (const raw of r.deltas) {
+    const delta = parseDelta(raw)
+    if (!delta) return null
+    deltas.push(delta)
   }
   const items: ItemMutation[] = []
   for (const raw of r.items) {
@@ -134,8 +145,7 @@ export function parseSeatIncreaseRecord(value: unknown): SeatIncreaseRecord | nu
   return {
     version: SEAT_INCREASE_RECORD_VERSION,
     providerSubscriptionId: r.providerSubscriptionId,
-    tierId: r.tierId,
-    delta: r.delta,
+    deltas,
     items,
     prorationDate: r.prorationDate,
     idempotencyKey: r.idempotencyKey,
@@ -156,9 +166,10 @@ function recordExpired(record: SeatIncreaseRecord, nowMs: number): boolean {
  */
 export function seatIncreaseMatches(
   record: SeatIncreaseRecord,
-  request: Readonly<{ tierId: string; delta: number }>,
+  request: readonly TierDelta[],
 ): boolean {
-  return record.tierId === request.tierId && record.delta === request.delta
+  if (record.deltas.length !== request.length) return false
+  return record.deltas.every((d, i) => d.tierId === request[i]!.tierId && d.delta === request[i]!.delta)
 }
 
 /**

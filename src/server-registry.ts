@@ -24,6 +24,7 @@ import {
   type ServerRuntimeMetadata,
 } from './lib/db/server-metadata.ts'
 import { license, server } from './lib/db/schema.ts'
+import { recomputeAssignmentsForServer } from './lib/tiers/assignment-records.ts'
 import { normalizeMachineKey } from './lib/machine-key.ts'
 import { ensureSystemHierarchy } from './client/system/hierarchy.ts'
 import { compatLogWarn } from './log-compat.ts'
@@ -314,6 +315,15 @@ export async function touchServerMetadata(
   }
 
   await db.update(server).set(update).where(eq(server.id, serverId))
+
+  // A hardware report can move the server's tier requirement: re-derive the
+  // organization's assignment. Best-effort — a failure here must not reject
+  // the hello, and the next session check recomputes again.
+  if (delta.resources !== undefined) {
+    await recomputeAssignmentsForServer(db, serverId).catch((err) => {
+      console.warn(`tier assignment recompute failed for ${serverId}: ${String(err)}`)
+    })
+  }
 }
 
 async function findExistingServerId(

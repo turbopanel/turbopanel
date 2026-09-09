@@ -1,19 +1,28 @@
 /**
  * Host-free coverage for the billing projection helpers: upsert conflict
- * targets, item replace / prune, unknown-price skip.
+ * targets, item replace / prune keyed on the item's **product**, the
+ * unmapped-product skip, the two-items-one-tier fold, the organization
+ * read every page and sweep uses, and the one revoke billing performs.
  */
 
 import { assertEquals } from '@std/assert'
 import type { Db } from '../../db.ts'
-import { payer, subscription, subscriptionItem, tier } from './schema.ts'
+import { createMemoryDb } from '../../test-fixtures/memory-db.ts'
+import { license, payer, setting, subscription, subscriptionItem, tier } from './schema.ts'
 import {
+  BILLING_GRACE_WINDOW_MS,
   getPayerForOrganization,
   getSubscriptionForPayer,
+  isDelinquentStatus,
+  isEndedStatus,
+  KNOWN_SUBSCRIPTION_STATUSES,
+  listSeatsForOrganization,
   listSubscriptionItems,
-  mapProviderPricesToTierIds,
   parseSubscriptionStatus,
   type PayerRow,
   replaceSubscriptionItems,
+  revokeAllLicensesForOrganization,
+  seatQuantitiesByTier,
   type SubscriptionItemRow,
   type SubscriptionRow,
   upsertPayer,
@@ -79,7 +88,7 @@ function flattenSql(query: unknown): string {
 }
 
 function createRecordingDb(opts: {
-  tiers?: { id: string; providerPriceId: string | null }[]
+  tiers?: { id: string; providerProductId: string | null }[]
   rows?: unknown[]
 } = {}): RecordingDb {
   const inserts: Insert[] = []
@@ -143,8 +152,7 @@ test('upsertPayer conflicts on (provider, provider_customer_id) and writes the s
     provider: 'stripe',
     providerCustomerId: 'cus_1',
     subject: { organizationId: ORG_ID, userId: null },
-    taxId: 'DE123',
-    now: '2026-09-07T00:00:00.000Z',
+    taxId: null,
   })
   assertEquals(result, { id: 'payer-row' })
   const [insert] = db.inserts
@@ -190,25 +198,29 @@ test('upsertSubscriptionFromProvider conflicts on provider_subscription_id and l
   assertEquals((active?.conflict?.set as Record<string, unknown>).scheduleId, 'sub_sched_1')
 })
 
-test('replaceSubscriptionItems clears the subscription first, then inserts every mappable item', async () => {
+test('replaceSubscriptionItems clears the subscription first, then inserts every item whose product maps to a tier', async () => {
   const db = createRecordingDb({
     tiers: [
-      { id: TIER_S1, providerPriceId: 'price_s1' },
-      { id: TIER_S2, providerPriceId: 'price_s2' },
+      { id: TIER_S1, providerProductId: 'prod_s1' },
+      { id: TIER_S2, providerProductId: 'prod_s2' },
     ],
   })
   const result = await replaceSubscriptionItems(db, SUB_ROW, [
-    { providerItemId: 'si_1', providerPriceId: 'price_s1', quantity: 3 },
-    { providerItemId: 'si_2', providerPriceId: 'price_s2', quantity: 1 },
-  ], { now: '2026-09-07T00:00:00.000Z' })
+    { providerItemId: 'si_1', providerPriceId: 'price_s1', providerProductId: 'prod_s1', quantity: 3 },
+    { providerItemId: 'si_2', providerPriceId: 'price_s2_v2', providerProductId: 'prod_s2', quantity: 1 },
+  ], { now: '2026-09-07T00:00:00.000Z', provider: 'stripe' })
   assertEquals(result, { written: 2, skipped: [] })
   // Order is the point: the prune must land before the first insert, or a
   // replaced item at the same tier trips `uniq_seat_subscription_tier`.
   assertEquals(db.ops, ['delete:seat', 'insert:seat', 'insert:seat'])
   assertEquals(db.inserts[0]?.values.tierId, TIER_S1)
   assertEquals(db.inserts[0]?.values.quantity, 3)
+  // The item's own price is written beside the tier: a mutation restates it, and the tier does not know it.
+  assertEquals(db.inserts[0]?.values.providerPriceId, 'price_s1')
   assertEquals(db.inserts[0]?.conflict?.target, subscriptionItem.providerItemId)
+  assertEquals((db.inserts[0]?.conflict?.set as Record<string, unknown>).providerPriceId, 'price_s1')
   assertEquals(db.inserts[1]?.values.tierId, TIER_S2)
+  assertEquals(db.inserts[1]?.values.providerPriceId, 'price_s2_v2')
   // The prune is scoped to the subscription and nothing else.
   assertEquals(db.deletes.length, 1)
   assertEquals(tableName(db.deletes[0]?.table), 'seat')
@@ -217,20 +229,36 @@ test('replaceSubscriptionItems clears the subscription first, then inserts every
   assertEquals(prune.includes('not in'), false)
 })
 
-test('an item whose price maps to no tier is skipped, never inserted with a null tier', async () => {
-  const db = createRecordingDb({ tiers: [{ id: TIER_S1, providerPriceId: 'price_s1' }] })
+test('an item whose product maps to no tier is skipped, never inserted with a null tier', async () => {
+  const db = createRecordingDb({ tiers: [{ id: TIER_S1, providerProductId: 'prod_s1' }] })
   const result = await replaceSubscriptionItems(db, SUB_ROW, [
-    { providerItemId: 'si_known', providerPriceId: 'price_s1', quantity: 2 },
-    { providerItemId: 'si_unknown', providerPriceId: 'price_nope', quantity: 5 },
-    { providerItemId: 'si_bad_qty', providerPriceId: 'price_s1', quantity: -1 },
+    { providerItemId: 'si_known', providerPriceId: 'price_s1', providerProductId: 'prod_s1', quantity: 2 },
+    { providerItemId: 'si_unknown', providerPriceId: 'price_nope', providerProductId: 'prod_nope', quantity: 5 },
+    { providerItemId: 'si_bad_qty', providerPriceId: 'price_s1_old', providerProductId: 'prod_s1', quantity: -1 },
   ])
   assertEquals(result, { written: 1, skipped: ['si_unknown', 'si_bad_qty'] })
   assertEquals(db.inserts.length, 1)
   assertEquals(db.inserts[0]?.values.providerItemId, 'si_known')
+  assertEquals(db.inserts[0]?.values.quantity, 2)
   assertEquals(db.inserts.every((i) => i.values.tierId !== null), true)
   // The prune ran first and covered the whole subscription, so a stale row
   // for the skipped item is gone too.
   assertEquals(db.ops[0], 'delete:seat')
+})
+
+test('two items on one tier are summed under the first item id; the second lands in skipped', async () => {
+  const db = createRecordingDb({ tiers: [{ id: TIER_S1, providerProductId: 'prod_s1' }, { id: TIER_S2, providerProductId: 'prod_s2' }] })
+  const result = await replaceSubscriptionItems(db, SUB_ROW, [
+    { providerItemId: 'si_old_price', providerPriceId: 'price_s1_v1', providerProductId: 'prod_s1', quantity: 2 },
+    { providerItemId: 'si_other', providerPriceId: 'price_s2', providerProductId: 'prod_s2', quantity: 1 },
+    { providerItemId: 'si_new_price', providerPriceId: 'price_s1_v2', providerProductId: 'prod_s1', quantity: 3 },
+  ])
+  assertEquals(result, { written: 2, skipped: ['si_new_price'] })
+  assertEquals(db.ops, ['delete:seat', 'insert:seat', 'insert:seat'])
+  const s1 = db.inserts.find((i) => i.values.tierId === TIER_S1)
+  assertEquals([s1?.values.providerItemId, s1?.values.providerPriceId, s1?.values.quantity], ['si_old_price', 'price_s1_v1', 5])
+  const s2 = db.inserts.find((i) => i.values.tierId === TIER_S2)
+  assertEquals([s2?.values.providerItemId, s2?.values.quantity], ['si_other', 1])
 })
 
 test('an empty item list prunes every seat of the subscription and inserts nothing', async () => {
@@ -238,18 +266,11 @@ test('an empty item list prunes every seat of the subscription and inserts nothi
   const result = await replaceSubscriptionItems(db, SUB_ROW, [])
   assertEquals(result, { written: 0, skipped: [] })
   assertEquals(db.inserts.length, 0)
-  // No tier lookup for an empty price list.
+  // No tier lookup for an empty product list.
   assertEquals(db.selectsFrom.length, 0)
   assertEquals(db.ops, ['delete:seat'])
   const prune = flattenSql(db.deletes[0]?.where)
   assertEquals(prune.includes(SUB_ROW), true)
-})
-
-test('mapProviderPricesToTierIds dedupes, drops blanks, and omits unknown prices', async () => {
-  const db = createRecordingDb({ tiers: [{ id: TIER_S1, providerPriceId: 'price_s1' }] })
-  const map = await mapProviderPricesToTierIds(db, ['price_s1', 'price_s1', '', 'price_x'])
-  assertEquals([...map.entries()], [['price_s1', TIER_S1]])
-  assertEquals(await mapProviderPricesToTierIds(db, []), new Map())
 })
 
 test('read helpers return the row or null', async () => {
@@ -287,6 +308,7 @@ test('read helpers return the row or null', async () => {
       subscriptionId: 's1',
       tierId: TIER_S1,
       providerItemId: 'si_1',
+      providerPriceId: 'price_s1',
       quantity: 2,
     },
   ]
@@ -302,188 +324,126 @@ test('parseSubscriptionStatus narrows known values and never throws on new ones'
 })
 
 // ---------------------------------------------------------------------------
-// `applySeatEntitlements` — the one place `license.tier_id` moves for billing.
+// The organization read and the one revoke billing performs, on the memory db.
 // ---------------------------------------------------------------------------
-
-import { license, setting } from './schema.ts'
-import { createMemoryDb } from '../../test-fixtures/memory-db.ts'
-import {
-  applySeatEntitlements,
-  BILLING_GRACE_WINDOW_MS,
-  isDelinquentStatus,
-  isEndedStatus,
-  KNOWN_SUBSCRIPTION_STATUSES,
-  listSeatsForOrganization,
-  seatQuantitiesByTier,
-} from './billing-records.ts'
 
 const PAYER_ROW = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const SERVER_A = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+const SERVER_B = '99999999-9999-4999-8999-999999999999'
 const LIC_BOUND = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const LIC_BOUND_2 = '88888888-8888-4888-8888-888888888888'
 const LIC_FREE = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
-const LIC_FREE_2 = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+const LIC_GONE = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+const OTHER_ORG = '77777777-7777-4777-8777-777777777777'
 const ENT_NOW = '2026-09-07T12:00:00.000Z'
+const EARLIER = '2026-09-01T00:00:00.000Z'
 
-const entTier = (id: string, label: string, rank: number) => ({
-  id, label, generation: 1, rank, priceCents: 1000 * rank, providerPriceId: `price_${label}`, isCustom: false, isActive: true,
-  successorId: null, maxCores: 4, maxMemoryBytes: 1, nicSlots: 1, driveSlots: 1, gpuSlots: 0, filesystemSlots: 1, createdAt: ENT_NOW, updatedAt: ENT_NOW,
+const entTier = (id: string, label: string, rank: number, isActive = true) => ({
+  id, createdAt: ENT_NOW, updatedAt: ENT_NOW, label, rank, provider: 'stripe', providerProductId: `prod_${label}`,
+  priceCents: 1000 * rank, currency: 'usd', isCustom: false, isActive,
 })
-const entLicense = (id: string, tierId: string, serverId: string | null) => ({
-  id, organizationId: ORG_ID, serverId, tierId, name: null, token: 'x', revokedAt: null, createdAt: ENT_NOW, updatedAt: ENT_NOW,
+const entLicense = (id: string, serverId: string | null, overrides: Record<string, unknown> = {}) => ({
+  id, organizationId: ORG_ID, serverId, name: null, token: 'x', revokedAt: null, createdAt: ENT_NOW, updatedAt: ENT_NOW, ...overrides,
 })
 
 function entitlementDb(opts: {
   status?: string
-  seats: { tierId: string; quantity: number }[]
-  licenses: { id: string; tierId: string; serverId: string | null }[]
+  seats: { tierId: string; quantity: number; providerPriceId?: string | null }[]
+  licenses: ReturnType<typeof entLicense>[]
 }) {
   return createMemoryDb([
-    [tier, [entTier(TIER_S1, 'S1', 1), entTier(TIER_S2, 'S2', 2)]],
+    [tier, [entTier(TIER_S1, 'S1', 1), entTier(TIER_S2, 'S2', 2, false)]],
+    // The self-hosted grant lives in a `setting` row; every entitlement read
+    // looks for one (`src/lib/tiers/self-hosted-grant.ts`).
+    [setting, []],
     [payer, [{ id: PAYER_ROW, organizationId: ORG_ID, userId: null, provider: 'stripe', providerCustomerId: 'cus_1', taxId: null, createdAt: ENT_NOW, updatedAt: ENT_NOW }]],
     [subscription, [{ id: SUB_ROW, payerId: PAYER_ROW, providerSubscriptionId: 'sub_1', status: opts.status ?? 'active', currentPeriodEnd: null, scheduleId: null, graceExpiresAt: null, pastDueSince: null, createdAt: ENT_NOW, updatedAt: ENT_NOW }]],
-    [subscriptionItem, opts.seats.map((seat, index) => ({ id: `seat-${index}`, subscriptionId: SUB_ROW, tierId: seat.tierId, providerItemId: `si_${index}`, quantity: seat.quantity, createdAt: ENT_NOW, updatedAt: ENT_NOW }))],
-    [license, opts.licenses.map((l) => entLicense(l.id, l.tierId, l.serverId))],
-    [setting, []],
+    [subscriptionItem, opts.seats.map((seat, index) => ({
+      id: `seat-${index}`, subscriptionId: SUB_ROW, tierId: seat.tierId, providerItemId: `si_${index}`,
+      providerPriceId: seat.providerPriceId === undefined ? `price_${index}` : seat.providerPriceId,
+      quantity: seat.quantity, createdAt: ENT_NOW, updatedAt: ENT_NOW,
+    }))],
+    [license, opts.licenses],
   ])
 }
 
-const licenseTier = (db: ReturnType<typeof entitlementDb>, id: string) =>
-  db.rows(license).find((row) => row.id === id)
-
-test('listSeatsForOrganization joins payer → subscription → seats with their tier, in catalogue order', async () => {
-  const db = entitlementDb({ seats: [{ tierId: TIER_S2, quantity: 1 }, { tierId: TIER_S1, quantity: 3 }], licenses: [] })
+test('listSeatsForOrganization joins payer → subscription → seats with their tier, in rank order', async () => {
+  const db = entitlementDb({ seats: [{ tierId: TIER_S2, quantity: 1 }, { tierId: TIER_S1, quantity: 3, providerPriceId: null }], licenses: [] })
   const state = await listSeatsForOrganization(db, ORG_ID)
+  assertEquals(state.payer?.id, PAYER_ROW)
   assertEquals(state.subscription?.providerSubscriptionId, 'sub_1')
-  assertEquals(state.seats.map((seat) => [seat.tier.label, seat.quantity]), [['S1', 3], ['S2', 1]])
-  assertEquals([...seatQuantitiesByTier(state)], [[TIER_S1, 3], [TIER_S2, 1]])
-  assertEquals(await listSeatsForOrganization(db, '00000000-0000-4000-8000-000000000000'), { payer: null, subscription: null, seats: [] })
+  assertEquals(state.seats, [
+    {
+      seatId: 'seat-1',
+      tierId: TIER_S1,
+      providerItemId: 'si_1',
+      providerPriceId: null,
+      quantity: 3,
+      tier: { label: 'S1', rank: 1, priceCents: 1000, currency: 'usd', providerProductId: 'prod_S1', isActive: true },
+    },
+    {
+      seatId: 'seat-0',
+      tierId: TIER_S2,
+      providerItemId: 'si_0',
+      providerPriceId: 'price_0',
+      quantity: 1,
+      // A retired tier is still read: existing seats may hold it, they just cannot buy more.
+      tier: { label: 'S2', rank: 2, priceCents: 2000, currency: 'usd', providerProductId: 'prod_S2', isActive: false },
+    },
+  ])
+  assertEquals(await listSeatsForOrganization(db, OTHER_ORG), { payer: null, subscription: null, seats: [], grant: null })
+  // A payer with no subscription yet (Checkout not completed) reads as no seats.
+  db.rows(subscription).splice(0)
+  const early = await listSeatsForOrganization(db, ORG_ID)
+  assertEquals([early.payer?.id, early.subscription, early.seats], [PAYER_ROW, null, []])
 })
 
-test('applySeatEntitlements repoints exactly the intended license once the target tier has room', async () => {
-  // Upgrade of the bound license S1 → S2 landed: S1 seats 1, S2 seats 1.
-  const db = entitlementDb({
-    seats: [{ tierId: TIER_S1, quantity: 1 }, { tierId: TIER_S2, quantity: 1 }],
-    licenses: [{ id: LIC_BOUND, tierId: TIER_S1, serverId: SERVER_A }, { id: LIC_FREE, tierId: TIER_S1, serverId: null }],
-  })
-  const intent = { id: 'i1', kind: 'upgrade' as const, licenseId: LIC_BOUND, fromTierId: TIER_S1, toTierId: TIER_S2 }
-  const result = await applySeatEntitlements(db, ORG_ID, [intent], { now: ENT_NOW })
-  assertEquals(result.consumedIntentIds, ['i1'])
-  assertEquals(result.repointed, [{ licenseId: LIC_BOUND, fromTierId: TIER_S1, toTierId: TIER_S2 }])
-  assertEquals(result.revokedLicenseIds, [])
-  assertEquals(result.drift, [])
-  // The bound license moved; the unbound one at S1 was not touched.
-  assertEquals(licenseTier(db, LIC_BOUND)?.tierId, TIER_S2)
-  assertEquals(licenseTier(db, LIC_FREE)?.tierId, TIER_S1)
+test('seatQuantitiesByTier sums per tier and reads every tier as zero once the subscription ended', async () => {
+  const live = entitlementDb({ seats: [{ tierId: TIER_S1, quantity: 3 }, { tierId: TIER_S2, quantity: 1 }, { tierId: TIER_S1, quantity: 2 }], licenses: [] })
+  assertEquals([...seatQuantitiesByTier(await listSeatsForOrganization(live, ORG_ID))], [[TIER_S1, 5], [TIER_S2, 1]])
+  const ended = entitlementDb({ status: 'canceled', seats: [{ tierId: TIER_S1, quantity: 3 }], licenses: [] })
+  assertEquals([...seatQuantitiesByTier(await listSeatsForOrganization(ended, ORG_ID))], [[TIER_S1, 0]])
+  assertEquals(seatQuantitiesByTier({ payer: null, subscription: null, seats: [], grant: null }), new Map())
 })
 
-test('applySeatEntitlements leaves an upgrade intent alone while the change is pending or not yet committed', async () => {
-  // Committed items still show the old shape: S1 2, S2 0.
+test('revokeAllLicensesForOrganization revokes bound and unbound keys, names the bound servers, and leaves other rows alone', async () => {
   const db = entitlementDb({
     seats: [{ tierId: TIER_S1, quantity: 2 }],
-    licenses: [{ id: LIC_BOUND, tierId: TIER_S1, serverId: SERVER_A }, { id: LIC_FREE, tierId: TIER_S1, serverId: null }],
-  })
-  const intent = { id: 'i1', kind: 'upgrade' as const, licenseId: LIC_BOUND, fromTierId: TIER_S1, toTierId: TIER_S2 }
-  const replay = await applySeatEntitlements(db, ORG_ID, [intent], { now: ENT_NOW })
-  assertEquals(replay.consumedIntentIds, [])
-  assertEquals(replay.repointed, [])
-  // Even with room at the target, a `pending_update` on the subscription holds it back.
-  db.rows(subscriptionItem).push({ id: 'seat-x', subscriptionId: SUB_ROW, tierId: TIER_S2, providerItemId: 'si_x', quantity: 1, createdAt: ENT_NOW, updatedAt: ENT_NOW })
-  const pending = await applySeatEntitlements(db, ORG_ID, [intent], { now: ENT_NOW, pendingUpdate: true })
-  assertEquals(pending.consumedIntentIds, [])
-  assertEquals(licenseTier(db, LIC_BOUND)?.tierId, TIER_S1)
-})
-
-test('applySeatEntitlements closes a residual gap with unbound licenses only and reports the bound remainder as drift', async () => {
-  // Seats dropped to 1 at S1 with three licenses there: one bound, two free.
-  const db = entitlementDb({
-    seats: [{ tierId: TIER_S1, quantity: 1 }],
     licenses: [
-      { id: LIC_BOUND, tierId: TIER_S1, serverId: SERVER_A },
-      { id: LIC_FREE, tierId: TIER_S1, serverId: null },
-      { id: LIC_FREE_2, tierId: TIER_S1, serverId: null },
+      entLicense(LIC_BOUND, SERVER_A),
+      entLicense(LIC_FREE, null),
+      entLicense(LIC_BOUND_2, SERVER_B),
+      // Already revoked: not touched, not reported, its timestamp kept.
+      entLicense(LIC_GONE, null, { revokedAt: EARLIER, updatedAt: EARLIER }),
+      // Another organization's key.
+      entLicense('other-org-key', 'other-server', { organizationId: OTHER_ORG }),
     ],
   })
-  const result = await applySeatEntitlements(db, ORG_ID, [], { now: ENT_NOW })
-  assertEquals(result.revokedLicenseIds.sort(), [LIC_FREE, LIC_FREE_2].sort())
-  assertEquals(result.drift, [])
-  assertEquals(licenseTier(db, LIC_BOUND)?.revokedAt, null)
-
-  // Now seats go to 0 while the subscription is still live: the bound license is never touched.
-  db.rows(subscriptionItem)[0]!.quantity = 0
-  const short = await applySeatEntitlements(db, ORG_ID, [], { now: ENT_NOW })
-  assertEquals(short.revokedLicenseIds, [])
-  assertEquals(short.drift, [{ tierId: TIER_S1, seats: 0, active: 1, bound: 1, excess: 1 }])
-  assertEquals(licenseTier(db, LIC_BOUND)?.revokedAt, null)
-})
-
-test('applySeatEntitlements repoints an excess unbound license DOWN into a free seat, never up', async () => {
-  // S2 lost its seat; S1 has a spare: the unbound S2 license moves down.
-  const down = entitlementDb({
-    seats: [{ tierId: TIER_S2, quantity: 0 }, { tierId: TIER_S1, quantity: 1 }],
-    licenses: [{ id: LIC_FREE, tierId: TIER_S2, serverId: null }],
-  })
-  const moved = await applySeatEntitlements(down, ORG_ID, [], { now: ENT_NOW })
-  assertEquals(moved.repointed, [{ licenseId: LIC_FREE, fromTierId: TIER_S2, toTierId: TIER_S1 }])
-  assertEquals(moved.revokedLicenseIds, [])
-  // The mirror: a spare S2 seat is not a reason to hand an S1 license S2 entitlements.
-  const up = entitlementDb({
-    seats: [{ tierId: TIER_S1, quantity: 0 }, { tierId: TIER_S2, quantity: 1 }],
-    licenses: [{ id: LIC_FREE, tierId: TIER_S1, serverId: null }],
-  })
-  const revoked = await applySeatEntitlements(up, ORG_ID, [], { now: ENT_NOW })
-  assertEquals(revoked.repointed, [])
-  assertEquals(revoked.revokedLicenseIds, [LIC_FREE])
-})
-
-test('applySeatEntitlements consumes a release-seat intent when the source tier quantity has dropped', async () => {
-  // The revoked key already left `license`; the seat still counts until the boundary.
-  const db = entitlementDb({
-    seats: [{ tierId: TIER_S1, quantity: 2 }],
-    licenses: [{ id: LIC_BOUND, tierId: TIER_S1, serverId: SERVER_A }],
-  })
-  const intent = { id: 'r1', kind: 'release-seat' as const, licenseId: LIC_FREE, fromTierId: TIER_S1, toTierId: null }
-  const before = await applySeatEntitlements(db, ORG_ID, [intent], { now: ENT_NOW })
-  assertEquals(before.consumedIntentIds, [])
-  db.rows(subscriptionItem)[0]!.quantity = 1
-  const after = await applySeatEntitlements(db, ORG_ID, [intent], { now: ENT_NOW })
-  assertEquals(after.consumedIntentIds, ['r1'])
-  assertEquals(after.drift, [])
-  assertEquals(after.revokedLicenseIds, [])
-})
-
-test('applySeatEntitlements consumes a downgrade only once the source is short and the target has room', async () => {
-  const db = entitlementDb({
-    seats: [{ tierId: TIER_S2, quantity: 1 }],
-    licenses: [{ id: LIC_BOUND, tierId: TIER_S2, serverId: SERVER_A }],
-  })
-  const intent = { id: 'd1', kind: 'downgrade' as const, licenseId: LIC_BOUND, fromTierId: TIER_S2, toTierId: TIER_S1 }
-  const early = await applySeatEntitlements(db, ORG_ID, [intent], { now: ENT_NOW })
-  assertEquals(early.consumedIntentIds, [])
-  // The boundary landed: S2 0, S1 1.
-  db.rows(subscriptionItem)[0]!.quantity = 0
-  db.rows(subscriptionItem).push({ id: 'seat-s1', subscriptionId: SUB_ROW, tierId: TIER_S1, providerItemId: 'si_s1', quantity: 1, createdAt: ENT_NOW, updatedAt: ENT_NOW })
-  const landed = await applySeatEntitlements(db, ORG_ID, [intent], { now: ENT_NOW })
-  assertEquals(landed.consumedIntentIds, ['d1'])
-  assertEquals(landed.repointed, [{ licenseId: LIC_BOUND, fromTierId: TIER_S2, toTierId: TIER_S1 }])
-  assertEquals(landed.drift, [])
-})
-
-test('an ended subscription revokes bound licenses too, through the revoke-bound hook', async () => {
-  const db = entitlementDb({
-    status: 'canceled',
-    seats: [{ tierId: TIER_S1, quantity: 2 }],
-    licenses: [{ id: LIC_BOUND, tierId: TIER_S1, serverId: SERVER_A }, { id: LIC_FREE, tierId: TIER_S1, serverId: null }],
-  })
   const disconnected: string[] = []
-  const result = await applySeatEntitlements(db, ORG_ID, [], {
+  const result = await revokeAllLicensesForOrganization(db, ORG_ID, {
     now: ENT_NOW,
     onRevokeBound: (serverId) => Promise.resolve(disconnected.push(serverId)).then(() => {}),
   })
-  assertEquals(result.revokedLicenseIds.sort(), [LIC_BOUND, LIC_FREE].sort())
-  assertEquals(result.disconnectedServerIds, [SERVER_A])
-  assertEquals(disconnected, [SERVER_A])
-  assertEquals(result.drift, [])
-  assertEquals(db.rows(license).every((row) => row.revokedAt === ENT_NOW), true)
+  assertEquals(result.licenseIds, [LIC_BOUND, LIC_FREE, LIC_BOUND_2])
+  assertEquals(result.serverIds, [SERVER_A, SERVER_B])
+  assertEquals(disconnected, [SERVER_A, SERVER_B])
+  const byId = new Map(db.rows(license).map((row) => [row.id, row]))
+  for (const id of [LIC_BOUND, LIC_FREE, LIC_BOUND_2]) {
+    assertEquals([byId.get(id)?.revokedAt, byId.get(id)?.updatedAt], [ENT_NOW, ENT_NOW], id)
+  }
+  assertEquals(byId.get(LIC_GONE)?.revokedAt, EARLIER)
+  assertEquals(byId.get('other-org-key')?.revokedAt, null)
+  // Bound rows keep their server id for audit; nothing else is written.
+  assertEquals(byId.get(LIC_BOUND)?.serverId, SERVER_A)
+  assertEquals(db.ops.filter((op) => op.startsWith('update:')), ['update:license', 'update:license', 'update:license'])
+  assertEquals(db.ops.filter((op) => op.startsWith('delete:') || op.startsWith('insert:')), [])
+
+  // A second pass finds nothing to revoke and calls no hook.
+  const again = await revokeAllLicensesForOrganization(db, ORG_ID, {
+    now: ENT_NOW,
+    onRevokeBound: () => Promise.reject(new Error('revoked twice')),
+  })
+  assertEquals(again, { licenseIds: [], serverIds: [] })
 })
 
 // ---------------------------------------------------------------------------
@@ -506,33 +466,6 @@ test('T8 · committed seats read as zero under an ended status and as counted un
     const db = entitlementDb({ status, seats: [{ tierId: TIER_S1, quantity: 2 }], licenses: [] })
     const state = await listSeatsForOrganization(db, ORG_ID)
     assertEquals(seatQuantitiesByTier(state).get(TIER_S1), ENDED.includes(status) ? 0 : 2, status)
-  }
-})
-
-test('T8 · incomplete_expired revokes like canceled — bound licenses included — while trialing, paused and the delinquent statuses revoke nothing', async () => {
-  const licenses = [{ id: LIC_BOUND, tierId: TIER_S1, serverId: SERVER_A }, { id: LIC_FREE, tierId: TIER_S1, serverId: null }]
-  {
-    const db = entitlementDb({ status: 'incomplete_expired', seats: [{ tierId: TIER_S1, quantity: 2 }], licenses })
-    const disconnected: string[] = []
-    const result = await applySeatEntitlements(db, ORG_ID, [], {
-      now: ENT_NOW,
-      onRevokeBound: (serverId) => Promise.resolve(disconnected.push(serverId)).then(() => {}),
-    })
-    assertEquals(result.revokedLicenseIds.sort(), [LIC_BOUND, LIC_FREE].sort())
-    assertEquals(result.disconnectedServerIds, [SERVER_A])
-    assertEquals(disconnected, [SERVER_A])
-    assertEquals(db.rows(license).every((row) => row.revokedAt === ENT_NOW), true)
-  }
-  for (const status of ['trialing', 'paused', 'past_due', 'unpaid', 'incomplete', 'some_future_status']) {
-    const db = entitlementDb({ status, seats: [{ tierId: TIER_S1, quantity: 2 }], licenses })
-    const result = await applySeatEntitlements(db, ORG_ID, [], {
-      now: ENT_NOW,
-      onRevokeBound: () => Promise.reject(new Error(`revoked a bound license under ${status}`)),
-    })
-    assertEquals(result.revokedLicenseIds, [], status)
-    assertEquals(result.repointed, [], status)
-    assertEquals(result.drift, [], status)
-    assertEquals(db.rows(license).every((row) => row.revokedAt === null), true, status)
   }
 })
 

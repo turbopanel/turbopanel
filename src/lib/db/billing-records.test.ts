@@ -29,32 +29,39 @@ type Ctx = {
   userId: string
   tierA: string
   tierB: string
-  generation: number
+  /** The fixture's rank base: `uniq_tier_rank` is global, so ranks are minted away from the ladder's 1…8. */
+  rankBase: number
 }
 
-/** One organization, one user and two priced tiers, all removed afterwards. */
+/**
+ * One organization, one user and two priced tiers, all removed afterwards.
+ * `uniq_tier_label` and `uniq_tier_rank` are global (no generation
+ * namespaces them any more), so the fixture's labels and ranks are minted
+ * per run — `label` is plain text to Postgres; only `insertTier` checks it
+ * against the ladder, and this suite writes the rows directly.
+ */
 async function withDb(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   if (!dbUrl) {
     console.warn('Skipping billing constraint tests: TURBOPANEL_DATABASE_URL not set')
     return
   }
   const db = createDenoDb()
-  const generation = 1_000_000 + Math.floor(Math.random() * 1_000_000_000)
+  const rankBase = 1_000_000 + Math.floor(Math.random() * 1_000_000_000)
   const [org] = await db.insert(organization).values({ name: `Billing constraints ${RUN}` }).returning({ id: organization.id })
   const [usr] = await db.insert(user).values({ email: `${RUN}@example.invalid` }).returning({ id: user.id })
-  const tierValues = (rank: number, label: string) => ({
-    generation, rank, label, priceCents: 1000 * rank, providerPriceId: `price_${RUN}_${label}`,
-    maxCores: 4, maxMemoryBytes: 1, nicSlots: 1, driveSlots: 1, gpuSlots: 0, filesystemSlots: 1,
+  const tierValues = (offset: number, label: string) => ({
+    label: `${RUN}_${label}`, rank: rankBase + offset, provider: 'stripe', providerProductId: `prod_${RUN}_${label}`,
+    priceCents: 1000 * offset, currency: 'usd',
   })
   const [a] = await db.insert(tier).values(tierValues(1, 'S1')).returning({ id: tier.id })
   const [b] = await db.insert(tier).values(tierValues(2, 'S2')).returning({ id: tier.id })
   try {
-    await fn({ db, organizationId: org!.id, userId: usr!.id, tierA: a!.id, tierB: b!.id, generation })
+    await fn({ db, organizationId: org!.id, userId: usr!.id, tierA: a!.id, tierB: b!.id, rankBase })
   } finally {
     // payer → subscription → seat cascade from the organization; tiers after.
     await db.delete(organization).where(eq(organization.id, org!.id))
     await db.delete(user).where(eq(user.id, usr!.id))
-    await db.delete(tier).where(eq(tier.generation, generation))
+    await db.delete(tier).where(like(tier.label, `${RUN}%`))
     await db.delete(webhookDelivery).where(like(webhookDelivery.externalDeliveryId, `${RUN}%`))
     await endDbConnection(db)
   }
@@ -167,7 +174,7 @@ test('T15 · the seat replacement really rolls back: a failure after the delete 
     try {
       await ctx.db.transaction(async (tx) => {
         const replaced = await replaceSubscriptionItems(tx, subscriptionId, [
-          { providerItemId: `si_${RUN}_new`, providerPriceId: `price_${RUN}_S2`, quantity: 5 },
+          { providerItemId: `si_${RUN}_new`, providerPriceId: `price_${RUN}_S2`, providerProductId: `prod_${RUN}_S2`, quantity: 5 },
         ])
         assertEquals(replaced.written, 1)
         throw new Error('injected: failure after the replace')
@@ -182,21 +189,37 @@ test('T15 · the seat replacement really rolls back: a failure after the delete 
   })
 })
 
-test('T15 · tier uniqueness from migration 0004: (generation, rank) and a non-null provider price id', async () => {
+test('T15 · tier uniqueness: one row per label, per rank and per (provider, product); the provider is checked', async () => {
   await withDb(async (ctx) => {
-    const base = { maxCores: 4, maxMemoryBytes: 1, nicSlots: 1, driveSlots: 1, gpuSlots: 0, filesystemSlots: 1 }
+    const fresh = (offset: number, label: string) => ({
+      label: `${RUN}_${label}`, rank: ctx.rankBase + offset, provider: 'stripe', providerProductId: `prod_${RUN}_${label}`,
+      priceCents: 1, currency: 'usd',
+    })
+    // The fixture already holds `${RUN}_S1` at rankBase + 1 on `prod_${RUN}_S1`.
     await expectPgRefusal(
-      ctx.db.insert(tier).values({ ...base, generation: ctx.generation, rank: 1, label: 'S1b', priceCents: 1, providerPriceId: `price_${RUN}_other` }),
+      ctx.db.insert(tier).values({ ...fresh(3, 'S3'), label: `${RUN}_S1` }),
       UNIQUE_VIOLATION,
-      'uniq_tier_generation_rank',
+      'uniq_tier_label',
     )
     await expectPgRefusal(
-      ctx.db.insert(tier).values({ ...base, generation: ctx.generation, rank: 3, label: 'S3', priceCents: 1, providerPriceId: `price_${RUN}_S1` }),
+      ctx.db.insert(tier).values({ ...fresh(3, 'S3'), rank: ctx.rankBase + 1 }),
       UNIQUE_VIOLATION,
-      'uniq_tier_provider_price_id',
+      'uniq_tier_rank',
     )
-    // Two unpriced rows (custom tiers) may coexist: the index is partial.
-    await ctx.db.insert(tier).values({ ...base, generation: ctx.generation, rank: 8, label: 'SX', priceCents: null, providerPriceId: null, isCustom: true })
-    await ctx.db.insert(tier).values({ ...base, generation: ctx.generation, rank: 9, label: 'SY', priceCents: null, providerPriceId: null, isCustom: true })
+    await expectPgRefusal(
+      ctx.db.insert(tier).values({ ...fresh(3, 'S3'), providerProductId: `prod_${RUN}_S1` }),
+      UNIQUE_VIOLATION,
+      'uniq_tier_provider_product',
+    )
+    await expectPgRefusal(
+      ctx.db.insert(tier).values({ ...fresh(3, 'S3'), provider: 'paypal' }),
+      CHECK_VIOLATION,
+      'tier_provider_check',
+    )
+    // The product index is partial: two rows with no product (custom tiers) may coexist.
+    await ctx.db.insert(tier).values({ ...fresh(8, 'SX'), providerProductId: null, priceCents: null, currency: null, isCustom: true })
+    await ctx.db.insert(tier).values({ ...fresh(9, 'SY'), providerProductId: null, priceCents: null, currency: null, isCustom: true })
+    // …and the same product id on another provider is another catalogue, not a duplicate.
+    await ctx.db.insert(tier).values({ ...fresh(10, 'S1A'), provider: 'apple', providerProductId: `prod_${RUN}_S1` })
   })
 })

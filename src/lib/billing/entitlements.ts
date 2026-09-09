@@ -1,14 +1,25 @@
 /**
- * Entitlement sync: ledger in, `license.tier_id` moves out.
+ * Entitlement sync: committed seats in, the derived assignment out.
  *
  * Runs after every successful projection (the webhook task) and at the
  * end of every mutation route, so the webhook is a redundant idempotent
- * confirmation rather than the only path. It holds — or is handed — the
- * organization's quantity lease, reads the pending-change ledger, applies
- * the intents against the **committed** seats (`applySeatEntitlements`),
- * prunes what was consumed, and rebuilds the deferred schedule when the
- * ledger still carries deferred intents but the subscription has no
- * schedule (an upgrade released it and was parked as pending).
+ * confirmation rather than the only path. Under the organization's
+ * quantity lease it:
+ *
+ *   1. reads the pending-change ledger and drops the intents whose change
+ *      the committed items now show (`landedIntents`);
+ *   2. recomputes which server sits on which tier from the seats and the
+ *      licensed servers' hardware (`recomputeOrganizationAssignments`),
+ *      writing `server.assigned_tier_id` where it moved;
+ *   3. on an **ended** subscription, revokes every license the
+ *      organization holds — bound ones included — and clears the ledger;
+ *   4. rebuilds the deferred schedule when the ledger still carries
+ *      intents but the subscription has no schedule (an immediate change
+ *      released it and was parked as pending).
+ *
+ * Nothing here moves a license between tiers, because a license has no
+ * tier: a server that ends up on nothing is reported as uncovered, the
+ * daemon's next session is refused, and the console shows why.
  *
  * Workers-bundleable: nothing at module load.
  */
@@ -16,26 +27,30 @@
 import type { Db } from '../../db.ts'
 import { logInfo, logWarn } from '../../logger.ts'
 import {
-  applySeatEntitlements,
-  type ApplySeatEntitlementsResult,
   isEndedStatus,
   listSeatsForOrganization,
   type OrganizationBillingState,
+  revokeAllLicensesForOrganization,
 } from '../db/billing-records.ts'
-import { getTiersByIds } from '../db/tier-records.ts'
+import {
+  clearAssignmentsForServers,
+  recomputeOrganizationAssignments,
+  type RecomputeAssignmentsResult,
+} from '../tiers/assignment-records.ts'
 import type { StripeClient } from './client.ts'
+import { resolveBillingGateway } from './gateway.ts'
 import {
   deferredDeltasByTier,
-  deferredIntents,
+  landedIntents,
   type PendingChangeLedger,
   readPendingChanges,
-  upgradeIntents,
   withoutIntents,
   writePendingChanges,
 } from './pending-changes.ts'
 import { type BillingQuantityLock, endQuantityMutation, tryBeginQuantityMutation } from './quantity-lock.ts'
 import { syncDeferredSchedule } from './schedules.ts'
 import type { SeatLine } from './subscriptions.ts'
+import { priceMapWithIntentTargets } from './tier-prices.ts'
 
 export type EntitlementSyncDeps = Readonly<{
   db: Db
@@ -49,8 +64,8 @@ export type EntitlementSyncDeps = Readonly<{
 }>
 
 /**
- * A route or the license gate holds the lease for one Stripe round trip;
- * a webhook landing meanwhile waits a few seconds rather than skipping.
+ * A route holds the lease for one Stripe round trip; a webhook landing
+ * meanwhile waits a few seconds rather than skipping.
  */
 export const DEFAULT_LEASE_RETRY = { attempts: 4, delayMs: 1500 } as const
 
@@ -73,18 +88,24 @@ async function acquireLeaseWithRetry(
 export type EntitlementSyncInput = Readonly<{
   organizationId: string
   providerSubscriptionId: string
-  /** The refetched subscription carries a `pending_update`. */
+  /** The refetched subscription carries a `pending_update`: no schedule rebuild while it stands. */
   pendingUpdate: boolean
-  /** `pending_update_expired`: the upgrade could not be paid; drop its intents. */
-  dropUpgradeIntents?: boolean
   /** A lease the caller already holds; otherwise one is taken here. */
   lock?: BillingQuantityLock
   /** Already-loaded state, to skip the second read. */
   state?: OrganizationBillingState
 }>
 
+export type EntitlementSyncResult = Readonly<{
+  landedIntentIds: string[]
+  assignment: RecomputeAssignmentsResult
+  revokedLicenseIds: string[]
+  /** Servers whose bound license was revoked (subscription ended only). */
+  disconnectedServerIds: string[]
+}>
+
 export type EntitlementSyncOutcome =
-  | { action: 'synced'; result: ApplySeatEntitlementsResult; droppedUpgradeIntentIds: string[]; scheduleRebuilt: boolean }
+  | { action: 'synced'; result: EntitlementSyncResult; scheduleRebuilt: boolean }
   | { action: 'skipped'; reason: 'lease_held' }
 
 /** Seat lines and the two price maps the schedule needs, from projected state. */
@@ -97,52 +118,17 @@ export function seatLinesFromState(state: OrganizationBillingState): {
   const priceByTier = new Map<string, string>()
   const tierByPrice = new Map<string, string>()
   for (const seat of state.seats) {
-    if (!seat.tier.providerPriceId) continue
+    if (!seat.providerPriceId) continue
     lines.push({
       providerItemId: seat.providerItemId,
-      providerPriceId: seat.tier.providerPriceId,
+      providerPriceId: seat.providerPriceId,
       tierId: seat.tierId,
       quantity: seat.quantity,
     })
-    priceByTier.set(seat.tierId, seat.tier.providerPriceId)
-    tierByPrice.set(seat.tier.providerPriceId, seat.tierId)
+    priceByTier.set(seat.tierId, seat.providerPriceId)
+    tierByPrice.set(seat.providerPriceId, seat.tierId)
   }
   return { lines, priceByTier, tierByPrice }
-}
-
-/** Price ids for every tier a ledger's deferred intents name, on top of the seats'. */
-export async function priceMapWithIntentTargets(
-  db: Db,
-  priceByTier: Map<string, string>,
-  ledger: PendingChangeLedger,
-): Promise<Map<string, string>> {
-  const missing = new Set<string>()
-  for (const intent of deferredIntents(ledger)) {
-    if (intent.toTierId && !priceByTier.has(intent.toTierId)) missing.add(intent.toTierId)
-  }
-  if (missing.size === 0) return priceByTier
-  const out = new Map(priceByTier)
-  for (const [id, row] of await getTiersByIds(db, [...missing])) {
-    if (row.providerPriceId) out.set(id, row.providerPriceId)
-  }
-  return out
-}
-
-function dropExpiredUpgradeIntents(
-  ledger: PendingChangeLedger,
-  drop: boolean | undefined,
-  logScope: string,
-  organizationId: string,
-): { ledger: PendingChangeLedger; droppedUpgradeIntentIds: string[] } {
-  if (!drop) return { ledger, droppedUpgradeIntentIds: [] }
-  const droppedUpgradeIntentIds = upgradeIntents(ledger).map((intent) => intent.id)
-  if (droppedUpgradeIntentIds.length > 0) {
-    logWarn(
-      logScope,
-      `organization ${organizationId}: pending update expired; ${droppedUpgradeIntentIds.length} upgrade intent(s) dropped — the console offers a retry`,
-    )
-  }
-  return { ledger: withoutIntents(ledger, droppedUpgradeIntentIds), droppedUpgradeIntentIds }
 }
 
 /** An ended subscription has nothing left to defer. */
@@ -177,7 +163,7 @@ async function rebuildDeferredScheduleIfNeeded(
       scheduleId: null,
       current: lines,
       deltasByTier: deltas,
-      priceByTier: await priceMapWithIntentTargets(deps.db, priceByTier, ledger),
+      priceByTier: await priceMapWithIntentTargets(deps.db, resolveBillingGateway(deps.client), priceByTier, ledger),
       // Keyed on the newest intent: fixed length (Stripe caps keys at 255).
       idempotencyKey: `${ledger.intents.at(-1)!.idempotencyKey}:rebuild`,
     })
@@ -189,20 +175,13 @@ async function rebuildDeferredScheduleIfNeeded(
   }
 }
 
-function logEntitlementSyncResult(
-  logScope: string,
-  organizationId: string,
-  result: ApplySeatEntitlementsResult,
-): void {
-  if (result.drift.length > 0) {
-    logWarn(
-      logScope,
-      `organization ${organizationId}: seat drift only a bound license could close`,
-      JSON.stringify(result.drift),
-    )
-    return
+function seatsAtFromState(state: OrganizationBillingState): (tierId: string) => number {
+  const ended = !state.subscription || isEndedStatus(state.subscription.status)
+  const totals = new Map<string, number>()
+  for (const seat of state.seats) {
+    totals.set(seat.tierId, ended ? 0 : (totals.get(seat.tierId) ?? 0) + seat.quantity)
   }
-  logInfo(logScope, `organization ${organizationId}: entitlements synced`, JSON.stringify(result))
+  return (tierId) => totals.get(tierId) ?? 0
 }
 
 export async function syncEntitlementsForOrganization(
@@ -211,6 +190,7 @@ export async function syncEntitlementsForOrganization(
 ): Promise<EntitlementSyncOutcome> {
   const logScope = deps.logScope ?? 'billing-entitlements'
   const nowMs = deps.nowMs ?? Date.now()
+  const now = new Date(nowMs).toISOString()
   const ownLock = input.lock
     ? null
     : await acquireLeaseWithRetry(deps.db, input.organizationId, nowMs, deps.leaseRetry ?? DEFAULT_LEASE_RETRY)
@@ -223,44 +203,56 @@ export async function syncEntitlementsForOrganization(
   }
   try {
     const state = input.state ?? await listSeatsForOrganization(deps.db, input.organizationId)
-    let { ledger } = await readPendingChanges(
-      deps.db,
-      input.organizationId,
-      input.providerSubscriptionId,
-      nowMs,
-    )
-    const dropped = dropExpiredUpgradeIntents(
-      ledger,
-      input.dropUpgradeIntents,
-      logScope,
-      input.organizationId,
-    )
-    ledger = dropped.ledger
+    const ended = Boolean(state.subscription) && isEndedStatus(state.subscription!.status)
+    let { ledger } = await readPendingChanges(deps.db, input.organizationId, input.providerSubscriptionId)
 
-    const result = await applySeatEntitlements(deps.db, input.organizationId, ledger.intents, {
-      pendingUpdate: input.pendingUpdate,
-      state,
-      now: new Date(nowMs).toISOString(),
-      onRevokeBound: deps.onRevokeBound,
+    // 1. Intents whose change the committed items show.
+    const landed = landedIntents(ledger, {
+      ended,
+      currentPeriodEnd: state.subscription?.currentPeriodEnd ?? null,
+      seatsAt: seatsAtFromState(state),
     })
-    ledger = withoutIntents(ledger, result.consumedIntentIds)
+    ledger = withoutIntents(ledger, landed.map((intent) => intent.id))
     ledger = clearLedgerIfSubscriptionEnded(ledger, state)
     await writePendingChanges(deps.db, input.organizationId, ledger, nowMs)
 
-    const scheduleRebuilt = await rebuildDeferredScheduleIfNeeded(
-      deps,
-      input,
-      state,
-      ledger,
-      logScope,
-    )
-    logEntitlementSyncResult(logScope, input.organizationId, result)
-    return {
-      action: 'synced',
-      result,
-      droppedUpgradeIntentIds: dropped.droppedUpgradeIntentIds,
-      scheduleRebuilt,
+    // 3. An ended subscription revokes everything, before the assignment
+    //    runs so it sees no licensed servers.
+    let revoked: { licenseIds: string[]; serverIds: string[] } = { licenseIds: [], serverIds: [] }
+    if (ended) {
+      revoked = await revokeAllLicensesForOrganization(deps.db, input.organizationId, {
+        now,
+        onRevokeBound: deps.onRevokeBound,
+      })
+      await clearAssignmentsForServers(deps.db, revoked.serverIds)
     }
+
+    // 2. The derived assignment.
+    const assignment = await recomputeOrganizationAssignments(deps.db, input.organizationId, { state, now })
+
+    // 4. The schedule, when the ledger still needs one.
+    const scheduleRebuilt = await rebuildDeferredScheduleIfNeeded(deps, input, state, ledger, logScope)
+
+    const result: EntitlementSyncResult = {
+      landedIntentIds: landed.map((intent) => intent.id),
+      assignment,
+      revokedLicenseIds: revoked.licenseIds,
+      disconnectedServerIds: revoked.serverIds,
+    }
+    if (assignment.uncovered.length > 0) {
+      logWarn(
+        logScope,
+        `organization ${input.organizationId}: ${assignment.uncovered.length} licensed server(s) not covered by any purchased tier`,
+        JSON.stringify(assignment.uncovered),
+      )
+    } else {
+      logInfo(logScope, `organization ${input.organizationId}: entitlements synced`, JSON.stringify({
+        landed: result.landedIntentIds.length,
+        moved: assignment.changed.length,
+        revoked: revoked.licenseIds.length,
+      }))
+    }
+    return { action: 'synced', result, scheduleRebuilt }
   } finally {
     if (ownLock) await endQuantityMutation(deps.db, ownLock).catch(() => {})
   }

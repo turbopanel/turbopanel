@@ -12,15 +12,16 @@ const TIER_PATHS = {
   [`${ADMIN_API_PREFIX}/tiers`]: {
     get: {
       tags: ["Tiers"],
-      summary: "List every tier row, active and inactive",
+      summary: "List every tier row, active and inactive, with the ladder",
       description:
-        "Generation then rank order. Each row carries its reference counts " +
-        "(licenses and seats) and `entitlementsEditable`, which is false once " +
-        "anything points at the row — from then on only `isActive` and " +
-        "`successorId` may change.",
+        "Rank order. Each row carries the provider product it bills against, " +
+        "the cached display price, the ladder entitlements for its label and " +
+        "its reference counts (seats and assigned servers). `ladder` lists " +
+        "every label with the row bound to it, so the console can show what " +
+        "is still unmapped.",
       security: [...cookieSecurity],
       responses: {
-        "200": { description: "Every tier row" },
+        "200": { description: "Every tier row, and the ladder" },
         "401": { description: "Unauthorized" },
         "403": { description: "Superadmin access required" },
         "503": {
@@ -30,26 +31,27 @@ const TIER_PATHS = {
     },
     post: {
       tags: ["Tiers"],
-      summary: "Add one tier row",
+      summary: "Bind a ladder label to a provider product",
       description:
-        "Validates the shape, refuses a duplicate `(generation, label)`, then " +
-        "runs the read-only Stripe price verification and refuses on any " +
-        "failure — a wrong price id is silent downstream, because the " +
-        "projection skips items whose price maps to no tier. Advisory " +
-        "warnings (a rank undercutting its placement band, a non-monotonic " +
-        "ladder) are returned alongside the created row, not blocking.",
+        "Body `{ label, providerProductId? }`. The label must be on the " +
+        "ladder; `SX` takes no product, every other label needs one. The " +
+        "product is fetched from the provider with its default price and " +
+        "verified (active, recurring monthly, per-unit, usd, and a tax " +
+        "behaviour resolvable from the price or the account's Tax " +
+        "settings default) before the row is written — a wrong product is silent " +
+        "downstream, because the projection skips items whose product maps " +
+        "to no tier. `rank` and `isCustom` come from the ladder, never the body.",
       security: [...cookieSecurity],
       responses: {
-        "201": { description: "Created, with the verification result and any warnings" },
+        "201": { description: "Created, with the verification result" },
         "400": {
           description:
-            "Invalid body, a shape refusal, or the price failed verification",
+            "`tier_invalid`, `product_verification_failed` (with `message`), or `product_lookup_failed`",
         },
         "401": { description: "Unauthorized" },
         "403": { description: "Superadmin access required" },
         "409": {
-          description:
-            "That generation already has this label, rank, or Stripe price id",
+          description: "`tier_exists`: that label, or that product, already has a row",
         },
         "503": {
           description: "Database unavailable, or billing is not configured",
@@ -57,19 +59,24 @@ const TIER_PATHS = {
       },
     },
   },
-  [`${ADMIN_API_PREFIX}/tiers/defaults`]: {
+  [`${ADMIN_API_PREFIX}/tiers/products`]: {
     get: {
       tags: ["Tiers"],
-      summary: "The shipped S1…S7 + SX ladder the form prefills",
+      summary: "The provider's active products — the dropdown",
       description:
-        "Defaults, placement bands and slot ceilings, so the console never " +
-        "hardcodes the ladder. This is what \"Add from defaults\" reads: it " +
-        "fills every field except the one nothing can derive, the Stripe price id.",
+        "Every active product with its default price expanded, a pass/fail " +
+        "verification with the reasons, the ladder label it names in " +
+        "`metadata.turbopanel_tier` (when valid) as `suggestedLabel`, and the " +
+        "tier row already bound to it, if any, plus `taxDefaults` — the " +
+        "account's Stripe Tax default, which is what lets a price left at " +
+        "\"Use default\" verify. One provider list call, and a second for " +
+        "those defaults only when some price needs them; nothing is written.",
       security: [...cookieSecurity],
       responses: {
-        "200": { description: "Ladder defaults and validation bounds" },
+        "200": { description: "`{ provider, taxDefaults, products }`" },
         "401": { description: "Unauthorized" },
         "403": { description: "Superadmin access required" },
+        "502": { description: "`product_lookup_failed`: the provider could not be listed" },
         "503": {
           description: "Database unavailable, or billing is not configured",
         },
@@ -79,10 +86,10 @@ const TIER_PATHS = {
   [`${ADMIN_API_PREFIX}/tiers/verify`]: {
     post: {
       tags: ["Tiers"],
-      summary: "Verify every priced row against Stripe",
+      summary: "Re-verify every priced row and refresh its cached price",
       description:
-        "The \"Verify all\" button. Read-only: one `GET /v1/prices/:id` per " +
-        "priced row, no writes on either side, safe to run as often as you like.",
+        "The \"Verify all\" button. One product fetch per priced row; the " +
+        "only write is the row's cached display price.",
       security: [...cookieSecurity],
       responses: {
         "200": { description: "One verification result per priced row" },
@@ -99,22 +106,17 @@ const TIER_PATHS = {
       tags: ["Tiers"],
       summary: "Change one tier row",
       description:
-        "`generation` and `label` are identity and never patchable — a " +
-        "re-label is a new row. Once any license or seat references the row " +
-        "only `isActive` and `successorId` are accepted, answering 409 with " +
-        "the offending keys otherwise. The price is re-verified only when the " +
-        "price id or the amount it is checked against actually moved.",
+        "Body `{ providerProductId?, isActive? }`. `label` and `rank` are " +
+        "identity and never patchable — a re-label is a new row. The product " +
+        "is re-verified only when it actually changed.",
       security: [...cookieSecurity],
       responses: {
-        "200": { description: "The updated row, with any warnings" },
-        "400": { description: "Invalid body, a shape refusal, or verification failed" },
+        "200": { description: "The updated row" },
+        "400": { description: "`tier_invalid`, or the product failed verification" },
         "401": { description: "Unauthorized" },
         "403": { description: "Superadmin access required" },
         "404": { description: "No such tier" },
-        "409": {
-          description:
-            "The row is referenced; only isActive and successorId may change",
-        },
+        "409": { description: "`tier_exists`: another row already bills against that product" },
         "503": {
           description: "Database unavailable, or billing is not configured",
         },
@@ -124,14 +126,14 @@ const TIER_PATHS = {
   [`${ADMIN_API_PREFIX}/tiers/{id}/deactivate`]: {
     post: {
       tags: ["Tiers"],
-      summary: "Retire a tier row, optionally naming its successor",
+      summary: "Retire a tier row",
       description:
         "Tiers are deactivated, never deleted: an inactive row cannot be " +
-        "bought into but stays readable for the licenses that still hold it.",
+        "bought into but stays readable for the seats that still count " +
+        "against it.",
       security: [...cookieSecurity],
       responses: {
         "200": { description: "The deactivated row" },
-        "400": { description: "Unknown successor, or a tier naming itself" },
         "401": { description: "Unauthorized" },
         "403": { description: "Superadmin access required" },
         "404": { description: "No such tier" },
@@ -144,12 +146,12 @@ const TIER_PATHS = {
   [`${ADMIN_API_PREFIX}/tiers/{id}/verify`]: {
     post: {
       tags: ["Tiers"],
-      summary: "Verify one row's Stripe price",
-      description: "Read-only. A custom row has no price to verify and answers 400.",
+      summary: "Verify one row's provider product and refresh its cached price",
+      description: "A custom row has no product to verify and answers 400 `tier_has_no_product`.",
       security: [...cookieSecurity],
       responses: {
-        "200": { description: "The verification result" },
-        "400": { description: "Verification failed, or the row has no price" },
+        "200": { description: "The verification result and the refreshed row" },
+        "400": { description: "Verification failed, or the row has no product" },
         "401": { description: "Unauthorized" },
         "403": { description: "Superadmin access required" },
         "404": { description: "No such tier" },

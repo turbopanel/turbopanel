@@ -22,10 +22,13 @@ import type { DatacenterOptions } from '../../lib/datacenter-options.ts'
 import { parseName } from '../shared.ts'
 import {
   isServerMachineClass,
+  type MetricsDeploymentKind,
   type ServerMachineClass,
 } from '../../daemon/metrics/capability-plan.ts'
-import { colocatedServerUpdateBlockedReason } from './update-status.ts'
-import type { ServerUpdateCommit } from './update-status.ts'
+import {
+  colocatedServerUpdateBlockedReason,
+  type ServerUpdateCommit,
+} from './update-status.ts'
 import {
   parseNtpDefaultsInput,
   parseSshPortInput,
@@ -425,6 +428,13 @@ export type PresenceLike = {
   connected?: boolean
   hostname?: string | null
   remoteAddress?: string | null
+  /**
+   * The daemon's stored peer address is the local-attach sentinel: it dialled
+   * the Unix socket. `remoteAddress` is `null` in that case — the sentinel is
+   * not an address — so this flag is the only surviving record of *how* the
+   * daemon reached us.
+   */
+  directAttach?: boolean
   colocatedWithInstance?: boolean
   lastInboundAt?: string | null
   connectedAt?: string | null
@@ -497,18 +507,44 @@ export function shapeServerOsFields(os: ServerOsMetadata | null | undefined) {
   }
 }
 
+/**
+ * Co-location and transport are two different facts.
+ *
+ * A co-located daemon runs on the control plane's own host. On the
+ * **self-hosted** runtime it also *reaches* the instance over the local Unix
+ * socket, and `deno-ws.ts` stores the `__direct__` sentinel as its peer
+ * address to say so — which is what `presence.directAttach` reports. On the
+ * **hosted** runtime there is no socket to dial: the very same daemon
+ * connects over HTTPS/WSS from an address, exactly like any remote one, and
+ * that address is the right thing to show.
+ *
+ * So the transport is read from `directAttach`, narrowed by the deployment,
+ * and never from `colocated`:
+ *
+ * - `colocated` does not force the sentinel. It used to, which labelled a
+ *   co-located host on the hosted runtime "via Local Unix Socket" for a
+ *   connection that never touched a socket.
+ * - `directAttach` is ignored when the deployment is hosted. A sentinel can
+ *   only have been written by the self-hosted transport, so on Workers it is
+ *   necessarily a **stale** row left by a control plane that used to run on
+ *   Deno — which is exactly what a development instance switching runtimes
+ *   leaves behind. Believing it would pin the co-located host to the socket
+ *   label until something else happened to rewrite the projection.
+ */
 export function shapeServerPresenceFields(
   live: PresenceLike | null | undefined,
   colocated: boolean,
+  deployment: MetricsDeploymentKind = 'self-hosted',
 ) {
   const os = live?.os ?? null
   const ips = parseServerIps(live?.ips) ?? null
+  const attachedOverSocket = deployment === 'self-hosted' && live?.directAttach === true
   // The wire address is not always the host's address: behind a co-located
   // reverse proxy, a Cloudflare Tunnel connector, or a forwarded port it is
   // the proxy's. `resolveServerAddress` reconciles it against the interfaces
   // the daemon reports so readers get one address that is actually the host's.
   const address = resolveServerAddress({
-    remoteAddress: colocated ? DIRECT_ATTACH_SENTINEL : live?.remoteAddress,
+    remoteAddress: attachedOverSocket ? DIRECT_ATTACH_SENTINEL : live?.remoteAddress,
     ips,
   })
   return {

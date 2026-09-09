@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { AppEnv } from "../../app.ts";
 import type { AuthRouteOpts } from "../authn/http.ts";
 import { createSessionMiddleware } from "../authn/middleware.ts";
@@ -20,7 +20,7 @@ import {
   generateRequestId,
 } from "../../daemon/cell/protocol.ts";
 import { cellTrace } from "../../logger.ts";
-import { license, organization, server, tier } from "../../lib/db/schema.ts";
+import { organization, server, tier } from "../../lib/db/schema.ts";
 import {
   mergeServerHardwareProfile,
   parseServerHardwareProfile,
@@ -36,7 +36,7 @@ import {
   metricsDeploymentKindForRuntime,
   resolveServerMachineClass,
 } from "../../daemon/metrics/capability-plan.ts";
-import { metricsCapabilityTierEntitlementsFromRow } from "../../lib/tiers/tier-entitlements.ts";
+import { metricsCapabilityTierEntitlementsForRank } from "../../lib/tiers/tier-entitlements.ts";
 import { parseOrganizationOptions } from "../../lib/organization-options.ts";
 import { getServerMetricsLiveMaxMinutes } from "../../lib/settings/server-metrics-settings.ts";
 import { loadServerStatusRecords } from "./update-status.ts";
@@ -199,8 +199,10 @@ async function loadOrganizationOptions(
 }
 
 /**
- * Hosted-only `license.tier_id → tier` join. Self-hosted never looks up a
- * tier so ingest and the read-side envelope stay uncapped on that path.
+ * Hosted-only `server.assigned_tier_id → tier` join. Self-hosted never
+ * looks up a tier so ingest and the read-side envelope stay uncapped on
+ * that path. A hosted server assigned nothing resolves to the platform
+ * default plan, the same as ingest.
  */
 async function loadServerTierEntitlements(
   db: NonNullable<ReturnType<typeof getDb>>,
@@ -209,18 +211,12 @@ async function loadServerTierEntitlements(
 ): Promise<MetricsCapabilityTierEntitlements | undefined> {
   if (deployment === "self-hosted") return undefined;
   const [row] = await db
-    .select({
-      nicSlots: tier.nicSlots,
-      driveSlots: tier.driveSlots,
-      gpuSlots: tier.gpuSlots,
-      filesystemSlots: tier.filesystemSlots,
-      rank: tier.rank,
-    })
-    .from(license)
-    .innerJoin(tier, eq(tier.id, license.tierId))
-    .where(and(eq(license.serverId, serverId), isNull(license.revokedAt)))
+    .select({ rank: tier.rank })
+    .from(server)
+    .innerJoin(tier, eq(tier.id, server.assignedTierId))
+    .where(eq(server.id, serverId))
     .limit(1);
-  return metricsCapabilityTierEntitlementsFromRow(row);
+  return metricsCapabilityTierEntitlementsForRank(row?.rank);
 }
 
 /**

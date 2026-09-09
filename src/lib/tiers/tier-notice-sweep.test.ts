@@ -5,6 +5,7 @@ import type { TopologySnapshot } from "../../client/servers/topology-types.ts";
 import { getDatabaseUrl } from "../../db-url.ts";
 import { createDenoDb } from "../../db.ts";
 import { license, organization, server, setting, tier } from "../db/schema.ts";
+import { getTierByLabel, insertTier } from "../db/tier-records.ts";
 import { evaluateTierPlacement } from "./tier-enforcement.ts";
 import {
   classifyTierNotice,
@@ -165,29 +166,25 @@ async function withEligibleSweepFleet(
     .values({ name: "Tier Notice Sweep Cursor Org" })
     .returning({ id: organization.id });
   const organizationId = orgRow!.id;
-  const generation = Math.floor(Math.random() * 2_000_000_000);
-  const [tierRow] = await db
-    .insert(tier)
-    .values({
-      generation,
-      rank: 1,
+  // `tier.label` is unique: reuse the instance's S1 row when it exists and
+  // create (then remove) one only when it does not.
+  const existingTier = await getTierByLabel(db, "S1");
+  const tierId = existingTier?.id ??
+    (await insertTier(db, {
       label: "S1",
-      maxCores: 4,
-      maxMemoryBytes: 16 * GIBIBYTE,
-      nicSlots: 2,
-      driveSlots: 2,
-      gpuSlots: 1,
-      filesystemSlots: 1,
-    })
-    .returning({ id: tier.id });
-  const tierId = tierRow!.id;
+      providerProductId: null,
+      priceCents: null,
+      currency: null,
+    })).id;
   const now = new Date().toISOString();
+  // Eligibility is the derived assignment: a licensed server sitting on a tier.
   const insertedServers = await db
     .insert(server)
     .values(
       Array.from({ length: count }, (_, index) => ({
         organizationId,
         name: `Tier Notice Sweep Server ${index + 1}`,
+        assignedTierId: tierId,
         createdAt: now,
         updatedAt: now,
       })),
@@ -200,7 +197,6 @@ async function withEligibleSweepFleet(
     serverIds.map((serverId) => ({
       organizationId,
       serverId,
-      tierId,
       token: `tier-notice-sweep-${serverId}`,
     })),
   );
@@ -210,7 +206,7 @@ async function withEligibleSweepFleet(
   } finally {
     await db.delete(license).where(eq(license.organizationId, organizationId));
     await db.delete(server).where(eq(server.organizationId, organizationId));
-    await db.delete(tier).where(eq(tier.id, tierId));
+    if (!existingTier) await db.delete(tier).where(eq(tier.id, tierId));
     await db.delete(organization).where(eq(organization.id, organizationId));
     if (existingCursor) {
       await db
@@ -243,7 +239,7 @@ test("subsequent sweeps rotate past the first eligible page instead of starving 
         license,
         and(eq(license.serverId, server.id), isNull(license.revokedAt)),
       )
-      .innerJoin(tier, eq(tier.id, license.tierId))
+      .innerJoin(tier, eq(tier.id, server.assignedTierId))
       .orderBy(server.id);
     const startIndex = eligibleBefore.findIndex((row) =>
       row.id === serverIds[0]

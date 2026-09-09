@@ -125,7 +125,6 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/authn/install-state.test.ts \
   src/client/authn/install-validation.deno.test.ts \
   src/client/authn/invitation-grants.test.ts \
-  src/client/authn/license-lifecycle.test.ts \
   src/client/authn/license.test.ts \
   src/client/authn/middleware.test.ts \
   src/client/authn/otp-reset-password.test.ts \

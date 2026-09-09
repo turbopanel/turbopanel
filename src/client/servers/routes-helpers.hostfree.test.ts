@@ -356,6 +356,37 @@ test('timezone and presence shaping helpers', () => {
   assertEquals(shapeServerPresenceFields(undefined, false).docker, null)
 })
 
+test('the address a co-located daemon shows follows its transport, not its co-location', () => {
+  const ips = [{ address: '10.1.2.3', version: 4, scope: 'private', interface: 'eth0' }]
+
+  // Self-hosted: it really did dial the Unix socket, so there is no network
+  // address to show and the console says so.
+  const socket = shapeServerPresenceFields(
+    { connected: true, directAttach: true, remoteAddress: null, ips },
+    true,
+    'self-hosted',
+  )
+  assertEquals([socket.address, socket.addressSource], [null, 'local'])
+
+  // Hosted: the very same co-located daemon connects over HTTPS like any
+  // other. A `directAttach` flag here can only be a stale row left by a
+  // control plane that used to run on Deno — the host's own address wins.
+  const hosted = shapeServerPresenceFields(
+    { connected: true, directAttach: true, remoteAddress: null, ips },
+    true,
+    'hosted',
+  )
+  assertEquals([hosted.address, hosted.addressSource], ['10.1.2.3', 'interface'])
+
+  // Co-location alone never means the socket, on either deployment.
+  const remote = shapeServerPresenceFields(
+    { connected: true, remoteAddress: '203.0.113.7', ips },
+    true,
+    'self-hosted',
+  )
+  assertEquals([remote.address, remote.addressSource], ['203.0.113.7', 'observed'])
+})
+
 test('projected update repair helpers', () => {
   assertEquals(shouldSkipProjectedUpdateRepair(null), true)
   assertEquals(shouldSkipProjectedUpdateRepair({ status: 'idle' }), true)

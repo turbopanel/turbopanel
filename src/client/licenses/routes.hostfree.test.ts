@@ -1,9 +1,16 @@
 /**
- * Host-free coverage for the hosted license mint (ledger T9): with billing
- * on, a key is minted only against a free seat at a purchasable tier, read
- * under the organization's quantity lease — and the lease is released on
- * every exit. Self-hosted (no billing config) mints with no tier and
- * touches none of it.
+ * Host-free coverage for the hosted license mint (ledger T9) and revoke.
+ *
+ * With billing on, a key is minted only while the organization holds fewer
+ * licenses than it has purchased and not already given back — read under
+ * the organization's quantity lease, which is released on every exit. A
+ * license carries no tier: which purchased tier the server lands on is
+ * derived when it connects, never chosen here. Self-hosted (no billing
+ * config) takes no lease and runs no gate.
+ *
+ * Revoking never touches the provider: what was purchased stays purchased
+ * until the billing page reduces it, and a bound license is refused so the
+ * operator deletes the server first.
  */
 
 import { assertEquals, assertExists } from '@std/assert'
@@ -37,22 +44,20 @@ const test = Deno.test.bind(Deno)
 
 const ORG = '33333333-3333-4333-8333-333333333333'
 const S3 = '33333333-3333-4333-8333-333333333331'
-const S_INACTIVE = '33333333-3333-4333-8333-333333333332'
-const S_NO_PRICE = '33333333-3333-4333-8333-333333333334'
-const S_UNKNOWN = '33333333-3333-4333-8333-333333333339'
+const S4 = '33333333-3333-4333-8333-333333333332'
 const NOW = '2026-09-07T12:00:00.000Z'
 const CONFIG: BillingConfig = { secretKey: 'sk_test_x', webhookSigningSecret: null, apiVersion: '2025-08-27.basil' }
 
-const tierRow = (id: string, label: string, rank: number, extra: Record<string, unknown> = {}) => ({
-  id, label, generation: 1, rank, priceCents: 1000 * rank, providerPriceId: `price_${label}`, isCustom: false, isActive: true,
-  successorId: null, maxCores: 4, maxMemoryBytes: 1, nicSlots: 1, driveSlots: 1, gpuSlots: 0, filesystemSlots: 1, createdAt: NOW, updatedAt: NOW,
-  ...extra,
+const tierRow = (id: string, label: string, rank: number) => ({
+  id, label, rank, provider: 'stripe', providerProductId: `prod_${label}`, priceCents: 500 * rank, currency: 'usd',
+  isCustom: false, isActive: true, createdAt: NOW, updatedAt: NOW,
 })
 
 type Fixture = {
-  /** S3 seats on the projected subscription; `null` for no subscription at all. */
-  seats?: number | null
-  licenses?: { id: string; tierId: string; revokedAt?: string | null }[]
+  /** Purchased quantity per tier on the projected subscription; `null` for no subscription at all. */
+  seats?: { tierId: string; quantity: number }[] | null
+  licenses?: { id: string; serverId?: string | null; revokedAt?: string | null; name?: string | null }[]
+  servers?: { id: string; name: string | null }[]
   config?: BillingConfig | null
 }
 
@@ -66,27 +71,30 @@ async function buildApp(fx: Fixture = {}) {
   seedMockSession(state, token, { sessionId: crypto.randomUUID(), userId, email, role: 'superadmin' })
   seedMockUser(state, { id: userId, email, isDisabled: false, isEmailVerified: true, role: 'superadmin' })
   state.organizations.push({ id: ORG, name: 'License Org' })
+  // `execute` answers the authz grant probe and the self-host environment
+  // pin lookup on revoke; neither row shape names an `id`, so nothing is pinned.
   const authDb = Object.assign(createMockAuthDb(state), {
     execute: () => Promise.resolve([{ allowed: true }]),
   }) as unknown as Db
 
-  const seats = fx.seats === undefined ? 2 : fx.seats
+  const seats = fx.seats === undefined ? [{ tierId: S3, quantity: 2 }] : fx.seats
   const db = createMemoryDb([
     [setting, []],
-    [server, []],
-    [tier, [
-      tierRow(S3, 'S3', 3),
-      tierRow(S_INACTIVE, 'S4', 4, { isActive: false }),
-      tierRow(S_NO_PRICE, 'SX', 9, { providerPriceId: null, priceCents: null, isCustom: true }),
-    ]],
+    [server, (fx.servers ?? []).map((row) => ({
+      id: row.id, organizationId: ORG, name: row.name, metadata: null, assignedTierId: null, createdAt: NOW, updatedAt: NOW,
+    }))],
+    [tier, [tierRow(S3, 'S3', 3), tierRow(S4, 'S4', 4)]],
     [payer, seats === null ? [] : [{ id: 'payer-1', provider: 'stripe', providerCustomerId: 'cus_1', organizationId: ORG, userId: null, taxId: null, createdAt: NOW, updatedAt: NOW }]],
     [subscription, seats === null ? [] : [{
       id: 'sub-row', payerId: 'payer-1', providerSubscriptionId: 'sub_1', status: 'active',
       currentPeriodEnd: null, scheduleId: null, pastDueSince: null, graceExpiresAt: null, createdAt: NOW, updatedAt: NOW,
     }]],
-    [subscriptionItem, seats ? [{ id: 'seat-3', subscriptionId: 'sub-row', tierId: S3, providerItemId: 'si_3', quantity: seats, createdAt: NOW, updatedAt: NOW }] : []],
+    [subscriptionItem, (seats ?? []).map((seat, index) => ({
+      id: `seat-${index}`, subscriptionId: 'sub-row', tierId: seat.tierId, providerItemId: `si_${index}`,
+      providerPriceId: `price_${index}`, quantity: seat.quantity, createdAt: NOW, updatedAt: NOW,
+    }))],
     [license, (fx.licenses ?? []).map((row) => ({
-      id: row.id, organizationId: ORG, serverId: null, tierId: row.tierId, name: null, token: 'hashed',
+      id: row.id, organizationId: ORG, serverId: row.serverId ?? null, name: row.name ?? null, token: 'hashed',
       revokedAt: row.revokedAt ?? null, createdAt: NOW, updatedAt: NOW,
     }))],
   ], { fallback: authDb })
@@ -104,85 +112,126 @@ async function buildApp(fx: Fixture = {}) {
   return { app, headers, db }
 }
 
-function mint(app: Hono<AppEnv>, headers: Record<string, string>, body: Record<string, unknown>) {
-  return app.request('/licenses', { method: 'POST', headers, body: JSON.stringify(body) })
+function mint(app: Hono<AppEnv>, headers: Record<string, string>, body: Record<string, unknown> = {}): Promise<Response> {
+  return Promise.resolve(app.request('/licenses', { method: 'POST', headers, body: JSON.stringify(body) }))
+}
+
+function revoke(app: Hono<AppEnv>, headers: Record<string, string>, id: string): Promise<Response> {
+  return Promise.resolve(app.request(`/licenses/${id}`, { method: 'DELETE', headers }))
 }
 
 function lockRow(db: MemoryDb) {
   return db.rows(setting).find((row) => row.key === billingQuantityLockKey(ORG)) ?? null
 }
 
+/**
+ * The license routes have no provider seam, so "never calls Stripe" is
+ * proven at the transport: every outbound `fetch` during `run` is recorded
+ * and none may happen.
+ */
+async function withFetchGuard<T>(run: () => Promise<T>): Promise<{ result: T; fetches: string[] }> {
+  const fetches: string[] = []
+  const original = globalThis.fetch
+  globalThis.fetch = ((input: string | URL | Request) => {
+    const url = input instanceof Request ? input.url : String(input)
+    fetches.push(url)
+    return Promise.reject(new Error(`unexpected fetch ${url}`))
+  }) as typeof fetch
+  try {
+    return { result: await run(), fetches }
+  } finally {
+    globalThis.fetch = original
+  }
+}
+
 const L_ACTIVE = '44444444-4444-4444-8444-444444444441'
 const L_REVOKED = '44444444-4444-4444-8444-444444444442'
+const L_BOUND = '44444444-4444-4444-8444-444444444443'
+const SERVER = '55555555-5555-4555-8555-555555555551'
 
-test('T9 · with billing on a tier is required, and it must be purchasable: inactive, unpriced and unknown tiers are 400 before the lease', async () => {
-  const { app, headers, db } = await buildApp()
-  const missing = await mint(app, headers, {})
-  assertEquals(missing.status, 400)
-  assertEquals(await missing.json(), { error: 'tier_required' })
-  for (const [tierId, reason] of [[S_INACTIVE, 'inactive'], [S_NO_PRICE, 'uncatalogued'], [S_UNKNOWN, 'not_found']]) {
-    const res = await mint(app, headers, { tierId })
-    assertEquals(res.status, 400, reason)
-    assertEquals(await res.json(), { error: 'tier_not_purchasable', reason })
-  }
-  assertEquals(lockRow(db), null)
-  assertEquals(db.rows(license), [])
-})
+type Refusal = { error: string; purchased: number; releasing: number; held: number; available: number }
 
-test('T9 · no free seat at the tier is 409 no_free_seat with the counts; the lease was taken and is released', async () => {
-  const { app, headers, db } = await buildApp({ seats: 1, licenses: [{ id: L_ACTIVE, tierId: S3 }] })
-  const res = await mint(app, headers, { tierId: S3 })
+test('T9 · every purchased license held is 409 no_license_available with the counts; the lease was taken and is released', async () => {
+  const { app, headers, db } = await buildApp({ seats: [{ tierId: S3, quantity: 1 }], licenses: [{ id: L_ACTIVE }] })
+  const res = await mint(app, headers)
   assertEquals(res.status, 409)
-  assertEquals(await res.json(), { error: 'no_free_seat', tierId: S3, seats: 1, licensesUsed: 1, licensesFree: 0 })
+  assertEquals(await res.json(), { error: 'no_license_available', purchased: 1, releasing: 0, held: 1, available: 0 })
   assertEquals(db.rows(license).length, 1)
   assertEquals(lockRow(db), null)
 
-  // A purchasable tier with no seat row at all reads as zero of everything.
+  // Nothing purchased at all reads as zero of everything.
   const none = await buildApp({ seats: null })
-  const noSeats = await mint(none.app, none.headers, { tierId: S3 })
+  const noSeats = await mint(none.app, none.headers)
   assertEquals(noSeats.status, 409)
-  assertEquals(await noSeats.json(), { error: 'no_free_seat', tierId: S3, seats: 0, licensesUsed: 0, licensesFree: 0 })
+  assertEquals(await noSeats.json(), { error: 'no_license_available', purchased: 0, releasing: 0, held: 0, available: 0 })
   assertEquals(lockRow(none.db), null)
 })
 
-test('T9 · a free seat mints a key at that tier, once, and the lease is released', async () => {
-  const { app, headers, db } = await buildApp({ seats: 2, licenses: [{ id: L_ACTIVE, tierId: S3 }] })
-  const res = await mint(app, headers, { tierId: S3, name: 'edge-1' })
+test('T9 · a bound license holds a purchased license the same as an unbound one', async () => {
+  const { app, headers } = await buildApp({
+    seats: [{ tierId: S3, quantity: 2 }],
+    servers: [{ id: SERVER, name: 'edge-1' }],
+    licenses: [{ id: L_ACTIVE }, { id: L_BOUND, serverId: SERVER }],
+  })
+  const res = await mint(app, headers)
+  assertEquals(res.status, 409)
+  const body = await res.json() as Refusal
+  assertEquals(body, { error: 'no_license_available', purchased: 2, releasing: 0, held: 2, available: 0 })
+})
+
+test('T9 · a purchase with room mints a key with no tier, once, and the lease is released', async () => {
+  const { app, headers, db } = await buildApp({
+    seats: [{ tierId: S3, quantity: 1 }, { tierId: S4, quantity: 1 }],
+    licenses: [{ id: L_ACTIVE }],
+  })
+  const res = await mint(app, headers, { name: 'edge-1' })
   assertEquals(res.status, 200)
   const body = await res.json() as { licenseId: string; licenseToken: string; installCommand: string }
   assertExists(body.licenseId)
   assertExists(body.licenseToken)
   assertEquals(typeof body.installCommand, 'string')
   const minted = db.rows(license).find((row) => row.id === body.licenseId)
-  assertEquals(minted?.tierId, S3)
   assertEquals(minted?.name, 'edge-1')
+  assertEquals(minted?.organizationId, ORG)
+  assertEquals('tierId' in (minted ?? {}), false)
   assertEquals(lockRow(db), null)
 
-  // The seat is now taken: the next mint at the tier is refused.
-  const again = await mint(app, headers, { tierId: S3 })
+  // Both purchased licenses are now held: the next mint is refused.
+  const again = await mint(app, headers)
   assertEquals(again.status, 409)
-  assertEquals((await again.json() as { error: string }).error, 'no_free_seat')
+  assertEquals(await again.json(), { error: 'no_license_available', purchased: 2, releasing: 0, held: 2, available: 0 })
   assertEquals(db.rows(license).length, 2)
+  assertEquals(lockRow(db), null)
 })
 
-test('T9 · a revoked license does not hold a seat', async () => {
-  const { app, headers, db } = await buildApp({ seats: 1, licenses: [{ id: L_REVOKED, tierId: S3, revokedAt: NOW }] })
-  const res = await mint(app, headers, { tierId: S3 })
+test('T9 · a revoked license does not hold a purchased license', async () => {
+  const { app, headers, db } = await buildApp({ seats: [{ tierId: S3, quantity: 1 }], licenses: [{ id: L_REVOKED, revokedAt: NOW }] })
+  const res = await mint(app, headers)
   assertEquals(res.status, 200)
   assertEquals(db.rows(license).filter((row) => row.revokedAt === null).length, 1)
 })
 
-test('T9 · an outstanding release-seat intent still counts against the tier until the boundary lands', async () => {
-  const { app, headers, db } = await buildApp({ seats: 2, licenses: [{ id: L_ACTIVE, tierId: S3 }] })
-  const release = newDeferredIntent('release-seat', { licenseId: null, fromTierId: S3, toTierId: null, nowMs: Date.parse(NOW) })
+test('T9 · an outstanding release-seat intent counts against availability until the boundary lands', async () => {
+  const { app, headers, db } = await buildApp({ seats: [{ tierId: S3, quantity: 2 }], licenses: [{ id: L_ACTIVE }] })
+  const release = newDeferredIntent('release-seat', { fromTierId: S3, toTierId: null, landsAt: null, fromQuantity: 2, nowMs: Date.parse(NOW) })
   await writePendingChanges(db, ORG, withIntent(emptyLedger('sub_1'), release), Date.parse(NOW))
-  const res = await mint(app, headers, { tierId: S3 })
+  const res = await mint(app, headers)
   assertEquals(res.status, 409)
-  assertEquals(await res.json(), { error: 'no_free_seat', tierId: S3, seats: 2, licensesUsed: 1, licensesFree: 0 })
+  assertEquals(await res.json(), { error: 'no_license_available', purchased: 2, releasing: 1, held: 1, available: 0 })
+  assertEquals(db.rows(license).length, 1)
+  assertEquals(lockRow(db), null)
+
+  // The source side of a downgrade is leaving too.
+  const moved = await buildApp({ seats: [{ tierId: S4, quantity: 1 }], licenses: [] })
+  const downgrade = newDeferredIntent('downgrade', { fromTierId: S4, toTierId: S3, landsAt: null, fromQuantity: 1, nowMs: Date.parse(NOW) })
+  await writePendingChanges(moved.db, ORG, withIntent(emptyLedger('sub_1'), downgrade), Date.parse(NOW))
+  const refused = await mint(moved.app, moved.headers)
+  assertEquals(refused.status, 409)
+  assertEquals(await refused.json(), { error: 'no_license_available', purchased: 1, releasing: 1, held: 0, available: 0 })
 })
 
 test('T9 · while another holder has the quantity lease the mint is 409 billing_mutation_in_progress and nothing is written', async () => {
-  const { app, headers, db } = await buildApp({ seats: 2 })
+  const { app, headers, db } = await buildApp({ seats: [{ tierId: S3, quantity: 2 }] })
   // The route reads the real clock, so the foreign lease must be live now.
   db.rows(setting).push({
     key: billingQuantityLockKey(ORG),
@@ -190,7 +239,7 @@ test('T9 · while another holder has the quantity lease the mint is 409 billing_
     createdAt: NOW,
     updatedAt: NOW,
   })
-  const res = await mint(app, headers, { tierId: S3 })
+  const res = await mint(app, headers)
   assertEquals(res.status, 409)
   assertEquals(await res.json(), { error: 'billing_mutation_in_progress' })
   assertEquals(db.rows(license), [])
@@ -198,11 +247,50 @@ test('T9 · while another holder has the quantity lease the mint is 409 billing_
   assertEquals(lockRow(db)?.value, { owner: 'someone-else', expiresAt: (lockRow(db)?.value as { expiresAt: string }).expiresAt })
 })
 
-test('T9 · with billing off a tier in the body is ignored: the key is minted with no tier and no lease is ever taken', async () => {
+test('T9 · with billing off the key is minted with nothing purchased: no lease is taken and no gate runs', async () => {
   const { app, headers, db } = await buildApp({ config: null, seats: null })
-  const res = await mint(app, headers, { tierId: S3 })
+  const res = await mint(app, headers, { name: 'lab' })
   assertEquals(res.status, 200)
   const body = await res.json() as { licenseId: string }
-  assertEquals(db.rows(license).find((row) => row.id === body.licenseId)?.tierId, null)
+  assertEquals(db.rows(license).find((row) => row.id === body.licenseId)?.name, 'lab')
   assertEquals(db.rows(setting), [])
+})
+
+test('DELETE /licenses/:id revokes an unbound license without touching the provider or the lease', async () => {
+  const { app, headers, db } = await buildApp({ seats: [{ tierId: S3, quantity: 2 }], licenses: [{ id: L_ACTIVE }] })
+  const { result: res, fetches } = await withFetchGuard(() => revoke(app, headers, L_ACTIVE))
+  assertEquals(res.status, 200)
+  assertEquals(await res.json(), { ok: true })
+  assertEquals(fetches, [])
+  // Soft-deleted, not removed; what was purchased stays purchased.
+  const row = db.rows(license).find((entry) => entry.id === L_ACTIVE)
+  assertEquals(typeof row?.revokedAt, 'string')
+  assertEquals(db.rows(subscriptionItem).map((seat) => seat.quantity), [2])
+  assertEquals(db.rows(setting), [])
+
+  // The purchased license is free again: the next mint succeeds.
+  const res2 = await mint(app, headers)
+  assertEquals(res2.status, 200)
+})
+
+test('DELETE /licenses/:id refuses a bound license with 409 license_has_attached_server and calls no provider', async () => {
+  const { app, headers, db } = await buildApp({
+    seats: [{ tierId: S3, quantity: 1 }],
+    servers: [{ id: SERVER, name: 'edge-1' }],
+    licenses: [{ id: L_BOUND, serverId: SERVER }],
+  })
+  const { result: res, fetches } = await withFetchGuard(() => revoke(app, headers, L_BOUND))
+  assertEquals(res.status, 409)
+  assertEquals(await res.json(), { error: 'license_has_attached_server', server: { id: SERVER, name: 'edge-1' } })
+  assertEquals(fetches, [])
+  assertEquals(db.rows(license).find((entry) => entry.id === L_BOUND)?.revokedAt, null)
+  assertEquals(db.rows(setting), [])
+})
+
+test('DELETE /licenses/:id answers 404 for a license the organization does not hold', async () => {
+  const { app, headers } = await buildApp({ licenses: [{ id: L_REVOKED, revokedAt: NOW }] })
+  const gone = await revoke(app, headers, L_REVOKED)
+  assertEquals(gone.status, 404)
+  const unknown = await revoke(app, headers, '44444444-4444-4444-8444-444444444499')
+  assertEquals(unknown.status, 404)
 })

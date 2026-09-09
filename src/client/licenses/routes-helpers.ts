@@ -7,12 +7,7 @@ import {
 export type LicenseCreateFields = {
   name?: string;
   installBaseUrl?: string;
-  /** Hosted only: the billing tier the seat is minted against. */
-  tierId?: string;
 };
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function optionalStringField(
   value: unknown,
@@ -60,14 +55,6 @@ export function parseLicenseCreateFields(
   if (!nameField.ok) return "invalid";
   const installBaseUrl = optionalStringField(record.installBaseUrl);
   if (!installBaseUrl.ok) return "invalid";
-  const tierId = optionalStringField(record.tierId);
-  if (!tierId.ok) return "invalid";
-  if (
-    tierId.value !== undefined && tierId.value.trim() !== "" &&
-    !UUID_RE.test(tierId.value.trim())
-  ) {
-    return "invalid";
-  }
 
   const parsedName = parseOptionalLicenseName(nameField.value);
   if (!parsedName.ok) return "invalid";
@@ -79,43 +66,24 @@ export function parseLicenseCreateFields(
   if (installBaseUrl.value !== undefined) {
     fields.installBaseUrl = installBaseUrl.value;
   }
-  if (tierId.value !== undefined && tierId.value.trim() !== "") {
-    fields.tierId = tierId.value.trim().toLowerCase();
-  }
 
   return fields;
 }
 
-export const NO_FREE_SEAT_ERROR = "no_free_seat";
-export const TIER_REQUIRED_ERROR = "tier_required";
-export const TIER_NOT_PURCHASABLE_ERROR = "tier_not_purchasable";
+export const NO_LICENSE_AVAILABLE_ERROR = "no_license_available";
 
-export function noFreeSeatBody(
-  input: {
-    tierId: string;
-    seats: number;
-    licensesUsed: number;
-    licensesFree: number;
-  },
+/**
+ * The hosted mint refusal: every purchased license is held (bound or
+ * waiting to connect) or already leaving at the boundary. Carries the
+ * counts so the console can say "buy one more".
+ */
+export function noLicenseAvailableBody(
+  summary: { purchased: number; releasing: number; held: number; available: number },
 ) {
-  return { error: NO_FREE_SEAT_ERROR, ...input };
-}
-
-/** `null` when the tier still has a free seat; otherwise the 409 body. */
-export function noFreeSeatRefusal(input: {
-  tierId: string;
-  summary:
-    | { seats: number; licensesUsed: number; licensesFree: number }
-    | undefined;
-}) {
-  const summary = input.summary;
-  if (summary && summary.licensesFree > 0) return null;
-  return noFreeSeatBody({
-    tierId: input.tierId,
-    seats: summary?.seats ?? 0,
-    licensesUsed: summary?.licensesUsed ?? 0,
-    licensesFree: summary?.licensesFree ?? 0,
-  });
+  // Destructured, not spread: the route's summary also carries `bound`,
+  // which is not part of this refusal's contract.
+  const { purchased, releasing, held, available } = summary;
+  return { error: NO_LICENSE_AVAILABLE_ERROR, purchased, releasing, held, available };
 }
 
 /** True when the client sent a base URL that failed `parseInstallBaseUrl`. */

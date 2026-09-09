@@ -18,25 +18,34 @@ const forbidden = errorResponse('Forbidden (owner-only)')
 export const billingSchemas = {
   BillingTier: {
     type: 'object',
-    required: ['id', 'label', 'generation', 'rank', 'priceCents', 'isCustom', 'entitlements'],
+    required: ['id', 'label', 'rank', 'priceCents', 'currency', 'isCustom', 'entitlements'],
     properties: {
       id: { type: 'string', format: 'uuid' },
       label: { type: 'string', description: '`S1`…`S7`, `SX`.' },
-      generation: { type: 'integer' },
       rank: { type: 'integer' },
-      priceCents: { type: ['integer', 'null'], description: 'Null for negotiated (custom) offerings.' },
+      priceCents: {
+        type: ['integer', 'null'],
+        description: 'Cached from the provider product\'s default price; null for negotiated (custom) offerings.',
+      },
+      currency: { type: ['string', 'null'], description: 'Lower-case ISO code beside `priceCents`.' },
       isCustom: { type: 'boolean' },
       entitlements: {
-        type: 'object',
-        required: ['maxCores', 'maxMemoryBytes', 'nicSlots', 'driveSlots', 'gpuSlots', 'filesystemSlots'],
-        properties: {
-          maxCores: { type: 'integer' },
-          maxMemoryBytes: { type: 'integer' },
-          nicSlots: { type: 'integer' },
-          driveSlots: { type: 'integer' },
-          gpuSlots: { type: 'integer' },
-          filesystemSlots: { type: 'integer' },
-        },
+        description: 'What the ladder entitles for this label; null only for a row whose label left the ladder.',
+        oneOf: [
+          {
+            type: 'object',
+            required: ['maxCores', 'maxMemoryBytes', 'nicSlots', 'driveSlots', 'gpuSlots', 'filesystemSlots'],
+            properties: {
+              maxCores: { type: 'integer' },
+              maxMemoryBytes: { type: 'integer' },
+              nicSlots: { type: 'integer' },
+              driveSlots: { type: 'integer' },
+              gpuSlots: { type: 'integer' },
+              filesystemSlots: { type: 'integer' },
+            },
+          },
+          { type: 'null' },
+        ],
       },
     },
   },
@@ -45,41 +54,59 @@ export const billingSchemas = {
     required: ['tiers'],
     properties: { tiers: { type: 'array', items: { $ref: '#/components/schemas/BillingTier' } } },
   },
-  BillingTierSeats: {
+  BillingTierSummary: {
     type: 'object',
-    required: ['tierId', 'label', 'seats', 'licensesUsed', 'licensesBound', 'licensesFree'],
+    required: ['tierId', 'label', 'rank', 'purchased', 'inUse', 'releasing', 'priceCents', 'currency'],
     properties: {
       tierId: { type: 'string', format: 'uuid' },
       label: { type: 'string' },
-      seats: { type: 'integer', description: 'Committed provider quantity at this tier.' },
-      licensesUsed: { type: 'integer', description: 'Active licenses at this tier.' },
-      licensesBound: { type: 'integer', description: 'The subset bound to a server.' },
-      licensesFree: {
-        type: 'integer',
-        description: 'Seats a new key can be minted against, net of outstanding seat releases.',
-      },
+      rank: { type: 'integer' },
+      purchased: { type: 'integer', description: 'Committed provider quantity at this tier — the licenses bought here.' },
+      inUse: { type: 'integer', description: 'Servers currently assigned this tier.' },
+      releasing: { type: 'integer', description: 'Of `purchased`, how many leave at the period boundary.' },
+      priceCents: { type: ['integer', 'null'] },
+      currency: { type: ['string', 'null'] },
+    },
+  },
+  BillingLicenseSummary: {
+    type: 'object',
+    required: ['purchased', 'releasing', 'held', 'bound', 'available'],
+    properties: {
+      purchased: { type: 'integer', description: 'Total committed quantity across tiers.' },
+      releasing: { type: 'integer', description: 'Leaving at the period boundary.' },
+      held: { type: 'integer', description: 'Active licenses, bound or waiting to connect.' },
+      bound: { type: 'integer', description: 'The subset bound to a server.' },
+      available: { type: 'integer', description: '`purchased − releasing − held`: how many more servers can be added.' },
+    },
+  },
+  BillingServerAssignment: {
+    type: 'object',
+    required: ['serverId', 'assignedTierId', 'requiredTier'],
+    properties: {
+      serverId: { type: 'string', format: 'uuid' },
+      assignedTierId: { type: ['string', 'null'], format: 'uuid', description: 'The derived tier; null when nothing purchased covers the server.' },
+      requiredTier: { type: ['string', 'null'], description: 'From the server\'s hardware; null until it reports.' },
     },
   },
   BillingPendingChange: {
     type: 'object',
-    required: ['id', 'kind', 'licenseId', 'fromTierId', 'toTierId', 'createdAt', 'expiresAt'],
+    required: ['id', 'kind', 'fromTierId', 'toTierId', 'createdAt', 'landsAt'],
     properties: {
       id: { type: 'string' },
-      kind: { type: 'string', enum: ['upgrade', 'downgrade', 'release-seat'] },
-      licenseId: { type: ['string', 'null'], format: 'uuid' },
+      kind: { type: 'string', enum: ['downgrade', 'release-seat'] },
       fromTierId: { type: 'string', format: 'uuid' },
       toTierId: { type: ['string', 'null'], format: 'uuid' },
       createdAt: { type: 'string', format: 'date-time' },
-      expiresAt: {
+      landsAt: {
         type: ['string', 'null'],
         format: 'date-time',
-        description: 'Set on upgrades (24 h); null on deferred changes, which live until the period boundary.',
+        description: 'The period boundary the change is parked behind.',
       },
     },
   },
   BillingSubscriptionResponse: {
     type: 'object',
-    required: ['payer', 'subscription', 'tiers', 'pendingChanges'],
+    required: ['payer', 'subscription', 'tiers', 'licenses', 'servers', 'pendingChanges'],
     properties: {
       payer: {
         oneOf: [
@@ -110,7 +137,9 @@ export const billingSchemas = {
           { type: 'null' },
         ],
       },
-      tiers: { type: 'array', items: { $ref: '#/components/schemas/BillingTierSeats' } },
+      tiers: { type: 'array', items: { $ref: '#/components/schemas/BillingTierSummary' } },
+      licenses: { $ref: '#/components/schemas/BillingLicenseSummary' },
+      servers: { type: 'array', items: { $ref: '#/components/schemas/BillingServerAssignment' } },
       pendingChanges: { type: 'array', items: { $ref: '#/components/schemas/BillingPendingChange' } },
     },
   },
@@ -133,12 +162,12 @@ export const billingSchemas = {
   BillingPreviewRequest: {
     type: 'object',
     description:
-      'Either a quantity change (`tierId` + `delta`) or a tier move for one license (`licenseId` + `targetTierId`).',
+      'Either a quantity change (`tierId` + `delta`) or a move of one purchased license between tiers (`fromTierId` + `toTierId`).',
     properties: {
       tierId: { type: 'string', format: 'uuid' },
       delta: { type: 'integer' },
-      licenseId: { type: 'string', format: 'uuid' },
-      targetTierId: { type: 'string', format: 'uuid' },
+      fromTierId: { type: 'string', format: 'uuid' },
+      toTierId: { type: 'string', format: 'uuid' },
     },
   },
   BillingPreviewResponse: {
@@ -179,10 +208,11 @@ export const billingSchemas = {
   },
   BillingTierMoveRequest: {
     type: 'object',
-    required: ['licenseId', 'targetTierId'],
+    required: ['fromTierId', 'toTierId'],
+    description: 'One fewer at `fromTierId`, one more at `toTierId`. Which server ends up where is derived from hardware.',
     properties: {
-      licenseId: { type: 'string', format: 'uuid' },
-      targetTierId: { type: 'string', format: 'uuid' },
+      fromTierId: { type: 'string', format: 'uuid' },
+      toTierId: { type: 'string', format: 'uuid' },
       prorationDate: { type: 'integer', description: 'From the preview; upgrades only.' },
     },
   },
@@ -226,7 +256,6 @@ function mutationPath(summary: string, requestSchema: string, extraConflicts: st
         '400': errorResponse('Invalid request, `tier_not_purchasable`, `not_an_upgrade` / `not_a_downgrade`'),
         '401': unauthorized,
         '403': forbidden,
-        '404': errorResponse('Unknown license'),
         '409': conflict(`\`billing_mutation_in_progress\`, ${extraConflicts}`),
         '502': errorResponse('Stripe refused the request (`stripe_error`, permanent)'),
         '503': errorResponse('`billing_not_configured`, or Stripe was unreachable (`stripe_error`, transient)'),
@@ -239,12 +268,12 @@ export const billingPaths: Record<string, unknown> = {
   [`${CLIENT_PREFIX}/billing/catalog`]: {
     get: {
       tags: ['Billing'],
-      summary: 'Active tiers with price and entitlement columns',
-      description: 'Postgres only — no Stripe call.',
+      summary: 'Active tiers with their cached price and ladder entitlements',
+      description: 'Postgres only — no provider call.',
       security: [{ cookieAuth: [] }],
       responses: {
         '200': {
-          description: 'Catalogue in `(generation, rank)` order',
+          description: 'Catalogue in rank order',
           content: { 'application/json': { schema: { $ref: '#/components/schemas/BillingCatalogResponse' } } },
         },
         '401': unauthorized,
@@ -257,7 +286,7 @@ export const billingPaths: Record<string, unknown> = {
     get: {
       tags: ['Billing'],
       summary: 'Projection summary for the organization',
-      description: 'Status, period end, per-tier seats vs licenses, grace clock, schedule flag and outstanding deferred changes. Postgres only.',
+      description: 'Status, period end, per-tier purchased vs in use, the license totals the mint gate reads, each licensed server\'s derived tier, grace clock, schedule flag and outstanding deferred changes. Postgres only.',
       security: [{ cookieAuth: [] }],
       responses: {
         '200': {
@@ -330,7 +359,6 @@ export const billingPaths: Record<string, unknown> = {
         '400': errorResponse('Invalid request or `tier_not_purchasable`'),
         '401': unauthorized,
         '403': forbidden,
-        '404': errorResponse('Unknown license'),
         '409': conflict('`subscription_past_due`, `no_subscription`'),
         '502': errorResponse('`stripe_error`'),
         '503': notConfigured,
@@ -338,18 +366,18 @@ export const billingPaths: Record<string, unknown> = {
     },
   },
   [`${CLIENT_PREFIX}/billing/seats`]: mutationPath(
-    'Change the seat quantity at one tier',
+    'Buy or release licenses at one tier',
     'BillingSeatsRequest',
-    '`subscription_past_due`, `no_subscription`, `seats_in_use`',
+    '`subscription_past_due`, `no_subscription`, `servers_uncovered`, `licenses_in_use`',
   ),
   [`${CLIENT_PREFIX}/billing/upgrade`]: mutationPath(
-    'Move one license to a higher tier, invoiced now',
+    'Move one purchased license to a higher tier, invoiced now',
     'BillingTierMoveRequest',
-    '`subscription_past_due`, `no_subscription`, `license_has_pending_change`',
+    '`subscription_past_due`, `no_subscription`, `servers_uncovered`',
   ),
   [`${CLIENT_PREFIX}/billing/downgrade`]: mutationPath(
-    'Move one license to a lower tier at the period boundary',
+    'Move one purchased license to a lower tier at the period boundary',
     'BillingTierMoveRequest',
-    '`no_subscription`, `license_has_pending_change`',
+    '`no_subscription`, `servers_uncovered`, `licenses_in_use`',
   ),
 }

@@ -1,36 +1,20 @@
 /**
- * Map a joined `tier` row onto {@link MetricsCapabilityTierEntitlements}.
- * `isEntryTier` is computed from `rank` here so `capability-plan.ts` never
- * hardcodes a priced-offering label.
+ * The entitlement boundary between a tier *label* and the capability plan.
+ *
+ * A tier row carries no entitlement columns any more — the label is the
+ * key into `ladder.ts`, and this module is the one place that turns a
+ * label (or a server's assigned tier rank) into
+ * {@link MetricsCapabilityTierEntitlements}. `isEntryTier` is computed from
+ * the ladder here so `capability-plan.ts` never names a priced label.
  */
 import type { MetricsCapabilityTierEntitlements } from "../../daemon/metrics/capability-plan.ts";
-import { ENTRY_TIER_RANK } from "./tier-placement.ts";
+import { ladderEntitlements, ladderEntryByRank } from "./ladder.ts";
 
-export type TierEntitlementColumns = {
-  nicSlots: number | null;
-  driveSlots: number | null;
-  gpuSlots: number | null;
-  filesystemSlots: number | null;
-  rank: number | null;
-};
+export { ladderEntitlements as metricsCapabilityTierEntitlementsForLabel };
 
-export function metricsCapabilityTierEntitlementsFromRow(
-  row: TierEntitlementColumns | null | undefined,
+/** Entitlements for a `tier.rank`; `undefined` when the rank is null or off the ladder. */
+export function metricsCapabilityTierEntitlementsForRank(
+  rank: number | null | undefined,
 ): MetricsCapabilityTierEntitlements | undefined {
-  if (
-    row?.nicSlots == null ||
-    row.driveSlots == null ||
-    row.gpuSlots == null ||
-    row.filesystemSlots == null ||
-    row.rank == null
-  ) {
-    return undefined;
-  }
-  return {
-    nicSlots: row.nicSlots,
-    driveSlots: row.driveSlots,
-    gpuSlots: row.gpuSlots,
-    filesystemSlots: row.filesystemSlots,
-    isEntryTier: row.rank === ENTRY_TIER_RANK,
-  };
+  return ladderEntitlements(ladderEntryByRank(rank)?.label);
 }

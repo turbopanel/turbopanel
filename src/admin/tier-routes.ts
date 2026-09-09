@@ -1,13 +1,15 @@
 /**
  * The superadmin tier catalogue: `/api/admin/v1/tiers`.
  *
- * This is what replaced the seed script. Nothing writes `tier` rows on its
- * own any more — the owner creates the Product and Price in the Stripe
- * Dashboard, and a superadmin types the row in here. Every write runs the
- * read-only Stripe verification in `src/lib/billing/tier-verify.ts` first
- * and refuses on any failure, because a wrong price id is silent
- * downstream: the projection logs and skips items whose price maps to no
- * tier, so a typo would lose entitlement rather than error.
+ * A tier row binds a ladder label (`S1`…`S7`, `SX`) to a product on the
+ * payment provider. The provider owns the price; the ladder
+ * (`src/lib/tiers/ladder.ts`) owns what the label entitles; the row owns
+ * only the binding and a cached display price. So the form is one
+ * dropdown: `GET /tiers/products` lists the provider's active products
+ * with their default price and a pass/fail verification, the operator
+ * picks one per label, and `POST /tiers` verifies it again before
+ * writing — a wrong product is silent downstream (the projection logs and
+ * skips items whose product maps to no tier), so nothing unverified lands.
  *
  * Shape:
  *
@@ -15,15 +17,9 @@
  *     route nests `createRootOnlyMiddleware`, the same pattern
  *     `/secrets/reencrypt` uses.
  *   - **`503` when billing is off**, matching the client billing routes.
- *     There is no catalogue to keep on an instance with no Stripe key.
  *   - **no `DELETE`.** Deactivation is the documented end of a row; a
- *     `tier` a license once held must stay readable, and the FK restricts
- *     anyway.
- *
- * Once any license or seat points at a row, only `is_active` and
- * `successor_id` may still change: the entitlement columns are what that
- * row's history was written in terms of, and editing them rewrites the
- * past.
+ *     `tier` a seat once counted against must stay readable, and the FK
+ *     restricts anyway.
  */
 
 import type { Context, Hono } from "hono";
@@ -37,28 +33,29 @@ import {
 } from "../lib/billing/client.ts";
 import type { BillingConfig } from "../lib/billing/config.ts";
 import { StripeApiError } from "../lib/billing/errors.ts";
-import { verifyTierPrice } from "../lib/billing/tier-verify.ts";
+import {
+  type BillingGateway,
+  needsAccountTaxDefaults,
+  NO_TAX_DEFAULTS,
+  type ProductVerification,
+  resolveBillingGateway,
+} from "../lib/billing/gateway.ts";
 import {
   countTierReferences,
-  getTierByGenerationLabel,
   getTierById,
+  getTierByLabel,
   insertTier,
+  listAllTiers,
   type TierRow,
   updateTierById,
 } from "../lib/db/tier-records.ts";
-import { tier } from "../lib/db/schema.ts";
-import { asc } from "drizzle-orm";
 import {
-  ladderOrderWarnings,
-  mergeTierPatch,
+  ladderWithRows,
   parseTierCreateBody,
   parseTierPatchBody,
-  referencedEntitlementRefusal,
   serializeAdminTier,
-  tierFormDefaults,
-  type TierFormFields,
-  toUpdateTierPatch,
-  validateTierForm,
+  serializeProduct,
+  type TierPatchFields,
 } from "./tier-routes-helpers.ts";
 
 export const BILLING_NOT_CONFIGURED_ERROR = "billing_not_configured";
@@ -70,57 +67,32 @@ type Ctx = Context<AppEnv>;
 
 export type TierRouteDeps = Readonly<{
   createClient?: (config: BillingConfig) => StripeClient;
+  /** Test seam: the gateway over the client. */
+  resolveGateway?: (client: StripeClient) => BillingGateway;
 }>;
 
-/** Every row, active and inactive, in catalogue order. */
-async function listAllTiers(db: Db): Promise<TierRow[]> {
-  return await db.select().from(tier).orderBy(
-    asc(tier.generation),
-    asc(tier.rank),
-  );
-}
-
-function verificationPayload(
-  result: Awaited<ReturnType<typeof verifyTierPrice>>,
-) {
+function verificationPayload(result: ProductVerification) {
   return {
     ok: result.ok,
-    failures: result.failures,
-    price: {
-      id: result.price.id,
-      active: result.price.active,
-      currency: result.price.currency,
-      unitAmount: result.price.unitAmount,
-      interval: result.price.interval,
-      intervalCount: result.price.intervalCount,
-      billingScheme: result.price.billingScheme,
-      taxBehavior: result.price.taxBehavior,
-      // Reported so a live price pasted into a sandbox instance is visible,
-      // never checked — the key's own mode is the authority.
-      livemode: result.price.livemode,
-      lookupKey: result.price.lookupKey,
-      nickname: result.price.nickname,
-      productId: result.price.productId,
-      productName: result.price.productName,
-      productActive: result.price.productActive,
-    },
+    failures: [...result.failures],
+    product: serializeProduct(result.product, result, null),
   };
 }
 
 type VerificationPayload = ReturnType<typeof verificationPayload>;
 
 type VerifyResult =
-  | { ok: true; payload: VerificationPayload | null }
+  | { ok: true; payload: VerificationPayload | null; priceCents: number | null; currency: string | null }
   | {
     ok: false;
     body:
       | {
-        error: "price_verification_failed";
+        error: "product_verification_failed";
         message: string;
         verification: VerificationPayload;
       }
       | {
-        error: "price_lookup_failed";
+        error: "product_lookup_failed";
         status: number;
         message: string;
       };
@@ -152,24 +124,26 @@ async function readBody(c: Ctx): Promise<Record<string, unknown> | Response> {
 }
 
 /**
- * Verify a priced row's price against Stripe. A custom row has no price
- * id and is nothing to verify, so it passes trivially.
+ * Verify a product against the provider. A custom row has no product and
+ * is nothing to verify, so it passes trivially.
  */
 async function verify(
-  client: StripeClient,
-  fields: Pick<TierFormFields, "providerPriceId" | "priceCents">,
+  gateway: BillingGateway,
+  providerProductId: string | null,
 ): Promise<VerifyResult> {
-  if (fields.providerPriceId === null) return { ok: true, payload: null };
+  if (providerProductId === null) return { ok: true, payload: null, priceCents: null, currency: null };
   try {
-    const result = await verifyTierPrice(client, {
-      providerPriceId: fields.providerPriceId,
-      expectedPriceCents: fields.priceCents,
-    });
+    const product = await gateway.getProduct(providerProductId);
+    // The account's Tax settings default can satisfy a price whose own
+    // tax_behavior is "unspecified", so verification needs both — but only
+    // such a price is worth a second provider round trip.
+    const taxDefaults = needsAccountTaxDefaults(product) ? await gateway.getTaxDefaults() : NO_TAX_DEFAULTS;
+    const result = gateway.verifyProduct(product, taxDefaults);
     if (!result.ok) {
       return {
         ok: false,
         body: {
-          error: "price_verification_failed",
+          error: "product_verification_failed",
           // `message` is the field the console surfaces; without it the
           // operator sees only the bare code and none of the reasons.
           message: result.failures.join("; "),
@@ -177,19 +151,22 @@ async function verify(
         },
       };
     }
-    return { ok: true, payload: verificationPayload(result) };
+    return {
+      ok: true,
+      payload: verificationPayload(result),
+      priceCents: product.defaultPrice?.unitAmount ?? null,
+      currency: product.defaultPrice?.currency ?? null,
+    };
   } catch (err) {
     if (err instanceof StripeApiError) {
-      // A 404 here is the common case — a mistyped or live-mode id. Its
-      // message is Stripe's, so it is summarised rather than forwarded.
       return {
         ok: false,
         body: {
-          error: "price_lookup_failed",
+          error: "product_lookup_failed",
           status: err.status,
           message: err.status === 404
-            ? "Stripe has no price with that id on this key"
-            : "Stripe could not be reached to verify the price",
+            ? "the provider has no product with that id on this key"
+            : "the provider could not be reached to verify the product",
         },
       };
     }
@@ -197,39 +174,47 @@ async function verify(
   }
 }
 
-async function resolveDeactivateSuccessor(
-  db: Db,
-  id: string,
-  body: Record<string, unknown>,
-): Promise<
-  | { ok: true; successorId?: string | null }
-  | { ok: false; error: string; status: 400 }
-> {
-  const rawSuccessor = body.successorId;
-  if (rawSuccessor === undefined) return { ok: true };
-  if (rawSuccessor !== null && typeof rawSuccessor !== "string") {
-    return { ok: false, error: "Invalid request", status: 400 };
-  }
-  if (typeof rawSuccessor !== "string") return { ok: true, successorId: null };
-  if (rawSuccessor === id) {
-    return { ok: false, error: "a tier cannot succeed itself", status: 400 };
-  }
-  const successor = await getTierById(db, rawSuccessor);
-  if (!successor) {
-    return { ok: false, error: "Successor tier not found", status: 400 };
-  }
-  return { ok: true, successorId: rawSuccessor };
+function isUniqueViolation(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /unique|duplicate/i.test(message);
 }
 
-async function verifyPriceIfChanged(
-  client: StripeClient,
+/**
+ * The product binding only moves one way per row kind: the custom row never
+ * gains a product, a priced row never loses one. Null when the patch is fine.
+ */
+function productPatchError(existing: TierRow, patch: TierPatchFields): string | null {
+  if (patch.providerProductId === undefined) return null;
+  if (existing.isCustom && patch.providerProductId !== null) {
+    return `${existing.label} takes no product`;
+  }
+  if (!existing.isCustom && patch.providerProductId === null) {
+    return `${existing.label} needs a product`;
+  }
+  return null;
+}
+
+/**
+ * Re-verify only when the thing being verified moved. `openGateway` is a
+ * thunk so an unrelated patch never builds a provider client.
+ */
+async function verifyPatchedProduct(
+  openGateway: () => BillingGateway,
   existing: TierRow,
-  merged: TierFormFields,
-): Promise<VerifyResult> {
-  const priceChanged = merged.providerPriceId !== existing.providerPriceId ||
-    merged.priceCents !== existing.priceCents;
-  if (!priceChanged) return { ok: true, payload: null };
-  return await verify(client, merged);
+  patch: TierPatchFields,
+): Promise<VerifyResult | null> {
+  if (patch.providerProductId === undefined) return null;
+  if (patch.providerProductId === existing.providerProductId) return null;
+  return await verify(openGateway(), patch.providerProductId);
+}
+
+/** Only the fields the patch names, plus the price a fresh verification returned. */
+function tierUpdateFields(patch: TierPatchFields, verified: VerifyResult | null) {
+  return {
+    ...(patch.providerProductId !== undefined ? { providerProductId: patch.providerProductId } : {}),
+    ...(patch.isActive !== undefined ? { isActive: patch.isActive } : {}),
+    ...(verified?.ok ? { priceCents: verified.priceCents, currency: verified.currency } : {}),
+  };
 }
 
 export function registerAdminTierRoutes(
@@ -239,8 +224,11 @@ export function registerAdminTierRoutes(
 ): void {
   const createClient = deps.createClient ??
     ((config: BillingConfig) => createStripeClient(config));
+  const resolveGateway = deps.resolveGateway ?? resolveBillingGateway;
+  const gatewayFor = (config: BillingConfig) => resolveGateway(createClient(config));
   const rootOnly = createRootOnlyMiddleware(opts.secrets);
 
+  /** Every row with its references, plus the ladder with which labels are still unmapped. */
   admin.get("/tiers", rootOnly, async (c) => {
     const resolved = resolve(c);
     if (resolved instanceof Response) return resolved;
@@ -251,55 +239,70 @@ export function registerAdminTierRoutes(
         serializeAdminTier(row, await countTierReferences(resolved.db, row.id)),
       );
     }
-    return c.json({ tiers });
+    return c.json({ tiers, ladder: ladderWithRows(rows) });
   });
 
   /**
-   * The shipped ladder and the numbers the form validates against, so the
-   * console never hardcodes the catalogue. Available whenever billing is
-   * on, including before a single row exists — this is what "Add from
-   * defaults" reads.
+   * The provider's active products with their default price, each with
+   * the verification the form shows inline and the tier already bound to
+   * it — the dropdown, so nobody copies an id out of the Dashboard.
    */
-  admin.get("/tiers/defaults", rootOnly, (c) => {
+  admin.get("/tiers/products", rootOnly, async (c) => {
     const resolved = resolve(c);
     if (resolved instanceof Response) return resolved;
-    return c.json(tierFormDefaults());
+    const gateway = gatewayFor(resolved.config);
+    let products;
+    try {
+      products = await gateway.listProducts();
+    } catch (err) {
+      if (!(err instanceof StripeApiError)) throw err;
+      return c.json({
+        error: "product_lookup_failed",
+        status: err.status,
+        message: "the provider could not be reached to list products",
+      }, 502);
+    }
+    const taxDefaults = products.some(needsAccountTaxDefaults)
+      ? await gateway.getTaxDefaults()
+      : NO_TAX_DEFAULTS;
+    const rows = await listAllTiers(resolved.db);
+    const tierByProduct = new Map(
+      rows.flatMap((row) => row.providerProductId ? [[row.providerProductId, row.id] as const] : []),
+    );
+    return c.json({
+      provider: gateway.id,
+      // Surfaced so the operator can see *why* a price left at "Use
+      // default" passes, without opening the Stripe Dashboard.
+      taxDefaults,
+      products: products.map((product) =>
+        serializeProduct(
+          product,
+          gateway.verifyProduct(product, taxDefaults),
+          tierByProduct.get(product.id) ?? null,
+        )
+      ),
+    });
   });
 
-  /** Read-only verification of every priced row — the "Verify all" button. */
+  /** Re-verify every priced row and refresh its cached price — the "Verify all" button. */
   admin.post("/tiers/verify", rootOnly, async (c) => {
     const resolved = resolve(c);
     if (resolved instanceof Response) return resolved;
-    const client = createClient(resolved.config);
-    const rows = (await listAllTiers(resolved.db)).filter((row) =>
-      row.providerPriceId !== null
-    );
+    const gateway = gatewayFor(resolved.config);
+    const rows = (await listAllTiers(resolved.db)).filter((row) => row.providerProductId !== null);
     const results = [];
     for (const row of rows) {
-      try {
-        const result = await verifyTierPrice(client, {
-          providerPriceId: row.providerPriceId!,
-          expectedPriceCents: row.priceCents,
-        });
+      const verified = await verify(gateway, row.providerProductId);
+      if (verified.ok) {
+        await updateTierById(resolved.db, row.id, { priceCents: verified.priceCents, currency: verified.currency });
+        results.push({ id: row.id, label: row.label, ...verified.payload! });
+      } else {
         results.push({
           id: row.id,
           label: row.label,
-          generation: row.generation,
-          ...verificationPayload(result),
-        });
-      } catch (err) {
-        if (!(err instanceof StripeApiError)) throw err;
-        results.push({
-          id: row.id,
-          label: row.label,
-          generation: row.generation,
           ok: false,
-          failures: [
-            err.status === 404
-              ? "Stripe has no price with that id on this key"
-              : `Stripe answered ${err.status}`,
-          ],
-          price: null,
+          failures: [verified.body.message],
+          product: null,
         });
       }
     }
@@ -313,57 +316,40 @@ export function registerAdminTierRoutes(
     if (body instanceof Response) return body;
 
     const fields = parseTierCreateBody(body);
-    if (fields === "invalid") return c.json({ error: "Invalid request" }, 400);
+    if ("error" in fields) return c.json({ error: "tier_invalid", message: fields.error }, 400);
 
-    const issues = validateTierForm(fields);
-    if (issues.refusals.length > 0) {
-      return c.json({
-        error: "tier_invalid",
-        message: issues.refusals.join("; "),
-        refusals: issues.refusals,
-        warnings: issues.warnings,
-      }, 400);
-    }
-
-    // Cheap duplicate check before spending a Stripe call. The unique index
-    // is still the authority — two concurrent creates would race past this.
-    const clash = await getTierByGenerationLabel(
-      resolved.db,
-      fields.generation,
-      fields.label,
-    );
+    // Cheap duplicate check before spending a provider call. The unique
+    // index is still the authority — two concurrent creates would race past this.
+    const clash = await getTierByLabel(resolved.db, fields.label);
     if (clash) {
-      return c.json({
-        error: "tier_exists",
-        message:
-          `generation ${fields.generation} already has a ${fields.label}`,
-      }, 409);
+      return c.json({ error: "tier_exists", message: `${fields.label} already has a row` }, 409);
     }
 
-    const verified = await verify(createClient(resolved.config), fields);
+    const verified = await verify(gatewayFor(resolved.config), fields.providerProductId);
     if (!verified.ok) return c.json(verified.body, 400);
 
-    const siblings = await listAllTiers(resolved.db);
     let row: TierRow;
     try {
-      row = await insertTier(resolved.db, fields);
+      row = await insertTier(resolved.db, {
+        label: fields.label,
+        providerProductId: fields.providerProductId,
+        priceCents: verified.priceCents,
+        currency: verified.currency,
+      });
     } catch (err) {
-      // The indexes are the real guard: `(generation, label)`, and the
-      // partial unique on `provider_price_id`.
-      const message = err instanceof Error ? err.message : String(err);
-      if (/unique|duplicate/i.test(message)) {
+      // The indexes are the real guard: `label`, and the partial unique on `(provider, provider_product_id)`.
+      if (isUniqueViolation(err)) {
         return c.json({
           error: "tier_exists",
-          message: "a tier with that label, rank or price id already exists",
+          message: "a tier with that label or product already exists",
         }, 409);
       }
       throw err;
     }
 
     return c.json({
-      tier: serializeAdminTier(row, { licenses: 0, seats: 0 }),
+      tier: serializeAdminTier(row, { seats: 0, servers: 0 }),
       verification: verified.payload,
-      warnings: [...issues.warnings, ...ladderOrderWarnings(fields, siblings)],
     }, 201);
   });
 
@@ -377,76 +363,45 @@ export function registerAdminTierRoutes(
     const body = await readBody(c);
     if (body instanceof Response) return body;
     const patch = parseTierPatchBody(body);
-    if (patch === "invalid") return c.json({ error: "Invalid request" }, 400);
+    if ("error" in patch) return c.json({ error: "tier_invalid", message: patch.error }, 400);
+    const productError = productPatchError(existing, patch);
+    if (productError !== null) return c.json({ error: "tier_invalid", message: productError }, 400);
 
-    const references = await countTierReferences(resolved.db, id);
-    const refusal = referencedEntitlementRefusal(patch, references);
-    if (refusal) return c.json(refusal, 409);
-
-    // Validate the whole row as it would be after the patch, so a change
-    // cannot walk a row into a shape a create would have refused.
-    const merged = mergeTierPatch(existing, patch.fields);
-    const issues = validateTierForm(merged);
-    if (issues.refusals.length > 0) {
-      return c.json({
-        error: "tier_invalid",
-        message: issues.refusals.join("; "),
-        refusals: issues.refusals,
-        warnings: issues.warnings,
-      }, 400);
-    }
-
-    // Re-verify only when the thing being verified moved: the price id or
-    // the amount it is checked against.
-    const verified = await verifyPriceIfChanged(
-      createClient(resolved.config),
+    const verified = await verifyPatchedProduct(
+      () => gatewayFor(resolved.config),
       existing,
-      merged,
+      patch,
     );
-    if (!verified.ok) return c.json(verified.body, 400);
+    if (verified && !verified.ok) return c.json(verified.body, 400);
 
-    const updated = await updateTierById(
-      resolved.db,
-      id,
-      toUpdateTierPatch(patch.fields),
-    );
+    let updated: TierRow | null;
+    try {
+      updated = await updateTierById(resolved.db, id, tierUpdateFields(patch, verified));
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        return c.json({ error: "tier_exists", message: "another tier already bills against that product" }, 409);
+      }
+      throw err;
+    }
     if (!updated) return c.json({ error: "Tier not found" }, 404);
 
     return c.json({
-      tier: serializeAdminTier(updated, references),
-      verification: verified.payload,
-      warnings: [
-        ...issues.warnings,
-        ...ladderOrderWarnings(merged, await listAllTiers(resolved.db)),
-      ],
+      tier: serializeAdminTier(updated, await countTierReferences(resolved.db, id)),
+      verification: verified?.ok ? verified.payload : null,
     });
   });
 
-  /** Retire a row, optionally naming what replaces it. Never deletes. */
+  /** Retire a row. Never deletes. */
   admin.post("/tiers/:id/deactivate", rootOnly, async (c) => {
     const resolved = resolve(c);
     if (resolved instanceof Response) return resolved;
     const id = c.req.param("id");
     const existing = await getTierById(resolved.db, id);
     if (!existing) return c.json({ error: "Tier not found" }, 404);
-
-    const body = await readBody(c);
-    if (body instanceof Response) return body;
-    const successor = await resolveDeactivateSuccessor(resolved.db, id, body);
-    if (!successor.ok) {
-      return c.json({ error: successor.error }, successor.status);
-    }
-
-    const updated = await updateTierById(resolved.db, id, {
-      isActive: false,
-      successorId: successor.successorId,
-    });
+    const updated = await updateTierById(resolved.db, id, { isActive: false });
     if (!updated) return c.json({ error: "Tier not found" }, 404);
     return c.json({
-      tier: serializeAdminTier(
-        updated,
-        await countTierReferences(resolved.db, id),
-      ),
+      tier: serializeAdminTier(updated, await countTierReferences(resolved.db, id)),
     });
   });
 
@@ -456,14 +411,18 @@ export function registerAdminTierRoutes(
     const id = c.req.param("id");
     const row = await getTierById(resolved.db, id);
     if (!row) return c.json({ error: "Tier not found" }, 404);
-    if (!row.providerPriceId) {
+    if (!row.providerProductId) {
       return c.json({
-        error: "tier_has_no_price",
-        message: "a custom tier has no Stripe price to verify",
+        error: "tier_has_no_product",
+        message: "a custom tier has no provider product to verify",
       }, 400);
     }
-    const verified = await verify(createClient(resolved.config), row);
+    const verified = await verify(gatewayFor(resolved.config), row.providerProductId);
     if (!verified.ok) return c.json(verified.body, 400);
-    return c.json({ verification: verified.payload });
+    const updated = await updateTierById(resolved.db, id, { priceCents: verified.priceCents, currency: verified.currency });
+    return c.json({
+      verification: verified.payload,
+      tier: serializeAdminTier(updated ?? row, await countTierReferences(resolved.db, id)),
+    });
   });
 }

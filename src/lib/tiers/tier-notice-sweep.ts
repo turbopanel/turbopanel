@@ -228,7 +228,7 @@ async function selectEligibleServersAfter(
       license,
       and(eq(license.serverId, server.id), isNull(license.revokedAt)),
     )
-    .innerJoin(tier, eq(tier.id, license.tierId));
+    .innerJoin(tier, eq(tier.id, server.assignedTierId));
   const filtered = afterId ? query.where(gt(server.id, afterId)) : query;
   return await filtered.orderBy(server.id).limit(limit);
 }

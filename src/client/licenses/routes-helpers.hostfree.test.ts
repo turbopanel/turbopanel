@@ -8,7 +8,7 @@ import {
   installBaseUrlValidationError,
   isInvalidInstallBaseUrl,
   isReservedColocatedLicenseName,
-  noFreeSeatRefusal,
+  noLicenseAvailableBody,
   parseLicenseCreateFields,
   reservedColocatedLicenseNameError,
   serializeLicenseListEntry,
@@ -208,42 +208,6 @@ test("isInvalidInstallBaseUrl is true only when a provided URL failed to parse",
   assertEquals(isInvalidInstallBaseUrl(" http://x ", null), true);
 });
 
-test("noFreeSeatRefusal returns null when the tier still has a free seat", () => {
-  assertEquals(
-    noFreeSeatRefusal({
-      tierId: "tier-1",
-      summary: { seats: 2, licensesUsed: 1, licensesFree: 1 },
-    }),
-    null,
-  );
-  assertEquals(
-    noFreeSeatRefusal({
-      tierId: "tier-1",
-      summary: undefined,
-    }),
-    {
-      error: "no_free_seat",
-      tierId: "tier-1",
-      seats: 0,
-      licensesUsed: 0,
-      licensesFree: 0,
-    },
-  );
-  assertEquals(
-    noFreeSeatRefusal({
-      tierId: "tier-1",
-      summary: { seats: 1, licensesUsed: 1, licensesFree: 0 },
-    }),
-    {
-      error: "no_free_seat",
-      tierId: "tier-1",
-      seats: 1,
-      licensesUsed: 1,
-      licensesFree: 0,
-    },
-  );
-});
-
 test("serverCapacityExceededBody preserves capacity fields", () => {
   assertEquals(
     serverCapacityExceededBody(
@@ -265,26 +229,47 @@ test("serverCapacityExceededBody preserves capacity fields", () => {
   );
 });
 
-test("parseLicenseCreateFields accepts a tierId uuid, drops a blank one, and rejects garbage", () => {
+test("noLicenseAvailableBody carries the four counts the console renders and nothing else", () => {
+  assertEquals(
+    noLicenseAvailableBody({ purchased: 2, releasing: 1, held: 1, available: 0 }),
+    {
+      error: "no_license_available",
+      purchased: 2,
+      releasing: 1,
+      held: 1,
+      available: 0,
+    },
+  );
+  // The route hands it the full summary; `bound` is not part of the refusal.
+  assertEquals(
+    noLicenseAvailableBody({
+      purchased: 0,
+      releasing: 0,
+      held: 0,
+      bound: 0,
+      available: 0,
+    } as { purchased: number; releasing: number; held: number; available: number }),
+    {
+      error: "no_license_available",
+      purchased: 0,
+      releasing: 0,
+      held: 0,
+      available: 0,
+    },
+  );
+});
+
+test("parseLicenseCreateFields no longer reads a tierId: a license carries no tier", () => {
   assertEquals(
     parseLicenseCreateFields(
       JSON.stringify({ tierId: "11111111-1111-4111-8111-111111111111" }),
     ),
-    { tierId: "11111111-1111-4111-8111-111111111111" },
+    {},
   );
   assertEquals(
     parseLicenseCreateFields(
-      JSON.stringify({ tierId: "  11111111-1111-4111-8111-11111111111A " }),
+      JSON.stringify({ name: "Edge", tierId: "not-a-uuid" }),
     ),
-    { tierId: "11111111-1111-4111-8111-11111111111a" },
-  );
-  assertEquals(parseLicenseCreateFields(JSON.stringify({ tierId: "" })), {});
-  assertEquals(
-    parseLicenseCreateFields(JSON.stringify({ tierId: "not-a-uuid" })),
-    "invalid",
-  );
-  assertEquals(
-    parseLicenseCreateFields(JSON.stringify({ tierId: 7 })),
-    "invalid",
+    { name: "Edge" },
   );
 });

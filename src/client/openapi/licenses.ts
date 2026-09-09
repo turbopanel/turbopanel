@@ -44,12 +44,6 @@ export function buildLicenseSchemas(installCommandDescription: string) {
       type: 'object',
       properties: {
         name: { type: 'string' },
-        tierId: {
-          type: 'string',
-          format: 'uuid',
-          description:
-            'Hosted billing only — required when billing is configured; the seat is minted against a free seat at this tier (`409 no_free_seat` otherwise). Ignored on self-hosted.',
-        },
         installBaseUrl: {
           type: 'string',
           description:

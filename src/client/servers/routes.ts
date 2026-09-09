@@ -56,6 +56,8 @@ import {
 import { resolveTrunkManifest } from '../../lib/update/manifest.ts'
 import { getServerUpdatePreparer } from '../../lib/update/prepare.ts'
 import { revokeLicense } from '../authn/license.ts'
+import { recomputeOrganizationAssignments } from '../../lib/tiers/assignment-records.ts'
+import { syncSelfHostedGrant } from '../../lib/tiers/self-hosted-grant-records.ts'
 import { compatLogWarn } from '../../log-compat.ts'
 import {
   hierarchyDeleteHasChildrenResponse,
@@ -166,7 +168,14 @@ async function queueServerUpdate(
   if (!live?.connected) {
     return { ok: false, error: 'Daemon not connected' }
   }
-  const colocatedIds = await resolveColocatedServerIdSet(db, registry, [serverId])
+  // Includes the self-host pin: the "don't remote-update the host you run
+  // on" guard must hold on both runtimes, and the transport probes
+  // (`__direct__`, the local machine key) only ever fire on the self-hosted
+  // one. Against TurboPanel High Availability the co-located daemon connects
+  // over HTTPS like any other, so the pin is the only thing that still knows.
+  const colocatedIds = await resolveColocatedServerIdSet(db, registry, [serverId], {
+    includeSelfHostPin: true,
+  })
   if (colocatedIds.has(serverId)) {
     return { ok: false, error: colocatedServerUpdateBlockedReason() }
   }
@@ -679,7 +688,11 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
           // `REDACTED_SERVER_OPTION_KEYS`.
           options: redactServerOptions(row.options),
           datacenters,
-          ...shapeServerPresenceFields(live, colocatedIds.has(row.id)),
+          ...shapeServerPresenceFields(
+            live,
+            colocatedIds.has(row.id),
+            metricsDeploymentKindForRuntime(opts.runtime),
+          ),
           ...timezoneFields,
           ...hostDefaultsFields,
           licenseId: row.licenseId ?? null,
@@ -714,7 +727,10 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
     const registry = getDaemonCellRegistry(c)
     const presence = await resolveFleetPresence(db, registry, visibleIds)
     const projections = await readProjectionsForServers(db, visibleIds)
-    const colocatedIds = await resolveColocatedServerIdSet(db, registry, visibleIds)
+    // Self-host pin included — see `queueServerUpdate`.
+    const colocatedIds = await resolveColocatedServerIdSet(db, registry, visibleIds, {
+      includeSelfHostPin: true,
+    })
     const targetManifest = await resolveTrunkManifest()
     const { target, targetStatus, targetError } = resolveTrunkTargetFields(
       targetManifest,
@@ -779,7 +795,10 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
 
     const targetManifest = await resolveTrunkManifest()
     const presence = await resolveFleetPresence(db, registry, visibleIds)
-    const colocatedIds = await resolveColocatedServerIdSet(db, registry, visibleIds)
+    // Self-host pin included — see `queueServerUpdate`.
+    const colocatedIds = await resolveColocatedServerIdSet(db, registry, visibleIds, {
+      includeSelfHostPin: true,
+    })
 
     const results = await Promise.all(
       visibleIds.map(async (serverId) => {
@@ -959,7 +978,10 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
     try {
       const presence = await resolveFleetPresence(db, registry, [id])
       const projections = await readProjectionsForServers(db, [id])
-      const colocatedIds = await resolveColocatedServerIdSet(db, registry, [id])
+      // Self-host pin included — see `queueServerUpdate`.
+      const colocatedIds = await resolveColocatedServerIdSet(db, registry, [id], {
+        includeSelfHostPin: true,
+      })
       const current = currentCommitFromDaemonBuild(presence.get(id)?.daemonBuild)
       const targetManifest = await resolveTrunkManifest()
       const projectedUpdate = projections.get(id)?.update
@@ -1027,7 +1049,10 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
     const registry = getDaemonCellRegistry(c)
     const presence = await resolveFleetPresence(db, registry, [id])
     const projections = await readProjectionsForServers(db, [id])
-    const colocatedIds = await resolveColocatedServerIdSet(db, registry, [id])
+    // Self-host pin included — see `queueServerUpdate`.
+    const colocatedIds = await resolveColocatedServerIdSet(db, registry, [id], {
+      includeSelfHostPin: true,
+    })
     const current = currentCommitFromDaemonBuild(presence.get(id)?.daemonBuild)
     const targetManifest = await resolveTrunkManifest()
     const repairedUpdate = await repairProjectedUpdateIfStale(
@@ -1166,7 +1191,11 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
         // cache entry written before the redaction cannot leak.
         options: redactServerOptions(display.row.options),
         datacenters,
-        ...shapeServerPresenceFields(live, display.colocatedWithInstance),
+        ...shapeServerPresenceFields(
+          live,
+          display.colocatedWithInstance,
+          metricsDeploymentKindForRuntime(opts.runtime),
+        ),
         ...timezoneFields,
         ...hostDefaultsFields,
         orgDefaultTimezone: orgOptions.defaultServerTimezone ?? null,
@@ -1311,6 +1340,21 @@ export function registerServerRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts) 
       boundLicense?.id ?? null,
       organizationId,
     )
+    // The freed tier may now cover a server that was uncovered, or let a
+    // server move down: re-derive the organization's assignment. This runs
+    // on both runtimes — self-hosted derives an assignment too, from its
+    // grant. The grant is squared up first, and *shrinking* it is allowed
+    // on either runtime: the revoked license just gave its granted unit
+    // back, and leaving it standing would be a free license on the hosted
+    // runtime.
+    await syncSelfHostedGrant(db, organizationId, {
+      allowGrow: metricsDeploymentKindForRuntime(opts.runtime) === 'self-hosted',
+    }).catch((err) => {
+      compatLogWarn('servers', `self-hosted grant sync after delete failed: ${String(err)}`)
+    })
+    await recomputeOrganizationAssignments(db, organizationId).catch((err) => {
+      compatLogWarn('servers', `tier assignment recompute after delete failed: ${String(err)}`)
+    })
 
     return serverDeletedResponse(c, id, purgeError)
   })

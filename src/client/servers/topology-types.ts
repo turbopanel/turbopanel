@@ -30,7 +30,7 @@ export type NetworkDeviceKind =
 /**
  * Mirrors the daemon's `MAX_NIC_SLOTS` — the hard ceiling on monitored NIC
  * slots per server. 11 is the top of the priced ladder (S7 / SX sell 11 NIC
- * slots — `../../lib/billing/catalogue.ts`), so the ceiling never promises
+ * slots — `../../lib/tiers/ladder.ts`), so the ceiling never promises
  * fewer slots than a tier entitles.
  */
 export const MAX_NIC_SLOTS = 11
