@@ -2,6 +2,7 @@ import { assert, assertEquals } from '@std/assert'
 import {
   isGitProviderFailure,
   isGitProviderName,
+  normalizeCheckRef,
   resolveGitProvider,
   resolveWebhookGitProvider,
 } from './git-provider.ts'
@@ -133,6 +134,15 @@ test('github parsePush and parseCheck delegate through the provider registry', (
       externalInstallationId: '7',
       repositoryExternalId: '15',
       commitSha: SHA,
+      ref: null,
     },
   )
+})
+
+test('normalizeCheckRef maps branch names onto parked push refs', () => {
+  assertEquals(normalizeCheckRef('main'), 'refs/heads/main')
+  assertEquals(normalizeCheckRef('refs/heads/main'), 'refs/heads/main')
+  assertEquals(normalizeCheckRef('refs/tags/v1'), null)
+  assertEquals(normalizeCheckRef(''), null)
+  assertEquals(normalizeCheckRef(12), null)
 })

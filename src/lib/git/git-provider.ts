@@ -42,6 +42,8 @@ import { genericGitProvider } from './generic-git-provider.ts'
 import { githubProvider } from './github-provider.ts'
 import { gitlabProvider } from './gitlab-provider.ts'
 
+export { normalizeCheckRef } from './check-ref.ts'
+
 /**
  * Every provider a `source` row may name.
  *
@@ -206,6 +208,11 @@ export type ProviderCheckEvent = {
   externalInstallationId: string | null
   repositoryExternalId: string
   commitSha: string
+  /**
+   * Branch ref normalized to `refs/heads/…`, matching a parked push ref.
+   * `null` when the provider omitted it.
+   */
+  ref: string | null
 }
 
 /** An installation lifecycle event (suspend / resume / removal). */

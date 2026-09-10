@@ -698,16 +698,22 @@ export type CheckTrigger = {
   externalInstallationId: string | null
   repositoryExternalId: string
   commitSha: string
+  /**
+   * Normalized `refs/heads/…` from the CI event, or `null` when the provider
+   * omitted a branch. When a parked SHA also recorded a ref, they must match.
+   */
+  ref: string | null
 }
 
 /**
  * Resolve and act on a completed, successful CI signal — GitHub's
  * `check_suite` / `check_run`, or GitLab's `pipeline`.
  *
- * Only sources that actually parked *this* SHA are released. A success for a
- * commit nobody is waiting on (an older run finishing late, a branch nothing
- * watches) is a no-op, which is what keeps a burst of check events from
- * deploying the same commit repeatedly.
+ * Only sources that actually parked *this* SHA (and, when recorded, this
+ * branch ref) are released. A success for a commit nobody is waiting on
+ * (an older run finishing late, a branch nothing watches, a green check
+ * on a different ref than the parked push) is a no-op, which is what
+ * keeps a burst of check events from deploying the same commit repeatedly.
  */
 export async function resolveCheckTrigger(
   c: Context<AppEnv>,
@@ -745,6 +751,7 @@ export async function resolveCheckTrigger(
     if (row.autoDeploy !== 'checks_passed') continue
     const pending = readPendingChecks(row.options)
     if (pending?.commitSha !== check.commitSha) continue
+    if (pending.ref && pending.ref !== check.ref) continue
     matched += 1
 
     // Clear first: a deploy that fails to enqueue must not leave the SHA parked

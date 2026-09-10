@@ -14,13 +14,30 @@
  * the signature has been verified, so an unsigned request cannot poison the
  * ledger against a genuine redelivery of the same id.
  *
- * Rows carry no payload and no secret — see the `webhookDelivery` comment in
+ * Rows carry no secret. Stripe rows may hold the minimal object ref used to
+ * retry projection after a crash — see the `webhookDelivery` comment in
  * `./schema.ts`.
  */
 
-import { and, eq, sql } from 'drizzle-orm'
+import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm'
 import type { Db } from '../../db.ts'
 import { webhookDelivery } from './schema.ts'
+
+/**
+ * Minimal Stripe event identity stored on the claimed delivery row so the
+ * maintenance sweep can call `projectStripeEvent` without the original body.
+ * Shape matches `StripeEventRef` in `src/webhook/billing/stripe-projection.ts`
+ * without importing that module from `src/lib/db/`.
+ */
+export type StripeProjectionTask = {
+  id: string
+  type: string
+  objectId: string | null
+  objectType: string | null
+}
+
+/** Bounded Stripe projection retries per maintenance tick. */
+export const STRIPE_PROJECTION_RETRY_LIMIT = 50
 
 /**
  * Kinds that deliver webhooks. Matches `delivery_provider_check` in
@@ -98,11 +115,103 @@ export async function releaseWebhookDelivery(
 }
 
 /**
+ * Persist the Stripe object ref on the already-claimed delivery row.
+ *
+ * This is the durable handoff: a 2xx to Stripe is only honest after this
+ * update succeeds. Zero rows means the claim is missing — treat as failure
+ * so the gate can release and ask Stripe to retry. Always clears
+ * `projectedAt` so a late handoff after a mistaken settle stays retryable.
+ */
+export async function enqueueStripeProjection(
+  db: Db,
+  task: StripeProjectionTask,
+): Promise<void> {
+  const updated = await db
+    .update(webhookDelivery)
+    .set({
+      event: task.type,
+      objectId: task.objectId,
+      objectType: task.objectType,
+      projectedAt: null,
+    })
+    .where(
+      and(
+        eq(webhookDelivery.provider, 'stripe'),
+        eq(webhookDelivery.externalDeliveryId, task.id),
+      ),
+    )
+    .returning({ id: webhookDelivery.id })
+
+  if (updated.length === 0) {
+    throw new Error(`stripe projection handoff missed delivery ${task.id}`)
+  }
+}
+
+/**
+ * Oldest unsettled Stripe projection tasks whose object-ref handoff is
+ * complete, newest last. A claimed row with no `objectId` is still mid-gate
+ * and must not be settled. Bounded so one tick cannot scan the whole ledger.
+ */
+export async function listPendingStripeProjections(
+  db: Db,
+  opts: { limit?: number } = {},
+): Promise<StripeProjectionTask[]> {
+  const limit = Math.min(
+    Math.max(Math.trunc(opts.limit ?? STRIPE_PROJECTION_RETRY_LIMIT), 1),
+    2000,
+  )
+  const rows = await db
+    .select({
+      id: webhookDelivery.externalDeliveryId,
+      type: webhookDelivery.event,
+      objectId: webhookDelivery.objectId,
+      objectType: webhookDelivery.objectType,
+    })
+    .from(webhookDelivery)
+    .where(
+      and(
+        eq(webhookDelivery.provider, 'stripe'),
+        isNull(webhookDelivery.projectedAt),
+        isNotNull(webhookDelivery.objectId),
+      ),
+    )
+    .orderBy(webhookDelivery.createdAt)
+    .limit(limit)
+
+  return rows.map((row) => ({
+    id: row.id,
+    type: row.type ?? '',
+    objectId: row.objectId,
+    objectType: row.objectType,
+  }))
+}
+
+/** Mark one Stripe delivery's projection as settled so the sweep will not retry it. */
+export async function completeStripeProjection(
+  db: Db,
+  eventId: string,
+  now: string,
+): Promise<void> {
+  await db
+    .update(webhookDelivery)
+    .set({ projectedAt: now })
+    .where(
+      and(
+        eq(webhookDelivery.provider, 'stripe'),
+        eq(webhookDelivery.externalDeliveryId, eventId),
+      ),
+    )
+}
+
+/**
  * Bounded delete of delivery rows past {@link WEBHOOK_DELIVERY_RETENTION_MS}.
  * Returns the number of rows removed (tracing only).
  *
  * Same shape as `sweepExpiredCommandDispatch`: pick the oldest expired ids in a
  * subquery, delete those, so one tick can never scan the whole table.
+ * Unsettled Stripe projection rows are excluded — a 2xx already told Stripe
+ * not to retry, so dropping them would lose entitlement with nothing left to
+ * recover it from.
  */
 export async function sweepExpiredWebhookDeliveries(
   db: Db,
@@ -119,6 +228,7 @@ export async function sweepExpiredWebhookDeliveries(
       sql`${webhookDelivery.id} in (
         select id from ${webhookDelivery}
         where created_at < ${cutoff}::timestamptz
+          and not (provider = 'stripe' and projected_at is null)
         order by created_at
         limit ${limit}
       )`,

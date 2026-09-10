@@ -19,6 +19,7 @@ import {
   type GateContext,
   registerWebhookGate,
   retryable,
+  WEBHOOK_RATE_LIMIT_RETRY_AFTER_SECONDS,
   type WebhookGate,
 } from './gate.ts'
 
@@ -43,6 +44,7 @@ type StubOptions = {
   verifyResult?: boolean
   claimed?: boolean
   dispatchRetry?: boolean
+  dispatchThrow?: boolean
 }
 
 /** Records every ledger call so ordering can be asserted against the trace. */
@@ -107,6 +109,7 @@ async function buildApp(trace: Trace, opts: StubOptions = {}) {
     },
     dispatch: () => {
       trace.push('dispatch')
+      if (opts.dispatchThrow) throw new Error('injected dispatch crash')
       return Promise.resolve(
         opts.dispatchRetry ? retryable('dispatch_unavailable') : accepted({ ok: 1 }),
       )
@@ -189,6 +192,7 @@ test('the rate limit is spent before any resolution work', async () => {
 
   const res = await app.request(post())
   assertEquals(res.status, 429)
+  assertEquals(res.headers.get('Retry-After'), String(WEBHOOK_RATE_LIMIT_RETRY_AFTER_SECONDS))
   // Nothing past the limiter ran — that is the whole point of it being first.
   assertEquals(trace, [])
 })
@@ -244,15 +248,25 @@ test('a retryable dispatch releases the claim before answering 503', async () =>
   const trace: Trace = []
   const res = await (await buildApp(trace, { dispatchRetry: true })).request(post())
   assertEquals(res.status, 503)
+  assertEquals(await res.json(), { error: 'retry' })
   // Order matters: the sender retries with the same id, and a claim left behind
   // would turn that retry into the 204 above — dropping the event for good.
   assertEquals(trace.slice(-2), ['dispatch', 'release'])
 })
 
-test('an accepted dispatch keeps the claim', async () => {
+test('an unexpected dispatch throw releases the claim before answering 503', async () => {
+  const trace: Trace = []
+  const res = await (await buildApp(trace, { dispatchThrow: true })).request(post())
+  assertEquals(res.status, 503)
+  assertEquals(await res.json(), { error: 'retry' })
+  assertEquals(trace.slice(-2), ['dispatch', 'release'])
+})
+
+test('an accepted dispatch keeps the claim and returns no internal result', async () => {
   const trace: Trace = []
   const res = await (await buildApp(trace)).request(post())
   assertEquals(res.status, 200)
+  assertEquals(await res.json(), { ok: true })
   // Releasing here would let a redelivery enqueue the same work twice.
   assertEquals(trace.includes('release'), false)
 })
@@ -277,6 +291,7 @@ test('a malformed body is rejected after the claim, not before verification', as
   // Verification still ran on the raw bytes; only the parse failed.
   assertEquals(trace.includes('verify:shh'), true)
   assertEquals(trace.includes('dispatch'), false)
+  assertEquals(trace.includes('release'), false)
 })
 
 test('a JSON value that is not an object is rejected after the claim', async () => {

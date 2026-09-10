@@ -185,6 +185,21 @@ test('createRedisRateLimiter fails closed when onError is closed', async () => {
   assertEquals(await limiter.limit({ key: 'auth-key' }), { success: false })
 })
 
+test('createRedisRateLimiter falls back to a local bucket when onError is local', async () => {
+  const badClient = {
+    eval: () => Promise.reject(new Error('redis down')),
+  } as unknown as RedisCellClient
+  const limiter = createRedisRateLimiter({
+    client: badClient,
+    limit: 1,
+    periodSeconds: 60,
+    onError: 'local',
+  })
+  assertEquals(await limiter.limit({ key: 'peer-a' }), { success: true })
+  assertEquals(await limiter.limit({ key: 'peer-a' }), { success: false })
+  assertEquals(await limiter.limit({ key: 'peer-b' }), { success: true })
+})
+
 test('createRedisRateLimiter satisfies RateLimiter with shared keys', async () => {
   const seen: string[] = []
   const client = {

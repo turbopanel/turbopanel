@@ -409,7 +409,43 @@ test('githubProvider.parsePush and parseCheck', () => {
       installation: { id: 9 },
       repository: { id: 15 },
     }),
-    { externalInstallationId: '9', repositoryExternalId: '15', commitSha: SHA },
+    { externalInstallationId: '9', repositoryExternalId: '15', commitSha: SHA, ref: null },
+  )
+  assertEquals(
+    githubProvider.parseCheck('check_suite', {
+      check_suite: {
+        status: 'completed',
+        conclusion: 'success',
+        head_sha: SHA,
+        head_branch: 'main',
+      },
+      installation: { id: 9 },
+      repository: { id: 15 },
+    }),
+    { externalInstallationId: '9', repositoryExternalId: '15', commitSha: SHA, ref: 'refs/heads/main' },
+  )
+  assertEquals(
+    githubProvider.parseCheck('check_run', {
+      check_run: {
+        status: 'completed',
+        conclusion: 'success',
+        head_sha: SHA,
+        check_suite: {
+          status: 'completed',
+          conclusion: 'success',
+          head_sha: SHA,
+          head_branch: 'feature/x',
+        },
+      },
+      installation: { id: 9 },
+      repository: { id: 15 },
+    }),
+    {
+      externalInstallationId: '9',
+      repositoryExternalId: '15',
+      commitSha: SHA,
+      ref: 'refs/heads/feature/x',
+    },
   )
   assertEquals(githubProvider.parseCheck('check_suite', { check_suite: {} }), null)
 })

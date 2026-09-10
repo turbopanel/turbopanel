@@ -25,6 +25,7 @@ import { SYSTEM_RESOURCE_IMMUTABLE_ERROR } from "../authz/http.ts";
 import { TAG_NAME_IN_USE_ERROR } from "../display-name-uniqueness.ts";
 import { ORG_ID_HEADER } from "../org-context.ts";
 import { registerClientRoutes } from "../routes.ts";
+import { registerBillingRoutes } from "../billing/routes.ts";
 import { registerTagRoutes } from "./routes.ts";
 
 /**
@@ -574,19 +575,34 @@ test("registerClientRoutes mounts tags and tasks under the client API prefix", a
 test("registerClientRoutes mounts /billing on Workers only: self-hosted has no billing", async () => {
   const secretsConfig = parseTestSecretsConfig("deno");
   const secrets = await deriveSecretsConfig(secretsConfig, "session-signing");
-  const build = (runtime: "deno" | "workers") => {
+  const build = (
+    runtime: "deno" | "workers",
+    registerBilling?: typeof registerBillingRoutes,
+  ) => {
     const app = new Hono<AppEnv>();
     app.use("*", (c, next) => {
       c.set("runtime", runtime);
       return next();
     });
-    registerClientRoutes(app, { secrets, runtime, signupEnvOverride: undefined });
+    registerClientRoutes(app, {
+      secrets,
+      runtime,
+      signupEnvOverride: undefined,
+      ...(registerBilling ? { registerBilling } : {}),
+    });
     return app;
   };
 
   const deno = await build("deno").request(`${CLIENT_API_PREFIX}/billing/catalog`);
   assertEquals(deno.status, 404);
 
-  const workers = await build("workers").request(`${CLIENT_API_PREFIX}/billing/catalog`);
+  const workersBare = await build("workers").request(
+    `${CLIENT_API_PREFIX}/billing/catalog`,
+  );
+  assertEquals(workersBare.status, 404);
+
+  const workers = await build("workers", registerBillingRoutes).request(
+    `${CLIENT_API_PREFIX}/billing/catalog`,
+  );
   assertEquals(workers.status, 401);
 });

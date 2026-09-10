@@ -17,6 +17,8 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../../app.ts'
 import type { DaemonCell } from '../../daemon/cell/contracts.ts'
 import type { Db } from '../../db.ts'
+import type { RedisCellClient } from '../../daemon/cell/redis/client.ts'
+import { createRedisRateLimiter } from '../../daemon/rate-limit/redis-rate-limiter.ts'
 import {
   GITHUB_WEBHOOK_PATH,
 } from '../../surfaces.ts'
@@ -164,8 +166,9 @@ function createEnqueueGraphDb(
   appRows: unknown[],
   opts: {
     claimed?: boolean
-    enqueue: 'success' | 'fail'
+    enqueue: 'success' | 'fail' | 'throw'
     repository?: { autoDeploy?: string; options?: unknown }
+    onRelease?: () => void
   },
 ): Db {
   const composeOptions = { compose: emptyComposeDocument() }
@@ -274,7 +277,10 @@ function createEnqueueGraphDb(
       }),
     }),
     delete: () => ({
-      where: () => Promise.resolve(undefined),
+      where: () => {
+        opts.onRelease?.()
+        return Promise.resolve(undefined)
+      },
     }),
     // The compose-reference resolver is the one attachment model left, so the
     // raw-SQL lane answers it with the environment this repository deploys.
@@ -285,6 +291,7 @@ function createEnqueueGraphDb(
       return Promise.resolve([])
     },
     transaction: async () => {
+      if (opts.enqueue === 'throw') throw new Error('injected dispatch crash')
       if (opts.enqueue === 'fail') {
         return [{
           commandId: 'cmd-1',
@@ -303,14 +310,16 @@ async function buildApp(opts: {
   /** `false` = the ref resolves to nothing at all. */
   appRegistered?: boolean
   rateLimited?: boolean
+  rateLimiter?: { limit: (args: { key: string }) => Promise<{ success: boolean }> }
   claimed?: boolean
   updated?: unknown[]
   /** Set a real (non-noop) command queue so dispatch can resolve a trigger. */
   dispatchReady?: boolean
   /** Live installation + repository graph; enqueue success skips persist, fail delivers a stub command. */
   graph?: {
-    enqueue: 'success' | 'fail'
+    enqueue: 'success' | 'fail' | 'throw'
     repository?: { autoDeploy?: string; options?: unknown }
+    onRelease?: () => void
   }
 }) {
   const secretsConfig = parseTestSecretsConfig('deno')
@@ -352,6 +361,7 @@ async function buildApp(opts: {
           claimed: opts.claimed,
           enqueue: opts.graph.enqueue,
           ...(opts.graph.repository === undefined ? {} : { repository: opts.graph.repository }),
+          ...(opts.graph.onRelease === undefined ? {} : { onRelease: opts.graph.onRelease }),
         })
         : stubAppDb(rows, { claimed: opts.claimed, updated: opts.updated }),
     )
@@ -372,11 +382,14 @@ async function buildApp(opts: {
     }
     return next()
   })
+  let rateLimiter: { limit: (args: { key: string }) => Promise<{ success: boolean }> } | undefined
+  if (opts.rateLimiter) rateLimiter = opts.rateLimiter
+  else if (opts.rateLimited !== undefined) {
+    rateLimiter = { limit: () => Promise.resolve({ success: !opts.rateLimited }) }
+  }
   registerGithubWebhookRoutes(app, {
     runtime: 'deno',
-    ...(opts.rateLimited === undefined ? {} : {
-      rateLimiter: { limit: () => Promise.resolve({ success: !opts.rateLimited }) },
-    }),
+    ...(rateLimiter ? { rateLimiter } : {}),
   })
   return app
 }
@@ -424,6 +437,7 @@ test('rate limit is spent before any App config read', async () => {
   const app = await buildApp({ rateLimited: true })
   const res = await app.request(post('{}'))
   assertEquals(res.status, 429)
+  assertEquals(res.headers.get('Retry-After'), '60')
 })
 
 test('a ref naming no registered app is rejected, not accepted', async () => {
@@ -663,11 +677,7 @@ test('a signed push whose ref is not a string is a non-branch skip', async () =>
     'x-github-event': 'push',
   })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push',
-    result: { skipped: 'non_branch_ref' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a signed branch push that names no installation is unidentified', async () => {
@@ -676,11 +686,7 @@ test('a signed branch push that names no installation is unidentified', async ()
     'x-github-event': 'push',
   })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push',
-    result: { skipped: 'unidentified_delivery' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a signed branch-delete push is accepted as skipped', async () => {
@@ -693,11 +699,7 @@ test('a signed branch-delete push is accepted as skipped', async () => {
     repository: { id: 42 },
   }), { 'x-github-event': 'push' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push',
-    result: { skipped: 'branch_deleted' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a signed push that would deploy asks for a retry when dispatch is down', async () => {
@@ -709,11 +711,7 @@ test('a signed push that would deploy asks for a retry when dispatch is down', a
     repository: { id: 42 },
   }), { 'x-github-event': 'push' })
   assertEquals(res.status, 503)
-  assertEquals(await res.json(), {
-    ok: false,
-    event: 'push',
-    result: { error: 'dispatch_unavailable' },
-  })
+  assertEquals(await res.json(), { error: 'retry' })
 })
 
 test('a signed check_suite that is not all-green is accepted as skipped', async () => {
@@ -722,11 +720,7 @@ test('a signed check_suite that is not all-green is accepted as skipped', async 
     check_suite: { status: 'in_progress', conclusion: null, head_sha: COMMIT_SHA },
   }), { 'x-github-event': 'check_suite' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'check_suite',
-    result: { skipped: 'checks_not_successful' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a signed green check_suite asks for a retry when dispatch is down', async () => {
@@ -737,11 +731,7 @@ test('a signed green check_suite asks for a retry when dispatch is down', async 
     repository: { id: 42 },
   }), { 'x-github-event': 'check_suite' })
   assertEquals(res.status, 503)
-  assertEquals(await res.json(), {
-    ok: false,
-    event: 'check_suite',
-    result: { error: 'dispatch_unavailable' },
-  })
+  assertEquals(await res.json(), { error: 'retry' })
 })
 
 test('a signed green check_run whose suite is green asks for a retry when dispatch is down', async () => {
@@ -760,11 +750,7 @@ test('a signed green check_run whose suite is green asks for a retry when dispat
     repository: { id: 42 },
   }), { 'x-github-event': 'check_run' })
   assertEquals(res.status, 503)
-  assertEquals(await res.json(), {
-    ok: false,
-    event: 'check_run',
-    result: { error: 'dispatch_unavailable' },
-  })
+  assertEquals(await res.json(), { error: 'retry' })
 })
 
 test('a signed installation without an id is unidentified', async () => {
@@ -773,11 +759,7 @@ test('a signed installation without an id is unidentified', async () => {
     'x-github-event': 'installation',
   })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'installation',
-    result: { skipped: 'unidentified_delivery' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('installation_repositories is noted without mutating repository rows', async () => {
@@ -787,11 +769,7 @@ test('installation_repositories is noted without mutating repository rows', asyn
     installation: { id: 99 },
   }), { 'x-github-event': 'installation_repositories' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'installation_repositories',
-    result: { skipped: 'repositories_noted' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a signed installation lifecycle event applies against the verified app', async () => {
@@ -801,22 +779,14 @@ test('a signed installation lifecycle event applies against the verified app', a
     installation: { id: 99 },
   }), { 'x-github-event': 'installation' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'installation',
-    result: { updated: 1 },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('an unhandled signed event is accepted as skipped', async () => {
   const app = await buildApp({ webhookSecret: 'shh' })
   const res = await signedDispatch(app, '{}', { 'x-github-event': 'ping' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'ping',
-    result: { skipped: 'event_not_handled' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('sourceWatchesBranch: a blank default branch watches every branch', () => {
@@ -853,11 +823,7 @@ test('a green check_suite without an installation is not a release signal', asyn
     check_suite: { status: 'completed', conclusion: 'success', head_sha: COMMIT_SHA },
   }), { 'x-github-event': 'check_suite' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'check_suite',
-    result: { skipped: 'checks_not_successful' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('an installation event with a non-string action is a no-op apply', async () => {
@@ -869,25 +835,8 @@ test('an installation event with a non-string action is a no-op apply', async ()
     installation: { id: 99 },
   }), { 'x-github-event': 'installation' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'installation',
-    result: { updated: 0 },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
-
-const unidentifiedTrigger = {
-  matchedSources: 0,
-  queued: 0,
-  skipped: 1,
-  failed: 0,
-  outcomes: [{
-    kind: 'skipped',
-    sourceId: null,
-    environmentId: null,
-    reason: 'installation_unknown',
-  }],
-}
 
 test('a signed push with dispatch up is accepted when no installation matches', async () => {
   const app = await buildApp({ webhookSecret: 'shh', dispatchReady: true })
@@ -898,11 +847,7 @@ test('a signed push with dispatch up is accepted when no installation matches', 
     repository: { id: 42 },
   }), { 'x-github-event': 'push' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push',
-    result: unidentifiedTrigger,
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a signed green check_suite with dispatch up is accepted when no installation matches', async () => {
@@ -913,11 +858,7 @@ test('a signed green check_suite with dispatch up is accepted when no installati
     repository: { id: 42 },
   }), { 'x-github-event': 'check_suite' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'check_suite',
-    result: unidentifiedTrigger,
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a signed green check_run with dispatch up is accepted when no installation matches', async () => {
@@ -936,27 +877,8 @@ test('a signed green check_run with dispatch up is accepted when no installation
     repository: { id: 42 },
   }), { 'x-github-event': 'check_run' })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'check_run',
-    result: unidentifiedTrigger,
-  })
+  assertEquals(await res.json(), { ok: true })
 })
-
-const queuedOutcome = {
-  kind: 'queued' as const,
-  sourceId: SOURCE_ID,
-  environmentId: ENV_ID,
-  commitSha: COMMIT_SHA,
-}
-
-const failedOutcome = {
-  kind: 'failed' as const,
-  sourceId: SOURCE_ID,
-  environmentId: ENV_ID,
-  reason: 'deploy_unavailable' as const,
-  status: 503,
-}
 
 const parkedChecks = {
   pendingChecks: {
@@ -967,7 +889,12 @@ const parkedChecks = {
 }
 
 const greenCheckSuite = {
-  check_suite: { status: 'completed', conclusion: 'success', head_sha: COMMIT_SHA },
+  check_suite: {
+    status: 'completed',
+    conclusion: 'success',
+    head_sha: COMMIT_SHA,
+    head_branch: 'main',
+  },
   installation: { id: 99 },
   repository: { id: 42 },
 }
@@ -980,6 +907,7 @@ const greenCheckRun = {
       status: 'completed',
       conclusion: 'success',
       head_sha: COMMIT_SHA,
+      head_branch: 'main',
     },
   },
   installation: { id: 99 },
@@ -1002,17 +930,7 @@ test('a signed push with a matched repository enqueues a deploy', async () => {
     'x-github-event': 'push',
   })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push',
-    result: {
-      matchedSources: 1,
-      queued: 1,
-      skipped: 0,
-      failed: 0,
-      outcomes: [queuedOutcome],
-    },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a signed push reports enqueue failure so GitHub redelivers', async () => {
@@ -1024,17 +942,7 @@ test('a signed push reports enqueue failure so GitHub redelivers', async () => {
     'x-github-event': 'push',
   })
   assertEquals(res.status, 503)
-  assertEquals(await res.json(), {
-    ok: false,
-    event: 'push',
-    result: {
-      matchedSources: 1,
-      queued: 0,
-      skipped: 0,
-      failed: 1,
-      outcomes: [failedOutcome],
-    },
-  })
+  assertEquals(await res.json(), { error: 'retry' })
 })
 
 test('a signed green check_suite with a parked SHA enqueues a deploy', async () => {
@@ -1049,17 +957,7 @@ test('a signed green check_suite with a parked SHA enqueues a deploy', async () 
     'x-github-event': 'check_suite',
   })
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'check_suite',
-    result: {
-      matchedSources: 1,
-      queued: 1,
-      skipped: 0,
-      failed: 0,
-      outcomes: [queuedOutcome],
-    },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a signed green check_run with a parked SHA reports enqueue failure', async () => {
@@ -1074,15 +972,52 @@ test('a signed green check_run with a parked SHA reports enqueue failure', async
     'x-github-event': 'check_run',
   })
   assertEquals(res.status, 503)
-  assertEquals(await res.json(), {
-    ok: false,
-    event: 'check_run',
-    result: {
-      matchedSources: 1,
-      queued: 0,
-      skipped: 0,
-      failed: 1,
-      outcomes: [failedOutcome],
+  assertEquals(await res.json(), { error: 'retry' })
+})
+
+test('a dispatch throw after the claim releases it so GitHub can retry', async () => {
+  let released = false
+  const app = await buildApp({
+    webhookSecret: 'shh',
+    graph: {
+      enqueue: 'throw',
+      onRelease: () => {
+        released = true
+      },
     },
   })
+  const res = await signedDispatch(app, JSON.stringify(branchPush), {
+    'x-github-event': 'push',
+  })
+  assertEquals(res.status, 503)
+  assertEquals(await res.json(), { error: 'retry' })
+  assertEquals(released, true)
+})
+
+test('a Redis eval failure still throttles GitHub webhook ingress', async () => {
+  const limiter = createRedisRateLimiter({
+    client: {
+      eval: () => Promise.reject(new Error('redis down')),
+    } as unknown as RedisCellClient,
+    limit: 1,
+    periodSeconds: 60,
+    onError: 'local',
+  })
+  const app = await buildApp({
+    webhookSecret: 'shh',
+    rateLimiter: limiter,
+    graph: { enqueue: 'success' },
+  })
+  const first = await signedDispatch(app, JSON.stringify(branchPush), {
+    'x-github-event': 'push',
+  })
+  assertEquals(first.status, 200)
+  const second = await signedDispatch(app, JSON.stringify({
+    ...branchPush,
+    after: 'b'.repeat(40),
+  }), {
+    'x-github-event': 'push',
+  })
+  assertEquals(second.status, 429)
+  assertEquals(second.headers.get('Retry-After'), '60')
 })

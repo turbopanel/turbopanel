@@ -8,6 +8,13 @@
       "when": 1788997321819,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789044024038,
+      "tag": "0001_stripe_projection_handoff",
+      "breakpoints": true
     }
   ]
 }

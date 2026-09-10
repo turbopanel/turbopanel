@@ -1,6 +1,7 @@
 import { assertEquals, assertExists } from '@std/assert'
 import { ADMIN_API_PREFIX } from '../../surfaces.ts'
 import { getAdminOpenApiSpec } from './index.ts'
+import { getWorkersAdminOpenApiSpec } from './workers.ts'
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -41,7 +42,7 @@ test('getAdminOpenApiSpec documents the tier catalogue on Workers only', () => {
     'x-tagGroups': { name: string }[]
     paths: Record<string, unknown>
   }
-  const workers = getAdminOpenApiSpec('https://localhost:8443', { runtime: 'workers' }) as Spec
+  const workers = getWorkersAdminOpenApiSpec('https://localhost:8443') as Spec
   assertEquals(workers.tags.some((tag) => tag.name === 'Tiers'), true)
   assertEquals(workers['x-tagGroups'].some((group) => group.name === 'Billing'), true)
   assertExists(workers.paths[`${ADMIN_API_PREFIX}/tiers`])
@@ -52,6 +53,10 @@ test('getAdminOpenApiSpec documents the tier catalogue on Workers only', () => {
   assertEquals(deno.tags.some((tag) => tag.name === 'Tiers'), false)
   assertEquals(deno['x-tagGroups'].some((group) => group.name === 'Billing'), false)
   assertEquals(Object.keys(deno.paths).some((path) => path.startsWith(`${ADMIN_API_PREFIX}/tiers`)), false)
+
+  const sharedWorkers = getAdminOpenApiSpec('https://localhost:8443', { runtime: 'workers' }) as Spec
+  assertEquals(sharedWorkers.tags.some((tag) => tag.name === 'Tiers'), false)
+  assertEquals(Object.keys(sharedWorkers.paths).some((path) => path.startsWith(`${ADMIN_API_PREFIX}/tiers`)), false)
 })
 
 test('getAdminOpenApiSpec documents public URL and reencrypt paths', () => {

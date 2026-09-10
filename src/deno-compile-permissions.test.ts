@@ -229,6 +229,25 @@ it("instance --allow-net includes public Git provider APIs", async () => {
   }
 });
 
+it("self-hosted compile tasks do not grant Stripe", async () => {
+  const tasks = await readCompileTasks();
+  for (const [taskName, task] of Object.entries(tasks)) {
+    const allowNet = extractAllowNetFlag(task);
+    assert(allowNet, `${taskName} must include --allow-net`);
+    const hosts = allowNet.split(",");
+    assert(
+      !hosts.some((host) =>
+        host === "api.stripe.com:443" || host.startsWith("api.stripe.com")
+      ),
+      `${taskName} --allow-net must not include api.stripe.com`,
+    );
+    assert(
+      !task.includes("api.stripe.com"),
+      `${taskName} must not mention api.stripe.com`,
+    );
+  }
+});
+
 it("production compile excludes developer-only permissions and entry", async () => {
   const { compile: compileTask } = await readCompileTasks();
   assert(

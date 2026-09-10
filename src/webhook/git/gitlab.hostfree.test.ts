@@ -137,8 +137,9 @@ function createEnqueueGraphDb(
   appRows: unknown[],
   opts: {
     claimed?: boolean
-    enqueue: 'success' | 'fail'
+    enqueue: 'success' | 'fail' | 'throw'
     repository?: { autoDeploy?: string; options?: unknown }
+    onRelease?: () => void
   },
 ): Db {
   const composeOptions = { compose: emptyComposeDocument() }
@@ -247,7 +248,10 @@ function createEnqueueGraphDb(
       }),
     }),
     delete: () => ({
-      where: () => Promise.resolve(undefined),
+      where: () => {
+        opts.onRelease?.()
+        return Promise.resolve(undefined)
+      },
     }),
     // The compose-reference resolver is the one attachment model left, so the
     // raw-SQL lane answers it with the environment this repository deploys.
@@ -258,6 +262,7 @@ function createEnqueueGraphDb(
       return Promise.resolve([])
     },
     transaction: async () => {
+      if (opts.enqueue === 'throw') throw new Error('injected dispatch crash')
       if (opts.enqueue === 'fail') {
         return [{
           commandId: 'cmd-1',
@@ -278,8 +283,9 @@ async function buildApp(opts: {
   webhookTokenHash?: string
   dispatchReady?: boolean
   graph?: {
-    enqueue: 'success' | 'fail'
+    enqueue: 'success' | 'fail' | 'throw'
     repository?: { autoDeploy?: string; options?: unknown }
+    onRelease?: () => void
   }
 }) {
   const secretsConfig = parseTestSecretsConfig('deno')
@@ -320,6 +326,7 @@ async function buildApp(opts: {
           claimed: opts.claimed,
           enqueue: opts.graph.enqueue,
           ...(opts.graph.repository === undefined ? {} : { repository: opts.graph.repository }),
+          ...(opts.graph.onRelease === undefined ? {} : { onRelease: opts.graph.onRelease }),
         })
         : stubAppDb(rows, { claimed: opts.claimed }),
     )
@@ -380,6 +387,7 @@ test('rate limit is spent before any App config read', async () => {
   const app = await buildApp({ rateLimited: true })
   const res = await app.request(post('{}'))
   assertEquals(res.status, 429)
+  assertEquals(res.headers.get('Retry-After'), '60')
 })
 
 test('a ref naming no registered app is rejected, not accepted', async () => {
@@ -483,11 +491,7 @@ test('the bare path resolves the app from the presented token digest', async () 
     object_kind: 'note',
   }), tokenHeaders({ 'x-gitlab-event': 'Note Hook' })))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'note_hook',
-    result: { skipped: 'event_not_handled' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a tokened push that is not a branch ref is accepted as skipped', async () => {
@@ -497,11 +501,7 @@ test('a tokened push that is not a branch ref is accepted as skipped', async () 
     ref: 'refs/tags/v1',
   }), tokenHeaders()))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push_hook',
-    result: { skipped: 'non_branch_ref' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a tokened branch-delete push is accepted as skipped', async () => {
@@ -514,11 +514,7 @@ test('a tokened branch-delete push is accepted as skipped', async () => {
     project_id: 7,
   }), tokenHeaders()))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push_hook',
-    result: { skipped: 'branch_deleted' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a tokened push that would deploy asks for a retry when dispatch is down', async () => {
@@ -531,11 +527,7 @@ test('a tokened push that would deploy asks for a retry when dispatch is down', 
     project_id: 7,
   }), tokenHeaders()))
   assertEquals(res.status, 503)
-  assertEquals(await res.json(), {
-    ok: false,
-    event: 'push_hook',
-    result: { error: 'dispatch_unavailable' },
-  })
+  assertEquals(await res.json(), { error: 'retry' })
 })
 
 test('a tokened pipeline that is not success is accepted as skipped', async () => {
@@ -546,11 +538,7 @@ test('a tokened pipeline that is not success is accepted as skipped', async () =
     project_id: 7,
   }), tokenHeaders({ 'x-gitlab-event': 'Pipeline Hook' })))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'pipeline_hook',
-    result: { skipped: 'checks_not_successful' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a tokened successful pipeline asks for a retry when dispatch is down', async () => {
@@ -561,11 +549,7 @@ test('a tokened successful pipeline asks for a retry when dispatch is down', asy
     project: { id: 7 },
   }), tokenHeaders({ 'x-gitlab-event': 'Pipeline Hook' })))
   assertEquals(res.status, 503)
-  assertEquals(await res.json(), {
-    ok: false,
-    event: 'pipeline_hook',
-    result: { error: 'dispatch_unavailable' },
-  })
+  assertEquals(await res.json(), { error: 'retry' })
 })
 
 test('dispatch falls back to the ledger event when object_kind is absent', async () => {
@@ -574,11 +558,7 @@ test('dispatch falls back to the ledger event when object_kind is absent', async
     'x-gitlab-event': 'Job Hook',
   })))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'job_hook',
-    result: { skipped: 'event_not_handled' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a body-digest delivery id is used when GitLab omits the UUID header', async () => {
@@ -589,11 +569,7 @@ test('a body-digest delivery id is used when GitLab omits the UUID header', asyn
     'x-gitlab-event': 'Wiki Page Hook',
   }))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'wiki_page_hook',
-    result: { skipped: 'event_not_handled' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('registerWebhookRoutes mounts both providers on the workers runtime', async () => {
@@ -658,11 +634,7 @@ test('dispatch falls back to a push when object_kind is missing', async () => {
     ref: 'refs/tags/v1',
   }), tokenHeaders({ 'x-gitlab-event': 'push' })))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push',
-    result: { skipped: 'non_branch_ref' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('dispatch falls back to a pipeline when object_kind is missing', async () => {
@@ -672,11 +644,7 @@ test('dispatch falls back to a pipeline when object_kind is missing', async () =
     project: { id: 7 },
   }), tokenHeaders({ 'x-gitlab-event': 'pipeline' })))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'pipeline',
-    result: { skipped: 'checks_not_successful' },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('an empty event header is a bad request after the token is accepted', async () => {
@@ -689,19 +657,6 @@ test('an empty event header is a bad request after the token is accepted', async
   assertEquals(res.status, 400)
 })
 
-const unidentifiedTrigger = {
-  matchedSources: 0,
-  queued: 0,
-  skipped: 1,
-  failed: 0,
-  outcomes: [{
-    kind: 'skipped',
-    sourceId: null,
-    environmentId: null,
-    reason: 'installation_unknown',
-  }],
-}
-
 test('a tokened push with dispatch up is accepted when no installation matches', async () => {
   const app = await buildApp({ webhookSecret: WEBHOOK_SECRET, dispatchReady: true })
   const res = await app.request(post(JSON.stringify({
@@ -712,11 +667,7 @@ test('a tokened push with dispatch up is accepted when no installation matches',
     project_id: 7,
   }), tokenHeaders()))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push_hook',
-    result: unidentifiedTrigger,
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a tokened successful pipeline with dispatch up is accepted when no installation matches', async () => {
@@ -727,11 +678,7 @@ test('a tokened successful pipeline with dispatch up is accepted when no install
     project: { id: 7 },
   }), tokenHeaders({ 'x-gitlab-event': 'Pipeline Hook' })))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'pipeline_hook',
-    result: unidentifiedTrigger,
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('registerWebhookRoutes mounts both providers and keeps limiter buckets apart', async () => {
@@ -781,21 +728,6 @@ test('registerWebhookRoutes mounts both providers and keeps limiter buckets apar
   assertEquals(gitlabLimited, 1)
 })
 
-const queuedOutcome = {
-  kind: 'queued' as const,
-  sourceId: SOURCE_ID,
-  environmentId: ENV_ID,
-  commitSha: COMMIT_SHA,
-}
-
-const failedOutcome = {
-  kind: 'failed' as const,
-  sourceId: SOURCE_ID,
-  environmentId: ENV_ID,
-  reason: 'deploy_unavailable' as const,
-  status: 503,
-}
-
 const parkedChecks = {
   pendingChecks: {
     commitSha: COMMIT_SHA,
@@ -814,7 +746,7 @@ const branchPush = {
 
 const greenPipeline = {
   object_kind: 'pipeline',
-  object_attributes: { status: 'success', sha: COMMIT_SHA },
+  object_attributes: { status: 'success', sha: COMMIT_SHA, ref: 'main' },
   project: { id: 7 },
 }
 
@@ -825,17 +757,7 @@ test('a tokened push with a matched repository enqueues a deploy', async () => {
   })
   const res = await app.request(post(JSON.stringify(branchPush), tokenHeaders()))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'push_hook',
-    result: {
-      matchedSources: 1,
-      queued: 1,
-      skipped: 0,
-      failed: 0,
-      outcomes: [queuedOutcome],
-    },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a tokened push reports enqueue failure so GitLab redelivers', async () => {
@@ -845,17 +767,7 @@ test('a tokened push reports enqueue failure so GitLab redelivers', async () => 
   })
   const res = await app.request(post(JSON.stringify(branchPush), tokenHeaders()))
   assertEquals(res.status, 503)
-  assertEquals(await res.json(), {
-    ok: false,
-    event: 'push_hook',
-    result: {
-      matchedSources: 1,
-      queued: 0,
-      skipped: 0,
-      failed: 1,
-      outcomes: [failedOutcome],
-    },
-  })
+  assertEquals(await res.json(), { error: 'retry' })
 })
 
 test('a tokened successful pipeline with a parked SHA enqueues a deploy', async () => {
@@ -870,17 +782,7 @@ test('a tokened successful pipeline with a parked SHA enqueues a deploy', async 
     'x-gitlab-event': 'Pipeline Hook',
   })))
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'pipeline_hook',
-    result: {
-      matchedSources: 1,
-      queued: 1,
-      skipped: 0,
-      failed: 0,
-      outcomes: [queuedOutcome],
-    },
-  })
+  assertEquals(await res.json(), { ok: true })
 })
 
 test('a tokened successful pipeline reports enqueue failure so GitLab redelivers', async () => {
@@ -895,15 +797,22 @@ test('a tokened successful pipeline reports enqueue failure so GitLab redelivers
     'x-gitlab-event': 'Pipeline Hook',
   })))
   assertEquals(res.status, 503)
-  assertEquals(await res.json(), {
-    ok: false,
-    event: 'pipeline_hook',
-    result: {
-      matchedSources: 1,
-      queued: 0,
-      skipped: 0,
-      failed: 1,
-      outcomes: [failedOutcome],
+  assertEquals(await res.json(), { error: 'retry' })
+})
+
+test('a dispatch throw after the claim releases it so GitLab can retry', async () => {
+  let released = false
+  const app = await buildApp({
+    webhookSecret: WEBHOOK_SECRET,
+    graph: {
+      enqueue: 'throw',
+      onRelease: () => {
+        released = true
+      },
     },
   })
+  const res = await app.request(post(JSON.stringify(branchPush), tokenHeaders()))
+  assertEquals(res.status, 503)
+  assertEquals(await res.json(), { error: 'retry' })
+  assertEquals(released, true)
 })

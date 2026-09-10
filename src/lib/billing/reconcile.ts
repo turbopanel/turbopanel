@@ -4,11 +4,13 @@
  * Per organization, compare what the provider says is paid for (the
  * `seat` quantities) against what this instance has handed out (active
  * licenses) and where its servers landed (the derived assignment). Drift
- * means a projection was missed — the webhook task crashed after the
- * ledger claim, or a mutation landed without its confirmation — or that a
- * server's hardware outgrew what was bought. The honest answer is a
- * structured error-level log plus the last report in a `setting` row the
- * admin surface can read.
+ * means Postgres entitlement no longer matches purchased seats — a mutation
+ * landed without its confirmation, or a server's hardware outgrew what was
+ * bought. This sweep does **not** refetch Stripe and is not recovery for a
+ * missed webhook; unsettled Stripe events are retried by
+ * `runPendingStripeProjections` on the maintenance tick. The honest answer
+ * here is a structured error-level log plus the last report in a `setting`
+ * row the admin surface can read.
  *
  * No Stripe write, no license write. Correction is an operator's call.
  *

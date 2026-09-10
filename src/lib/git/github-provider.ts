@@ -13,6 +13,7 @@
  * `src/workers.ts`.
  */
 
+import { normalizeCheckRef } from './check-ref.ts'
 import { isGitProviderFailure } from './git-provider.ts'
 import {
   MAX_REPOSITORY_FILE_BYTES,
@@ -432,6 +433,22 @@ export function successfulCheckSha(
   return checkHeadSha(suite, null)
 }
 
+function checkEventRef(
+  event: string,
+  payload: Record<string, unknown>,
+): string | null {
+  if (event === 'check_run') {
+    const run = payload.check_run
+    if (!isPlainObject(run)) return null
+    const fromRun = normalizeCheckRef(run.head_branch)
+    if (fromRun) return fromRun
+    const nested = isPlainObject(run.check_suite) ? run.check_suite : null
+    return nested ? normalizeCheckRef(nested.head_branch) : null
+  }
+  const suite = payload.check_suite
+  return isPlainObject(suite) ? normalizeCheckRef(suite.head_branch) : null
+}
+
 export const githubProvider: GitProvider = {
   provider: 'github',
 
@@ -653,6 +670,7 @@ export const githubProvider: GitProvider = {
       externalInstallationId: installation,
       repositoryExternalId: repository,
       commitSha,
+      ref: checkEventRef(event, payload),
     }
   },
 }

@@ -12,7 +12,6 @@ import { networkPaths, networkSchemas } from './networks.ts'
 import { datacenterPaths, datacenterSchemas } from './datacenters.ts'
 import { ipPaths, ipSchemas } from './ips.ts'
 import { buildLicensePaths, buildLicenseSchemas } from './licenses.ts'
-import { billingPaths, billingSchemas } from './billing.ts'
 import { organizationPaths, organizationSchemas } from './organizations.ts'
 import { projectPaths, projectSchemas } from './projects.ts'
 import { serverPaths, serverSchemas } from './servers.ts'
@@ -41,9 +40,6 @@ export function getClientOpenApiSpec(
   options?: ClientOpenApiOptions,
 ): object {
   const includeInstall = options?.runtime === 'deno'
-  // Billing is hosted-only: `registerClientRoutes` does not mount `/billing/*`
-  // on self-hosted Deno, so the spec omits it there too.
-  const includeBilling = options?.runtime === 'workers'
   const installCommandDescription = includeInstall
     ? 'Shell command to install a daemon with this license via the instance install wrapper.'
     : 'Shell command to install a daemon with this license via the CDN installer (Workers does not expose /api/install/v1).'
@@ -103,13 +99,6 @@ export function getClientOpenApiSpec(
       { name: 'Datacenters', description: 'Datacenter CRUD' },
       { name: 'IPs', description: 'Managed IP address registry' },
       { name: 'Licenses', description: 'License lifecycle' },
-      ...(includeBilling
-        ? [{
-          name: 'Billing',
-          description:
-            'Hosted billing: catalogue, projected subscription, Checkout, Customer Portal, seat and tier changes. Hosted (Workers) only; absent on self-hosted. `503 billing_not_configured` until Stripe is configured.',
-        }]
-        : []),
       { name: 'System', description: 'Platform-managed system components' },
       ...(includeInstall
         ? [{ name: 'Install', description: 'Self-hosted install wizard (Deno only)' }]
@@ -118,7 +107,7 @@ export function getClientOpenApiSpec(
     'x-tagGroups': [
       { name: 'Authentication & Authorization', tags: ['Authentication', 'Authorization'] },
       { name: 'Resources', tags: ['Workspaces', 'Projects', 'Environments', 'Managed services', 'Variables', 'Tags', 'Tasks', 'Bindings', 'Storage', 'Repositories', 'Principals', 'Resource limits', 'Services', 'Hostings', 'Containers', 'TLS', 'Docker run import'] },
-      { name: 'Infrastructure', tags: ['Servers', 'Commands', 'Networks', 'Datacenters', 'IPs', 'Licenses', 'Billing'] },
+      { name: 'Infrastructure', tags: ['Servers', 'Commands', 'Networks', 'Datacenters', 'IPs', 'Licenses'] },
       { name: 'Platform', tags: ['Health', 'System', ...(includeInstall ? ['Install'] : [])] },
     ],
     components: {
@@ -138,7 +127,6 @@ export function getClientOpenApiSpec(
         ...datacenterSchemas,
         ...ipSchemas,
         ...buildLicenseSchemas(installCommandDescription),
-        ...(includeBilling ? billingSchemas : {}),
         ...accessSchemas,
         ...organizationSchemas,
         ...workspaceSchemas,
@@ -171,7 +159,6 @@ export function getClientOpenApiSpec(
       ...datacenterPaths,
       ...ipPaths,
       ...buildLicensePaths(installCommandDescription),
-      ...(includeBilling ? billingPaths : {}),
       ...accessPaths,
       ...organizationPaths,
       ...workspacePaths,

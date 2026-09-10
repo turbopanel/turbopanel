@@ -246,6 +246,18 @@ export type DaemonMessage =
     at: string;
   }
   | {
+    type: "capability-plan-clear";
+    id: string;
+    at: string;
+  }
+  | {
+    type: "capability-plan-clear-result";
+    id: string;
+    ok: boolean;
+    error?: string;
+    at: string;
+  }
+  | {
     type: "managed-ha-event";
     managedId: string;
     sourceMemberId?: string;
@@ -377,6 +389,7 @@ export const DAEMON_INBOUND_ALLOWED = new Set(
     "metrics-live-stop-result",
     "topology-overrides-update-result",
     "capability-plan-update-result",
+    "capability-plan-clear-result",
     "repo-read-result",
     "repo-default-branch-result",
     "managed-ha-event",
@@ -830,6 +843,7 @@ function validateInboundMessageFields(
     case "metrics-live-stop-result":
     case "topology-overrides-update-result":
     case "capability-plan-update-result":
+    case "capability-plan-clear-result":
       return validateOkResultFields(record);
     case "command-ack":
       return validateCommandAckFields(record);
@@ -1034,6 +1048,7 @@ export type DaemonOutboundEnvelope =
     plan: CapabilityPlanUpdatePayload;
     generation: number;
   })
+  | (OutboundEnvelopeBase & { kind: "capability-plan-clear" })
   | (OutboundEnvelopeBase & {
     kind: "update";
     channel?: string;
@@ -1145,6 +1160,13 @@ export type DaemonInboundEnvelope =
   }
   | {
     kind: "capability-plan-update-result";
+    requestId: string;
+    at: string;
+    ok: boolean;
+    error?: string;
+  }
+  | {
+    kind: "capability-plan-clear-result";
     requestId: string;
     at: string;
     ok: boolean;
@@ -1294,6 +1316,14 @@ export function wireMessageToInboundEnvelope(
     case "capability-plan-update-result":
       return {
         kind: "capability-plan-update-result",
+        requestId: msg.id,
+        at: msg.at,
+        ok: msg.ok,
+        error: msg.error,
+      };
+    case "capability-plan-clear-result":
+      return {
+        kind: "capability-plan-clear-result",
         requestId: msg.id,
         at: msg.at,
         ok: msg.ok,
@@ -1492,6 +1522,12 @@ export function outboundEnvelopeToWireMessage(
         id: env.requestId,
         plan: env.plan,
         generation: env.generation,
+        at: env.at,
+      };
+    case "capability-plan-clear":
+      return {
+        type: "capability-plan-clear",
+        id: env.requestId,
         at: env.at,
       };
     case "update":

@@ -81,6 +81,7 @@ export function deriveInboundOutcome(
     case "metrics-live-stop-result":
     case "topology-overrides-update-result":
     case "capability-plan-update-result":
+    case "capability-plan-clear-result":
       return inboundOutcomeFromOk(inbound.ok, inbound.error, {
         ok: inbound.ok,
         error: inbound.error,

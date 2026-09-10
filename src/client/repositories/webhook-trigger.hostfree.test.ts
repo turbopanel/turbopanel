@@ -374,6 +374,7 @@ test('resolveCheckTrigger releases only the parked SHA and restores it on 5xx', 
       externalInstallationId: '42',
       repositoryExternalId: '99',
       commitSha: 'abc123def',
+      ref: null,
     },
     triggerDeps([
       sourceRow({ autoDeploy: 'immediate' }),
@@ -398,6 +399,7 @@ test('resolveCheckTrigger releases only the parked SHA and restores it on 5xx', 
       externalInstallationId: '42',
       repositoryExternalId: '99',
       commitSha: 'abc123def',
+      ref: 'refs/heads/trunk',
     },
     triggerDeps([parkedRow], {
       setPendingChecks: async (_db, _row, next) => {
@@ -419,6 +421,7 @@ test('resolveCheckTrigger releases only the parked SHA and restores it on 5xx', 
       externalInstallationId: '42',
       repositoryExternalId: '99',
       commitSha: 'abc123def',
+      ref: 'refs/heads/trunk',
     },
     triggerDeps([parkedRow], {
       setPendingChecks: async (_db, _row, next) => {
@@ -429,6 +432,68 @@ test('resolveCheckTrigger releases only the parked SHA and restores it on 5xx', 
   )
   assertEquals(retried.failed, 1)
   assertEquals(restored, [null, 'abc123def'])
+})
+
+test('resolveCheckTrigger skips a parked SHA when the CI ref does not match', async () => {
+  const parkedRow = sourceRow({
+    autoDeploy: 'checks_passed',
+    options: {
+      pendingChecks: {
+        commitSha: 'abc123def',
+        ref: 'refs/heads/trunk',
+        recordedAt: '2026-01-15T12:00:00.000Z',
+      },
+    },
+  })
+
+  const mismatched = await resolveCheckTrigger(
+    unusedCtx,
+    unusedDb,
+    unusedQueue,
+    {
+      provider: 'github',
+      forgeId: APP_ID,
+      externalInstallationId: '42',
+      repositoryExternalId: '99',
+      commitSha: 'abc123def',
+      ref: 'refs/heads/feature',
+    },
+    triggerDeps([parkedRow]),
+  )
+  assertEquals(mismatched.matchedSources, 0)
+  assertEquals(mismatched.outcomes, [])
+
+  const omittedRef = await resolveCheckTrigger(
+    unusedCtx,
+    unusedDb,
+    unusedQueue,
+    {
+      provider: 'github',
+      forgeId: APP_ID,
+      externalInstallationId: '42',
+      repositoryExternalId: '99',
+      commitSha: 'abc123def',
+      ref: null,
+    },
+    triggerDeps([parkedRow]),
+  )
+  assertEquals(omittedRef.matchedSources, 0)
+
+  const matching = await resolveCheckTrigger(
+    unusedCtx,
+    unusedDb,
+    unusedQueue,
+    {
+      provider: 'github',
+      forgeId: APP_ID,
+      externalInstallationId: '42',
+      repositoryExternalId: '99',
+      commitSha: 'abc123def',
+      ref: 'refs/heads/trunk',
+    },
+    triggerDeps([parkedRow]),
+  )
+  assertEquals(matching.queued, 1)
 })
 
 test('GitHub aliases bind the github provider discriminant', async () => {
@@ -452,6 +517,7 @@ test('GitHub aliases bind the github provider discriminant', async () => {
     externalInstallationId: '42',
     repositoryExternalId: '99',
     commitSha: 'abc',
+    ref: null,
   }, deps)
   assertEquals(seen, ['github', 'github'])
 })
@@ -637,6 +703,7 @@ test('resolvePushTrigger default loaders read a fake installation and source cha
       externalInstallationId: '42',
       repositoryExternalId: '99',
       commitSha: 'abc123def',
+      ref: null,
     },
     { loadInstallations: async () => ({ live: [], suspended: 1 }) },
   )

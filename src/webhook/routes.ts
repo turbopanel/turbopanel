@@ -1,9 +1,13 @@
 /**
  * The webhook surface's one entrypoint.
  *
- * Both runtimes call this instead of registering each kind by hand, so adding a
- * webhook kind never touches `deno-server.ts` or `workers.ts` again — it is a
- * new adapter plus a line here.
+ * Both runtimes call this instead of registering each git kind by hand, so
+ * adding a git webhook kind never touches `deno-server.ts` or `workers.ts`
+ * again — it is a new adapter plus a line here.
+ *
+ * Stripe billing is **not** registered here. It is a hosted-only kind,
+ * imported only from `src/workers.ts`, so the self-hosted Deno graph never
+ * compiles Stripe.
  *
  * **Deliberately not a child router.** Every other surface builds a
  * `new Hono()` and mounts it with `app.route(PREFIX, child)`. This one cannot:
@@ -26,7 +30,6 @@ import type { AppEnv } from '../app.ts'
 import type { RateLimiter } from '../daemon/rate-limit/contracts.ts'
 import { registerGithubWebhookRoutes } from './git/github.ts'
 import { registerGitlabWebhookRoutes } from './git/gitlab.ts'
-import { registerStripeWebhookRoutes } from './billing/stripe.ts'
 
 export type WebhookRouteOpts = {
   /** Runtime, for trusted client-IP resolution. */
@@ -37,8 +40,6 @@ export type WebhookRouteOpts = {
    */
   github?: RateLimiter
   gitlab?: RateLimiter
-  /** Billing kind (`/webhook/stripe`) — same gate, its own bucket. */
-  stripe?: RateLimiter
 }
 
 export function registerWebhookRoutes(
@@ -53,14 +54,5 @@ export function registerWebhookRoutes(
     runtime: opts.runtime,
     ...(opts.gitlab ? { rateLimiter: opts.gitlab } : {}),
   })
-  // Billing exists only in the hosted (Workers) build. Self-hosted Deno is free
-  // software with no metering, no tiers and no Stripe — the route is not
-  // mounted there at all, not mounted-and-503.
-  if (opts.runtime === 'workers') {
-    registerStripeWebhookRoutes(app, {
-      runtime: opts.runtime,
-      ...(opts.stripe ? { rateLimiter: opts.stripe } : {}),
-    })
-  }
   return app
 }

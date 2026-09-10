@@ -306,10 +306,14 @@ reports every licensed server nothing covers (`servers_uncovered`), and
 notes bought-ahead quantity (`purchased_unused`, informational). **Alert,
 never auto-correct**: an error-level structured log and the last report in
 `BILLING_RECONCILE_REPORT` for the admin surface. No Stripe write, no
-license write.
+license write. Reconcile does **not** refetch Stripe and is not recovery
+for a missed webhook — that is `runPendingStripeProjections` on the same
+maintenance tick, which retries claimed deliveries whose `projected_at` is
+still null.
 
 Both run as optional phases of the Workers maintenance cron
-(`src/daemon/cell/offline-sweep.ts`, minute-divisor predicates, each isolated
+(`src/daemon/cell/offline-sweep.ts`; stripe-projection every tick, grace
+clock and reconcile on minute-divisor predicates, each isolated
 by `runOptionalPhase`), and are skipped entirely when `resolveBillingConfig`
 returns `null`. The Deno maintenance tick has no billing phases.
 
@@ -490,15 +494,20 @@ bought nothing is refused by the hosted gate (`License tier not assigned`)
 
 Self-hosted TurboPanel is free software: run as much as you like, nothing is
 metered, nothing is billed. So the Deno runtime has **no billing surface and
-no billing behaviour**, not a mounted-but-503 one. Three gates, all on
-`runtime === 'workers'`, in the shared registrars both entrypoints call:
+no billing behaviour**, not a mounted-but-503 one. Shared registrars stay
+billing-free (no static Stripe import). The Workers entry mounts the hosted
+surface:
 
-- `registerWebhookRoutes` (`src/webhook/routes.ts`) mounts `/webhook/stripe`.
-- `registerClientRoutes` (`src/client/routes.ts`) mounts `/billing/*`.
-- `registerAdminRoutes` (`src/admin/routes.ts`) mounts the tier catalogue.
+- `src/workers.ts` calls `registerStripeWebhookRoutes` (`src/webhook/billing/stripe.ts`)
+  for `/webhook/stripe`.
+- `createApp({ registerBilling: registerBillingRoutes, getClientOpenApiSpec: getWorkersClientOpenApiSpec })`
+  mounts `/billing/*` and the Workers client spec.
+- `registerAdminRoutes({ registerTiers, getOpenApiSpec: getWorkersAdminOpenApiSpec })`
+  mounts the tier catalogue.
 
-The client and admin OpenAPI specs follow the same gate, so the self-hosted
-reference does not document routes it does not have. `deno-server.ts`
+The self-hosted OpenAPI builders (`src/client/openapi/index.ts`,
+`src/admin/openapi/index.ts`) do not import billing or tier definitions.
+`deno-server.ts`
 resolves no `BillingConfig`, builds no Stripe rate-limit bucket, and its
 maintenance tick has no grace-clock, reconcile or tier-notice phase; the
 grace clock and reconcile run on the Workers cron

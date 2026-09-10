@@ -41,11 +41,11 @@ gates own paths under `/webhook`, and a shared child router would be one more
 object to thread through `registerWebhookRoutes` for no behaviour.
 
 Registration happens in the entrypoints (`src/deno-server.ts`, `src/workers.ts`)
-next to `registerDaemonApiRoutes`, through the single `registerWebhookRoutes`
-call — **not** inside `registerClientRoutes`. The git kinds mount on both
-runtimes; the billing kind mounts on **Workers only** (`registerWebhookRoutes`
-gates it on `opts.runtime`), because self-hosted has no billing at all — a
-Deno instance answers `404` on `/webhook/stripe`, not `503`.
+next to `registerDaemonApiRoutes`. Git kinds go through the shared
+`registerWebhookRoutes` (billing-free). The billing kind is imported **only**
+from `src/workers.ts` (`registerStripeWebhookRoutes`) because self-hosted has
+no billing at all — a Deno instance answers `404` on `/webhook/stripe`, not
+`503`, and the Deno compile graph never sees Stripe.
 
 **Every layer in front of the instance has to know `/webhook`.** `Caddyfile`,
 `dev/orchestration/Caddyfile` (both listener blocks), and the `routes` patterns
@@ -223,11 +223,12 @@ orchestration `Caddyfile` (when the sibling checkout is present) and every
 
 A kind whose sender penalises slow handlers must not do its work inline.
 Stripe is one: a slow `invoice.created` handler delays finalising **every**
-automatic-collection invoice on the account for up to 72 hours. The Stripe
-gate's `dispatch` therefore schedules the projection and answers
-`accepted({ scheduled: true })` at once; the work runs after the response
+automatic-collection invoice on the account for up to 72 hours. The Stripe gate's `dispatch` therefore stores the event ref on the claimed
+delivery row, then schedules the projection and answers `accepted` at once;
+the work runs after the response
 (`runAfterResponse` in `src/lib/http/after-response.ts` — `waitUntil` on
-Workers, a detached promise on Deno).
+Workers, a detached promise on Deno). A failed durable handoff **releases
+the claim** and answers retryable `5xx` so Stripe will retry.
 
 Two rules come with that:
 
@@ -247,10 +248,21 @@ Two rules come with that:
   from current state. Unknown types are a logged no-op after the `200`.
 
 **Residual risk, stated plainly:** the delivery claim (step 5) is taken
-*before* the async work, so a crash mid-task leaves the ledger claimed and a
-Stripe retry would `204`. Recovery is the reconciliation sweep
-(`src/lib/billing/reconcile.ts`), not the ledger. The task is kept small and idempotent so the window is
-narrow.
+*before* the after-response task, so a crash mid-task leaves the ledger
+claimed and a Stripe retry would `204`. Recovery is the durable object-ref
+on that row plus `runPendingStripeProjections` on the maintenance tick
+(`src/daemon/cell/offline-sweep.ts`) — **not** `reconcile.ts`, which only
+compares Postgres seats to licenses and never refetches Stripe. The sweep
+lists only Stripe rows whose object-ref handoff is complete
+(`object_id IS NOT NULL`); a claim that has not yet been handed off is
+not pending work and must not be settled. The task is kept small and
+idempotent so the window is narrow.
+
+The provider never sees internal dispatch results: accepted deliveries
+answer `{ ok: true }`; retryable faults answer `{ error: 'retry' }` with
+`503`. Unexpected exceptions after the claim release it (best-effort) and
+ask for a retry. Malformed signed JSON after the claim is `400` with the
+claim kept — providers retry 5xx, not a body that will never parse.
 
 ## Events
 

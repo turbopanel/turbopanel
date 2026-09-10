@@ -204,6 +204,32 @@ export function resolveDaemonWsInboundLimits(env: {
   }
 }
 
+export function createLocalTokenBucketLimiter(opts: {
+  limit: number
+  periodSeconds: number
+}): RateLimiter {
+  const buckets = new Map<string, { tokens: number; lastMs: number }>()
+  const capacity = opts.limit
+  const msPerToken = (opts.periodSeconds * 1000) / opts.limit
+
+  return {
+    async limit(args: { key: string }): Promise<{ success: boolean }> {
+      const now = Date.now()
+      let bucket = buckets.get(args.key)
+      if (!bucket) {
+        bucket = { tokens: capacity, lastMs: now }
+        buckets.set(args.key, bucket)
+      }
+      const elapsed = now - bucket.lastMs
+      bucket.tokens = Math.min(capacity, bucket.tokens + elapsed / msPerToken)
+      bucket.lastMs = now
+      if (bucket.tokens < 1) return { success: false }
+      bucket.tokens -= 1
+      return { success: true }
+    },
+  }
+}
+
 export function createRedisRateLimiter(opts: {
   client: RedisCellClient
   limit: number
@@ -214,8 +240,11 @@ export function createRedisRateLimiter(opts: {
    *   broker hiccup never locks out enrolled daemons.
    * - `'closed'`: deny (`success: false`) — required for client-auth throttling
    *   so Redis failure cannot fail open into unthrottled login/OTP/install.
+   * - `'local'`: fall through to a process-local token bucket with the same
+   *   limit/period. Used for webhook ingress so a Redis blip still throttles
+   *   per peer instead of making the surface unlimited.
    */
-  onError?: 'open' | 'closed'
+  onError?: 'open' | 'closed' | 'local'
 }): RateLimiter {
   const capacity = opts.limit
   const msPerToken = (opts.periodSeconds * 1000) / opts.limit
@@ -225,6 +254,12 @@ export function createRedisRateLimiter(opts: {
   )
   const { client } = opts
   const onError = opts.onError ?? 'open'
+  const local = onError === 'local'
+    ? createLocalTokenBucketLimiter({
+      limit: opts.limit,
+      periodSeconds: opts.periodSeconds,
+    })
+    : null
 
   return {
     async limit(args: { key: string }): Promise<{ success: boolean }> {
@@ -244,6 +279,7 @@ export function createRedisRateLimiter(opts: {
           'daemon-rate-limit',
           `eval failed for ${args.key}: ${String(err)}`,
         )
+        if (local) return await local.limit(args)
         return { success: onError === 'open' }
       }
     },

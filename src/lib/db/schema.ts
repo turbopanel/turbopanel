@@ -3976,13 +3976,19 @@ export const repository = pgTable(
  * (or, for Stripe, in the event body) before the signature has been checked
  * and long before the payload has been matched to a tenant, so there is no
  * organization to scope the row to.
- * The row holds no payload, no secret, and nothing user-visible: it is the
- * provider's delivery id plus the moment it was accepted (`createdAt`), so a
- * redelivered webhook can be answered without re-running its side effects.
+ * The row holds no secret and nothing user-visible. Git deliveries store
+ * only the provider delivery id plus the moment it was accepted
+ * (`createdAt`), so a redelivery can be answered without re-running side
+ * effects. Stripe rows additionally carry the minimal object ref
+ * (`objectId` / `objectType`) until projection has settled (`projectedAt`),
+ * so a crash after the 2xx cannot drop entitlement: the maintenance sweep
+ * retries pending Stripe work rather than treating the claim as done.
  *
  * Rows are pruned by the shared maintenance sweep after
  * `WEBHOOK_DELIVERY_RETENTION_MS` (see `src/lib/db/webhook-delivery-records.ts`)
- * — GitHub retries a failed delivery for hours, not weeks.
+ * — GitHub retries a failed delivery for hours, not weeks. Pending Stripe
+ * projections (`provider = 'stripe' AND projected_at IS NULL`) are excluded
+ * from that prune until they settle.
  */
 export const webhookDelivery = pgTable(
   "delivery",
@@ -4005,9 +4011,25 @@ export const webhookDelivery = pgTable(
     externalDeliveryId: text("external_delivery_id").notNull(),
     /** Provider event name (`push`, `check_suite`, …) — tracing only. */
     event: text(),
+    /** Stripe `data.object.id` — durable projection handoff; unused for git. */
+    objectId: text("object_id"),
+    /** Stripe `data.object.object` — durable projection handoff; unused for git. */
+    objectType: text("object_type"),
+    /**
+     * When the Stripe projection settled (success, skip, or permanent error).
+     * `null` means pending retry. Git rows stay null.
+     */
+    projectedAt: timestamp("projected_at", {
+      precision: 3,
+      withTimezone: true,
+      mode: "string",
+    }),
   },
   (table) => [
     index("idx_delivery_created_at").using("btree", table.createdAt.asc()),
+    index("idx_delivery_stripe_pending")
+      .using("btree", table.createdAt.asc())
+      .where(sql`${table.provider} = 'stripe' AND ${table.projectedAt} IS NULL`),
     // Widened beyond the git kinds when billing landed: the same ledger claims
     // Stripe event ids (`src/webhook/billing/stripe.ts`).
     check(

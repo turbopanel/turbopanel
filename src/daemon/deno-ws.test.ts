@@ -1856,7 +1856,7 @@ function createRecordedPlanDb(serverId: string): Db {
   } as unknown as Db;
 }
 
-test("live WS self-hosted reconnect does not replay a recorded capability plan", async () => {
+test("live WS self-hosted reconnect clears a leftover hosted capability plan", async () => {
   const secrets = await createDaemonJwtSecrets();
   const serverId = "srv-live-self-hosted-plan-skip";
   const tracking = createTrackingDaemonCell(serverId);
@@ -1881,6 +1881,12 @@ test("live WS self-hosted reconnect does not replay a recorded capability plan",
           envelope.kind === "capability-plan-update"
         ),
         false,
+      );
+      assertEquals(
+        tracking.enqueued.some((envelope) =>
+          envelope.kind === "capability-plan-clear"
+        ),
+        true,
       );
       ws.close(1000, "done");
     },

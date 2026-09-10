@@ -325,12 +325,14 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
   })
   // Inbound GitHub webhooks: keyed per peer address, not per server, because the
   // caller has no identity until its HMAC has been checked (see
-  // `githubWebhookRateLimitKey`). Fail-open like the daemon limiters — a Redis
-  // hiccup must not start dropping deliveries GitHub will not resend forever.
+  // `githubWebhookRateLimitKey`). Redis eval failures fall through to a
+  // process-local token bucket so a broker hiccup still throttles per peer
+  // instead of making ingress unlimited (daemon connect/REST stay fail-open).
   const githubWebhookLimiter = createRedisRateLimiter({
     client: daemonCellRegistry.client,
     limit: githubWebhookRate.limit,
     periodSeconds: githubWebhookRate.periodSeconds,
+    onError: 'local',
   })
   // GitLab gets its own bucket rather than sharing GitHub's: the two are
   // independent senders and one flooding must not start dropping the other's
@@ -339,6 +341,7 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
     client: daemonCellRegistry.client,
     limit: gitlabWebhookRate.limit,
     periodSeconds: gitlabWebhookRate.periodSeconds,
+    onError: 'local',
   })
   // Durable, globally-shared client-auth throttle over Redis (same infrastructure
   // as the daemon limiters). Auth uses onError: 'closed' so a Redis hiccup cannot
@@ -420,9 +423,7 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
   })
   // Unversioned, session-free surface: mounted on the top-level app next to the
   // daemon API rather than under CLIENT_API_PREFIX, and authenticating itself.
-  // One call for every webhook kind — see `src/webhook/AGENTS.md`. Billing
-  // (`/webhook/stripe`) is hosted-only: the registrar does not mount it for
-  // the Deno runtime, so there is no Stripe bucket here.
+  // Git kinds only — `/webhook/stripe` is hosted-only and is not imported here.
   registerWebhookRoutes(app, {
     runtime: 'deno',
     github: githubWebhookLimiter,

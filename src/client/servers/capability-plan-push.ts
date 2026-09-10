@@ -1,7 +1,7 @@
 /**
- * Best-effort `capability-plan-update` cell push — mirrors
- * `metrics-routes.ts`'s `pushHardwareProfileUpdate`. Enqueue failures are
- * logged and never thrown: the daemon still has server-side truncation as
+ * Best-effort `capability-plan-update` / `capability-plan-clear` cell push —
+ * mirrors `metrics-routes.ts`'s `pushHardwareProfileUpdate`. Enqueue failures
+ * are logged and never thrown: the daemon still has server-side truncation as
  * defense-in-depth, and the next attach/ingest will retry.
  */
 import type { Db } from "../../db.ts";
@@ -24,6 +24,11 @@ type CapabilityPlanUpdateEnvelope = Extract<
   { kind: "capability-plan-update" }
 >;
 
+type CapabilityPlanClearEnvelope = Extract<
+  DaemonOutboundEnvelope,
+  { kind: "capability-plan-clear" }
+>;
+
 export function buildCapabilityPlanUpdateEnvelope(
   plan: MetricsCapabilityPlan,
   generation: number,
@@ -38,26 +43,33 @@ export function buildCapabilityPlanUpdateEnvelope(
   };
 }
 
-export async function enqueueCapabilityPlanUpdate(
+export function buildCapabilityPlanClearEnvelope(): CapabilityPlanClearEnvelope {
+  return {
+    kind: "capability-plan-clear",
+    deliveryId: generateDeliveryId(),
+    requestId: generateRequestId(),
+    at: new Date().toISOString(),
+  };
+}
+
+async function enqueueCapabilityPlanEnvelope(
   registry: DaemonCellRegistry | undefined,
   serverId: string,
-  plan: MetricsCapabilityPlan,
-  generation: number,
+  envelope: DaemonOutboundEnvelope,
 ): Promise<boolean> {
   if (!registry) return false;
 
-  const envelope = buildCapabilityPlanUpdateEnvelope(plan, generation);
   cellTrace("request-start", {
     requestId: envelope.requestId,
     serverId,
-    kind: "capability-plan-update",
+    kind: envelope.kind,
   });
   try {
     await registry.getCell(serverId).enqueue(envelope);
     cellTrace("request-enqueued", {
       requestId: envelope.requestId,
       serverId,
-      kind: "capability-plan-update",
+      kind: envelope.kind,
       deliveryId: envelope.deliveryId,
     });
     return true;
@@ -66,15 +78,39 @@ export async function enqueueCapabilityPlanUpdate(
     cellTrace("request-result", {
       requestId: envelope.requestId,
       serverId,
-      kind: "capability-plan-update",
+      kind: envelope.kind,
       status: "failed",
       error: message,
     });
     console.warn(
-      `capability-plan-update enqueue failed for ${serverId}: ${message}`,
+      `${envelope.kind} enqueue failed for ${serverId}: ${message}`,
     );
     return false;
   }
+}
+
+export async function enqueueCapabilityPlanUpdate(
+  registry: DaemonCellRegistry | undefined,
+  serverId: string,
+  plan: MetricsCapabilityPlan,
+  generation: number,
+): Promise<boolean> {
+  return await enqueueCapabilityPlanEnvelope(
+    registry,
+    serverId,
+    buildCapabilityPlanUpdateEnvelope(plan, generation),
+  );
+}
+
+export async function enqueueCapabilityPlanClear(
+  registry: DaemonCellRegistry | undefined,
+  serverId: string,
+): Promise<boolean> {
+  return await enqueueCapabilityPlanEnvelope(
+    registry,
+    serverId,
+    buildCapabilityPlanClearEnvelope(),
+  );
 }
 
 export async function enqueueLatestRecordedCapabilityPlan(
@@ -83,9 +119,21 @@ export async function enqueueLatestRecordedCapabilityPlan(
   enqueue: (envelope: DaemonOutboundEnvelope) => unknown,
   deployment: MetricsDeploymentKind = "hosted",
 ): Promise<void> {
-  // Self-hosted never caps outbound samples — do not replay a leftover
-  // finite plan that would start truncating after reconnect.
-  if (deployment === "self-hosted") return;
+  // Self-hosted never caps outbound samples. Tell a remote daemon that
+  // previously stored a hosted plan to delete it — skipping the push
+  // leaves the leftover file in place.
+  if (deployment === "self-hosted") {
+    try {
+      await enqueue(buildCapabilityPlanClearEnvelope());
+    } catch (err) {
+      console.warn(
+        `capability-plan-clear attach push failed for ${serverId}: ${
+          String(err)
+        }`,
+      );
+    }
+    return;
+  }
   try {
     const latest = await getLatestCapabilityPlanGeneration(db, serverId);
     if (!latest) return;

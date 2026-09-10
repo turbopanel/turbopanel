@@ -13,14 +13,42 @@ import { deriveEncryptionSecretsConfig } from '../../client/authn/secrets.ts'
 import { parseTestSecretsConfig } from '../../test-fixtures/secrets.ts'
 import { STRIPE_WEBHOOK_PATH } from '../../surfaces.ts'
 import type { BillingConfig } from '../../lib/billing/config.ts'
-import { createStripeClient, type StripeFetch } from '../../lib/billing/client.ts'
+import {
+  createStripeClient,
+  type StripeFetch,
+} from '../../lib/billing/client.ts'
 import { computeStripeSignature } from '../../lib/billing/webhook-signature.ts'
 import { STRIPE_CUSTOMER_ORGANIZATION_METADATA_KEY } from '../../lib/billing/customer-subject.ts'
-import { license, payer, server, setting, subscription, subscriptionItem, tier, webhookDelivery } from '../../lib/db/schema.ts'
+import {
+  license,
+  payer,
+  server,
+  setting,
+  subscription,
+  subscriptionItem,
+  tier,
+  webhookDelivery,
+} from '../../lib/db/schema.ts'
+import {
+  claimWebhookDelivery,
+  enqueueStripeProjection,
+  listPendingStripeProjections,
+} from '../../lib/db/webhook-delivery-records.ts'
 import { createMemoryDb, type MemoryDb } from '../../test-fixtures/memory-db.ts'
-import { emptyLedger, newDeferredIntent, readPendingChanges, withIntent, writePendingChanges } from '../../lib/billing/pending-changes.ts'
+import {
+  emptyLedger,
+  newDeferredIntent,
+  readPendingChanges,
+  withIntent,
+  writePendingChanges,
+} from '../../lib/billing/pending-changes.ts'
 import { registerWebhookRoutes } from '../routes.ts'
-import { PROJECTED_STRIPE_EVENT_TYPES, projectSubscriptionById } from './stripe-projection.ts'
+import {
+  PROJECTED_STRIPE_EVENT_TYPES,
+  projectAndSettleStripeEvent,
+  projectSubscriptionById,
+  runPendingStripeProjections,
+} from './stripe-projection.ts'
 import {
   registerStripeWebhookRoutes,
   STRIPE_WEBHOOK_MAX_BODY_BYTES,
@@ -47,7 +75,9 @@ const CONFIG: BillingConfig = {
 
 type Trace = string[]
 
-type StubDb = MemoryDb & { inserts: { table: string; values: Record<string, unknown> }[] }
+type StubDb = MemoryDb & {
+  inserts: { table: string; values: Record<string, unknown> }[]
+}
 
 function tableName(table: unknown): string {
   if (table === webhookDelivery) return 'delivery'
@@ -61,8 +91,17 @@ function tableName(table: unknown): string {
 
 /** A tier row is a ladder label bound to a provider product; the item's price names that product. */
 const TIER_ROW = {
-  id: TIER_ID, createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
-  label: 'S1', rank: 1, provider: 'stripe', providerProductId: 'prod_s1', priceCents: 1000, currency: 'usd', isCustom: false, isActive: true,
+  id: TIER_ID,
+  createdAt: '2026-09-01T00:00:00.000Z',
+  updatedAt: '2026-09-01T00:00:00.000Z',
+  label: 'S1',
+  rank: 1,
+  provider: 'stripe',
+  providerProductId: 'prod_s1',
+  priceCents: 1000,
+  currency: 'usd',
+  isCustom: false,
+  isActive: true,
 }
 
 /**
@@ -71,9 +110,24 @@ const TIER_ROW = {
  * records the writes the gate tests assert on (`insert:` / `delete:` of
  * the projection tables, plus the delivery claim) in order.
  */
-function stubDb(trace: Trace, opts: { claimed?: boolean; licenses?: Record<string, unknown>[] } = {}): StubDb {
+function stubDb(
+  trace: Trace,
+  opts: { claimed?: boolean; licenses?: Record<string, unknown>[] } = {},
+): StubDb {
   const db = createMemoryDb([
-    [webhookDelivery, opts.claimed === false ? [{ id: 'd0', provider: 'stripe', externalDeliveryId: 'evt_1', event: 'x', createdAt: 'c', updatedAt: 'c' }] : []],
+    [
+      webhookDelivery,
+      opts.claimed === false
+        ? [{
+          id: 'd0',
+          provider: 'stripe',
+          externalDeliveryId: 'evt_1',
+          event: 'x',
+          createdAt: 'c',
+          updatedAt: 'c',
+        }]
+        : [],
+    ],
     [payer, []],
     [subscription, []],
     [subscriptionItem, []],
@@ -85,6 +139,7 @@ function stubDb(trace: Trace, opts: { claimed?: boolean; licenses?: Record<strin
   const inserts: { table: string; values: Record<string, unknown> }[] = []
   const origInsert = db.insert.bind(db)
   const origDelete = db.delete.bind(db)
+  const origUpdate = db.update.bind(db)
   const traced = Object.assign(db, {
     inserts,
     insert: (table: unknown) => {
@@ -99,6 +154,11 @@ function stubDb(trace: Trace, opts: { claimed?: boolean; licenses?: Record<strin
           return chain.values(values)
         },
       }
+    },
+    update: (table: unknown) => {
+      const name = tableName(table)
+      if (name !== 'unknown') trace.push(`update:${name}`)
+      return origUpdate(table as Parameters<typeof origUpdate>[0])
     },
     delete: (table: unknown) => {
       const name = tableName(table)
@@ -118,13 +178,23 @@ const SUBSCRIPTION_FROM_STRIPE = {
     id: 'cus_1',
     object: 'customer',
     metadata: { [STRIPE_CUSTOMER_ORGANIZATION_METADATA_KEY]: ORG_ID },
-    tax_ids: { object: 'list', data: [{ value: 'DE123456789' }], has_more: false },
+    tax_ids: {
+      object: 'list',
+      data: [{ value: 'DE123456789' }],
+      has_more: false,
+    },
   },
   items: {
     object: 'list',
     has_more: false,
     data: [
-      { id: 'si_1', object: 'subscription_item', quantity: 4, price: { id: 'price_s1', product: 'prod_s1' }, current_period_end: 1_800_000_000 },
+      {
+        id: 'si_1',
+        object: 'subscription_item',
+        quantity: 4,
+        price: { id: 'price_s1', product: 'prod_s1' },
+        current_period_end: 1_800_000_000,
+      },
     ],
   },
 }
@@ -137,25 +207,51 @@ const PRODUCT_FROM_STRIPE = {
   name: 'S1',
   metadata: { turbopanel_tier: 'S1' },
   default_price: {
-    id: 'price_s1', object: 'price', active: true, type: 'recurring', currency: 'usd', unit_amount: 1500,
-    recurring: { interval: 'month', interval_count: 1 }, billing_scheme: 'per_unit', tax_behavior: 'exclusive', livemode: false,
+    id: 'price_s1',
+    object: 'price',
+    active: true,
+    type: 'recurring',
+    currency: 'usd',
+    unit_amount: 1500,
+    recurring: { interval: 'month', interval_count: 1 },
+    billing_scheme: 'per_unit',
+    tax_behavior: 'exclusive',
+    livemode: false,
   },
 }
 
-function stripeFetchDouble(calls: string[], subscriptionFromStripe: Record<string, unknown> = SUBSCRIPTION_FROM_STRIPE): StripeFetch {
+function stripeFetchDouble(
+  calls: string[],
+  subscriptionFromStripe: Record<string, unknown> = SUBSCRIPTION_FROM_STRIPE,
+): StripeFetch {
   return (input) => {
     const url = new URL(input)
     calls.push(`${url.pathname}${url.search}`)
     if (url.pathname === '/v1/subscriptions/sub_1') {
-      return Promise.resolve(new Response(JSON.stringify(subscriptionFromStripe), { status: 200 }))
+      return Promise.resolve(
+        new Response(JSON.stringify(subscriptionFromStripe), { status: 200 }),
+      )
     }
     if (url.pathname === '/v1/invoices/in_1') {
-      return Promise.resolve(new Response(JSON.stringify({ id: 'in_1', subscription: 'sub_1' }), { status: 200 }))
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: 'in_1', subscription: 'sub_1' }), {
+          status: 200,
+        }),
+      )
     }
     if (url.pathname === '/v1/products/prod_s1') {
-      return Promise.resolve(new Response(JSON.stringify(PRODUCT_FROM_STRIPE), { status: 200 }))
+      return Promise.resolve(
+        new Response(JSON.stringify(PRODUCT_FROM_STRIPE), { status: 200 }),
+      )
     }
-    return Promise.resolve(new Response(JSON.stringify({ error: { type: 'invalid_request_error', message: 'no' } }), { status: 404 }))
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          error: { type: 'invalid_request_error', message: 'no' },
+        }),
+        { status: 404 },
+      ),
+    )
   }
 }
 
@@ -172,16 +268,19 @@ async function buildApp(opts: {
   claimed?: boolean
   viaRegisterWebhookRoutes?: boolean
   /**
-   * Billing is hosted-only and `registerWebhookRoutes` mounts this gate on
-   * Workers alone (pinned below). The leaf tests still run the gate under the
+   * Billing is hosted-only. `registerWebhookRoutes` is billing-free; the
+   * Workers entry mounts Stripe via {@link registerStripeWebhookRoutes}.
+   * The leaf tests still run the gate under the
    * `deno` label because its Workers branch (`openTaskDb`) opens a real
    * Postgres client from `postgresConnectionString`, which a host-free test
    * cannot supply; the `deno` branch uses the injected `db` instead. The
    * runtime label changes only that and the trusted-IP header set.
    */
   runtime?: 'deno' | 'workers'
+  mountStripe?: boolean
   licenses?: Record<string, unknown>[]
   subscriptionFromStripe?: Record<string, unknown>
+  stripeFetch?: StripeFetch
 } = {}): Promise<Harness> {
   const runtime = opts.runtime ?? 'deno'
   const trace: Trace = []
@@ -203,6 +302,9 @@ async function buildApp(opts: {
   })
   if (opts.viaRegisterWebhookRoutes) {
     registerWebhookRoutes(app, { runtime })
+    if (opts.mountStripe) {
+      registerStripeWebhookRoutes(app, { runtime })
+    }
   } else {
     registerStripeWebhookRoutes(app, {
       runtime,
@@ -216,7 +318,11 @@ async function buildApp(opts: {
         trace.push('scheduled')
         scheduled.push(task)
       },
-      createClient: (config) => createStripeClient(config, { fetch: stripeFetchDouble(stripeCalls, opts.subscriptionFromStripe) }),
+      createClient: (config) =>
+        createStripeClient(config, {
+          fetch: opts.stripeFetch ??
+            stripeFetchDouble(stripeCalls, opts.subscriptionFromStripe),
+        }),
     })
   }
   return { app, trace, db, scheduled, stripeCalls }
@@ -231,7 +337,11 @@ async function signedPost(
   const raw = new TextEncoder().encode(body)
   const t = opts.timestamp ?? NOW_SECONDS
   const header = opts.header === undefined
-    ? `t=${t},v1=${await computeStripeSignature(raw, t, opts.secret ?? SIGNING_SECRET)}`
+    ? `t=${t},v1=${await computeStripeSignature(
+      raw,
+      t,
+      opts.secret ?? SIGNING_SECRET,
+    )}`
     : opts.header
   return new Request(`http://instance${STRIPE_WEBHOOK_PATH}`, {
     method: 'POST',
@@ -243,34 +353,59 @@ async function signedPost(
   })
 }
 
-function event(type: string, object: Record<string, unknown>, id = 'evt_1'): string {
+function event(
+  type: string,
+  object: Record<string, unknown>,
+  id = 'evt_1',
+): string {
   return JSON.stringify({ id, object: 'event', type, data: { object } })
 }
 
 test('billing off (no config) answers 503 stripe_webhook_not_configured, not 401', async () => {
   const h = await buildApp({ config: null })
-  const res = await h.app.request(await signedPost(event('customer.subscription.updated', { id: 'sub_1', object: 'subscription' })))
+  const res = await h.app.request(
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }),
+    ),
+  )
   assertEquals(res.status, 503)
   assertEquals(await res.json(), { error: STRIPE_WEBHOOK_NOT_CONFIGURED })
   assertEquals(h.trace.includes('insert:delivery'), false)
 })
 
 test('a key without a signing secret is also unconfigured — never an unverified accept', async () => {
-  const h = await buildApp({ config: { ...CONFIG, webhookSigningSecret: null } })
-  const res = await h.app.request(await signedPost(event('customer.subscription.updated', { id: 'sub_1', object: 'subscription' })))
+  const h = await buildApp({
+    config: { ...CONFIG, webhookSigningSecret: null },
+  })
+  const res = await h.app.request(
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }),
+    ),
+  )
   assertEquals(res.status, 503)
   assertEquals(h.trace, ['limiter'])
 })
 
 test('a bad signature is 401 before any database write', async () => {
   const h = await buildApp()
-  const body = event('customer.subscription.updated', { id: 'sub_1', object: 'subscription' })
-  for (const req of [
-    await signedPost(body, { secret: 'whsec_wrong' }),
-    await signedPost(body, { header: null }),
-    await signedPost(body, { header: 'garbage' }),
-    await signedPost(body, { timestamp: NOW_SECONDS - 3600 }),
-  ]) {
+  const body = event('customer.subscription.updated', {
+    id: 'sub_1',
+    object: 'subscription',
+  })
+  for (
+    const req of [
+      await signedPost(body, { secret: 'whsec_wrong' }),
+      await signedPost(body, { header: null }),
+      await signedPost(body, { header: 'garbage' }),
+      await signedPost(body, { timestamp: NOW_SECONDS - 3600 }),
+    ]
+  ) {
     const res = await h.app.request(req)
     assertEquals(res.status, 401)
   }
@@ -280,14 +415,23 @@ test('a bad signature is 401 before any database write', async () => {
 
 test('a signed body with no event id is 400', async () => {
   const h = await buildApp()
-  const res = await h.app.request(await signedPost(JSON.stringify({ object: 'event', type: 'x' })))
+  const res = await h.app.request(
+    await signedPost(JSON.stringify({ object: 'event', type: 'x' })),
+  )
   assertEquals(res.status, 400)
   assertEquals(h.trace.includes('insert:delivery'), false)
 })
 
 test('a duplicate event id answers 204 and schedules nothing', async () => {
   const h = await buildApp({ claimed: false })
-  const res = await h.app.request(await signedPost(event('customer.subscription.updated', { id: 'sub_1', object: 'subscription' })))
+  const res = await h.app.request(
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }),
+    ),
+  )
   assertEquals(res.status, 204)
   assertEquals(h.trace.at(-1), 'insert:delivery')
   assertEquals(h.scheduled.length, 0)
@@ -299,15 +443,23 @@ test('a duplicate event id answers 204 and schedules nothing', async () => {
 
 test('a valid delivery answers 200 immediately, without awaiting the projection', async () => {
   const h = await buildApp()
-  const res = await h.app.request(await signedPost(event('customer.subscription.updated', { id: 'sub_1', object: 'subscription' })))
+  const res = await h.app.request(
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }),
+    ),
+  )
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'customer.subscription.updated',
-    result: { scheduled: true },
-  })
-  // Order: limiter → claim → schedule. Nothing from the projection has run.
-  assertEquals(h.trace, ['limiter', 'insert:delivery', 'scheduled'])
+  assertEquals(await res.json(), { ok: true })
+  // Order: limiter → claim → durable handoff → schedule. Nothing from the projection has run.
+  assertEquals(h.trace, [
+    'limiter',
+    'insert:delivery',
+    'update:delivery',
+    'scheduled',
+  ])
   assertEquals(h.stripeCalls, [])
   assertEquals(h.scheduled.length, 1)
 
@@ -317,10 +469,20 @@ test('a valid delivery answers 200 immediately, without awaiting the projection'
   assertEquals(h.stripeCalls, [
     '/v1/subscriptions/sub_1?expand%5B0%5D=customer&expand%5B1%5D=customer.tax_ids',
   ])
-  // The projection writes, then the entitlement sync takes and releases the lease.
+  // The projection writes, then the entitlement sync takes and releases the
+  // lease, then the delivery is marked projected.
   assertEquals(
-    h.trace.slice(3),
-    ['insert:payer', 'insert:subscription', 'delete:seat', 'insert:seat', 'insert:setting', 'delete:setting', 'delete:setting'],
+    h.trace.slice(4),
+    [
+      'insert:payer',
+      'insert:subscription',
+      'delete:seat',
+      'insert:seat',
+      'insert:setting',
+      'delete:setting',
+      'delete:setting',
+      'update:delivery',
+    ],
   )
   const [, payerInsert, subInsert, seatInsert] = h.db.inserts
   assertEquals(payerInsert?.values.organizationId, ORG_ID)
@@ -329,7 +491,10 @@ test('a valid delivery answers 200 immediately, without awaiting the projection'
   assertEquals(subInsert?.values.providerSubscriptionId, 'sub_1')
   assertEquals(subInsert?.values.status, 'active')
   // `current_period_end` came from the item (basil API line).
-  assertEquals(subInsert?.values.currentPeriodEnd, new Date(1_800_000_000 * 1000).toISOString())
+  assertEquals(
+    subInsert?.values.currentPeriodEnd,
+    new Date(1_800_000_000 * 1000).toISOString(),
+  )
   assertEquals(seatInsert?.values.tierId, TIER_ID)
   assertEquals(seatInsert?.values.quantity, 4)
   assertEquals(seatInsert?.values.providerItemId, 'si_1')
@@ -339,7 +504,15 @@ test('a valid delivery answers 200 immediately, without awaiting the projection'
 
 test('an invoice event resolves its subscription and projects that', async () => {
   const h = await buildApp()
-  const res = await h.app.request(await signedPost(event('invoice.payment_failed', { id: 'in_1', object: 'invoice' }, 'evt_2')))
+  const res = await h.app.request(
+    await signedPost(
+      event(
+        'invoice.payment_failed',
+        { id: 'in_1', object: 'invoice' },
+        'evt_2',
+      ),
+    ),
+  )
   assertEquals(res.status, 200)
   await h.scheduled[0]!()
   assertEquals(h.stripeCalls[0], '/v1/invoices/in_1')
@@ -354,10 +527,24 @@ test('a subscription carrying a pending_update projects the OLD quantities — e
     subscriptionFromStripe: {
       ...SUBSCRIPTION_FROM_STRIPE,
       // Stripe parked "5 seats" under pending_update; `items` still says 4.
-      pending_update: { expires_at: 1_800_100_000, subscription_items: [{ id: 'si_1', quantity: 5, price: { id: 'price_s1' } }] },
+      pending_update: {
+        expires_at: 1_800_100_000,
+        subscription_items: [{
+          id: 'si_1',
+          quantity: 5,
+          price: { id: 'price_s1' },
+        }],
+      },
     },
   })
-  const res = await h.app.request(await signedPost(event('customer.subscription.updated', { id: 'sub_1', object: 'subscription' }, 'evt_4')))
+  const res = await h.app.request(
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }, 'evt_4'),
+    ),
+  )
   assertEquals(res.status, 200)
   await h.scheduled[0]!()
   const seats = h.db.rows(subscriptionItem)
@@ -366,23 +553,59 @@ test('a subscription carrying a pending_update projects the OLD quantities — e
 })
 
 test('pending_update_applied lands the intent the committed items now show; pending_update_expired only reprojects and the intent survives', async () => {
-  const licenses = [{ id: LICENSE_ID, organizationId: ORG_ID, serverId: null, name: null, token: 'x', revokedAt: null, createdAt: 'c', updatedAt: 'c' }]
+  const licenses = [{
+    id: LICENSE_ID,
+    organizationId: ORG_ID,
+    serverId: null,
+    name: null,
+    token: 'x',
+    revokedAt: null,
+    createdAt: 'c',
+    updatedAt: 'c',
+  }]
   // One S1 seat given back at the boundary, written when the tier counted 4.
-  const intent = () => newDeferredIntent('release-seat', { fromTierId: TIER_ID, toTierId: null, landsAt: null, fromQuantity: 4 })
+  const intent = () =>
+    newDeferredIntent('release-seat', {
+      fromTierId: TIER_ID,
+      toTierId: null,
+      landsAt: null,
+      fromQuantity: 4,
+    })
   applied: {
     // The committed items now count 3: the release has landed.
     const h = await buildApp({
       licenses,
       subscriptionFromStripe: {
         ...SUBSCRIPTION_FROM_STRIPE,
-        items: { object: 'list', has_more: false, data: [
-          { id: 'si_1', object: 'subscription_item', quantity: 3, price: { id: 'price_s1', product: 'prod_s1' }, current_period_end: 1_800_000_000 },
-        ] },
+        items: {
+          object: 'list',
+          has_more: false,
+          data: [
+            {
+              id: 'si_1',
+              object: 'subscription_item',
+              quantity: 3,
+              price: { id: 'price_s1', product: 'prod_s1' },
+              current_period_end: 1_800_000_000,
+            },
+          ],
+        },
       },
     })
-    await writePendingChanges(h.db, ORG_ID, withIntent(emptyLedger('sub_1'), intent()))
+    await writePendingChanges(
+      h.db,
+      ORG_ID,
+      withIntent(emptyLedger('sub_1'), intent()),
+    )
 
-    const res = await h.app.request(await signedPost(event('customer.subscription.pending_update_applied', { id: 'sub_1', object: 'subscription' }, 'evt_5')))
+    const res = await h.app.request(
+      await signedPost(
+        event('customer.subscription.pending_update_applied', {
+          id: 'sub_1',
+          object: 'subscription',
+        }, 'evt_5'),
+      ),
+    )
     assertEquals(res.status, 200)
     await h.scheduled[0]!()
     assertEquals(h.db.rows(subscriptionItem).map((row) => row.quantity), [3])
@@ -397,14 +620,30 @@ test('pending_update_applied lands the intent the committed items now show; pend
     // nothing landed, nothing dropped — expiry is a plain reprojection.
     const h = await buildApp({
       licenses,
-      subscriptionFromStripe: { ...SUBSCRIPTION_FROM_STRIPE, schedule: 'sub_sched_1' },
+      subscriptionFromStripe: {
+        ...SUBSCRIPTION_FROM_STRIPE,
+        schedule: 'sub_sched_1',
+      },
     })
     const written = intent()
-    await writePendingChanges(h.db, ORG_ID, withIntent(emptyLedger('sub_1'), written))
-    const res = await h.app.request(await signedPost(event('customer.subscription.pending_update_expired', { id: 'sub_1', object: 'subscription' }, 'evt_6')))
+    await writePendingChanges(
+      h.db,
+      ORG_ID,
+      withIntent(emptyLedger('sub_1'), written),
+    )
+    const res = await h.app.request(
+      await signedPost(
+        event('customer.subscription.pending_update_expired', {
+          id: 'sub_1',
+          object: 'subscription',
+        }, 'evt_6'),
+      ),
+    )
     assertEquals(res.status, 200)
     await h.scheduled[0]!()
-    assertEquals(h.stripeCalls, ['/v1/subscriptions/sub_1?expand%5B0%5D=customer&expand%5B1%5D=customer.tax_ids'])
+    assertEquals(h.stripeCalls, [
+      '/v1/subscriptions/sub_1?expand%5B0%5D=customer&expand%5B1%5D=customer.tax_ids',
+    ])
     assertEquals(h.db.rows(subscriptionItem).map((row) => row.quantity), [4])
     const { ledger } = await readPendingChanges(h.db, ORG_ID, 'sub_1')
     assertEquals(ledger.intents.map((i) => i.id), [written.id])
@@ -415,62 +654,152 @@ test('the two catalogue events are projected: product.updated refreshes the tier
   assertEquals(PROJECTED_STRIPE_EVENT_TYPES.includes('product.updated'), true)
   assertEquals(PROJECTED_STRIPE_EVENT_TYPES.includes('price.updated'), true)
   const h = await buildApp()
-  const res = await h.app.request(await signedPost(event('product.updated', { id: 'prod_s1', object: 'product' }, 'evt_7')))
+  const res = await h.app.request(
+    await signedPost(
+      event('product.updated', { id: 'prod_s1', object: 'product' }, 'evt_7'),
+    ),
+  )
   assertEquals(res.status, 200)
-  assertEquals(h.trace, ['limiter', 'insert:delivery', 'scheduled'])
+  assertEquals(h.trace, [
+    'limiter',
+    'insert:delivery',
+    'update:delivery',
+    'scheduled',
+  ])
   await h.scheduled[0]!()
-  assertEquals(h.stripeCalls, ['/v1/products/prod_s1?expand%5B0%5D=default_price'])
+  assertEquals(h.stripeCalls, [
+    '/v1/products/prod_s1?expand%5B0%5D=default_price',
+  ])
   assertEquals(h.db.rows(tier)[0]?.priceCents, 1500)
   assertEquals(h.db.rows(tier)[0]?.currency, 'usd')
   // No subscription was projected and no lease was taken.
-  assertEquals(h.trace.filter((t) => t.startsWith('insert:')), ['insert:delivery'])
+  assertEquals(h.trace.filter((t) => t.startsWith('insert:')), [
+    'insert:delivery',
+  ])
 })
 
 test('an unhandled event type is a logged no-op after the 200', async () => {
   const h = await buildApp()
-  const res = await h.app.request(await signedPost(event('charge.refunded', { id: 'ch_1', object: 'charge' }, 'evt_3')))
+  const res = await h.app.request(
+    await signedPost(
+      event('charge.refunded', { id: 'ch_1', object: 'charge' }, 'evt_3'),
+    ),
+  )
   assertEquals(res.status, 200)
   await h.scheduled[0]!()
   assertEquals(h.stripeCalls, [])
-  assertEquals(h.trace.filter((t) => t.startsWith('insert:')), ['insert:delivery'])
+  assertEquals(h.trace.filter((t) => t.startsWith('insert:')), [
+    'insert:delivery',
+  ])
 })
 
 test('the body ceiling is enforced from the declared length', async () => {
   const h = await buildApp()
   const req = await signedPost('{}', { header: 'irrelevant' })
   const oversized = new Request(req, {
-    headers: { ...Object.fromEntries(req.headers), 'content-length': String(STRIPE_WEBHOOK_MAX_BODY_BYTES + 1) },
+    headers: {
+      ...Object.fromEntries(req.headers),
+      'content-length': String(STRIPE_WEBHOOK_MAX_BODY_BYTES + 1),
+    },
   })
   const res = await h.app.request(oversized)
   assertEquals(res.status, 413)
 })
 
-test('registerWebhookRoutes mounts the Stripe kind on Workers; no :ref path exists', async () => {
-  const h = await buildApp({ viaRegisterWebhookRoutes: true, config: null, runtime: 'workers' })
-  const bare = await h.app.request(new Request(`http://instance${STRIPE_WEBHOOK_PATH}`, { method: 'POST', body: '{}' }))
+test('registerWebhookRoutes is billing-free; Workers mounts Stripe separately', async () => {
+  const shared = await buildApp({
+    viaRegisterWebhookRoutes: true,
+    config: null,
+    runtime: 'workers',
+  })
+  const unmounted = await shared.app.request(
+    new Request(`http://instance${STRIPE_WEBHOOK_PATH}`, {
+      method: 'POST',
+      body: '{}',
+    }),
+  )
+  assertEquals(unmounted.status, 404)
+
+  const h = await buildApp({
+    viaRegisterWebhookRoutes: true,
+    mountStripe: true,
+    config: null,
+    runtime: 'workers',
+  })
+  const bare = await h.app.request(
+    new Request(`http://instance${STRIPE_WEBHOOK_PATH}`, {
+      method: 'POST',
+      body: '{}',
+    }),
+  )
   assertEquals(bare.status, 503)
-  const scoped = await h.app.request(new Request(`http://instance${STRIPE_WEBHOOK_PATH}/some-ref`, { method: 'POST', body: '{}' }))
+  const scoped = await h.app.request(
+    new Request(`http://instance${STRIPE_WEBHOOK_PATH}/some-ref`, {
+      method: 'POST',
+      body: '{}',
+    }),
+  )
   assertEquals(scoped.status, 404)
 })
 
 test('registerWebhookRoutes does not mount the Stripe kind on Deno: self-hosted has no billing', async () => {
   // Even with a config on the context — the surface is absent, not 503.
   const h = await buildApp({ viaRegisterWebhookRoutes: true, runtime: 'deno' })
-  const res = await h.app.request(new Request(`http://instance${STRIPE_WEBHOOK_PATH}`, { method: 'POST', body: '{}' }))
+  const res = await h.app.request(
+    new Request(`http://instance${STRIPE_WEBHOOK_PATH}`, {
+      method: 'POST',
+      body: '{}',
+    }),
+  )
   assertEquals(res.status, 404)
   assertEquals(h.trace.includes('limiter'), false)
 })
 
 const TIER_S2 = '22222222-2222-4222-8222-222222222222'
-const TIER_S2_ROW = { ...TIER_ROW, id: TIER_S2, label: 'S2', rank: 2, providerProductId: 'prod_s2' }
+const TIER_S2_ROW = {
+  ...TIER_ROW,
+  id: TIER_S2,
+  label: 'S2',
+  rank: 2,
+  providerProductId: 'prod_s2',
+}
 
 /** A projected org with one seat row on `sub_1`, before the two-item refetch lands. */
 function projectedDb(): MemoryDb {
   const at = '2026-09-01T00:00:00.000Z'
   return createMemoryDb([
-    [payer, [{ id: 'payer-1', provider: 'stripe', providerCustomerId: 'cus_1', organizationId: ORG_ID, userId: null, taxId: null, createdAt: at, updatedAt: at }]],
-    [subscription, [{ id: 'sub-row', payerId: 'payer-1', providerSubscriptionId: 'sub_1', status: 'active', currentPeriodEnd: null, scheduleId: null, pastDueSince: null, graceExpiresAt: null, createdAt: at, updatedAt: at }]],
-    [subscriptionItem, [{ id: 'seat-old', subscriptionId: 'sub-row', tierId: TIER_ID, providerItemId: 'si_old', providerPriceId: 'price_s1', quantity: 4, createdAt: at, updatedAt: at }]],
+    [payer, [{
+      id: 'payer-1',
+      provider: 'stripe',
+      providerCustomerId: 'cus_1',
+      organizationId: ORG_ID,
+      userId: null,
+      taxId: null,
+      createdAt: at,
+      updatedAt: at,
+    }]],
+    [subscription, [{
+      id: 'sub-row',
+      payerId: 'payer-1',
+      providerSubscriptionId: 'sub_1',
+      status: 'active',
+      currentPeriodEnd: null,
+      scheduleId: null,
+      pastDueSince: null,
+      graceExpiresAt: null,
+      createdAt: at,
+      updatedAt: at,
+    }]],
+    [subscriptionItem, [{
+      id: 'seat-old',
+      subscriptionId: 'sub-row',
+      tierId: TIER_ID,
+      providerItemId: 'si_old',
+      providerPriceId: 'price_s1',
+      quantity: 4,
+      createdAt: at,
+      updatedAt: at,
+    }]],
     [tier, [TIER_ROW, TIER_S2_ROW]],
     [license, []],
     [server, []],
@@ -484,26 +813,55 @@ const TWO_ITEM_SUBSCRIPTION = {
     object: 'list',
     has_more: false,
     data: [
-      { id: 'si_1', object: 'subscription_item', quantity: 2, price: { id: 'price_s1', product: 'prod_s1' } },
-      { id: 'si_2', object: 'subscription_item', quantity: 1, price: { id: 'price_s2', product: 'prod_s2' } },
+      {
+        id: 'si_1',
+        object: 'subscription_item',
+        quantity: 2,
+        price: { id: 'price_s1', product: 'prod_s1' },
+      },
+      {
+        id: 'si_2',
+        object: 'subscription_item',
+        quantity: 1,
+        price: { id: 'price_s2', product: 'prod_s2' },
+      },
     ],
   },
 }
 
 test('the projection writes payer, subscription and seats inside one transaction', async () => {
   const db = projectedDb()
-  const client = createStripeClient(CONFIG, { fetch: stripeFetchDouble([], TWO_ITEM_SUBSCRIPTION) })
-  const outcome = await projectSubscriptionById({ db, client, now: '2026-09-07T12:00:00.000Z' }, 'sub_1')
+  const client = createStripeClient(CONFIG, {
+    fetch: stripeFetchDouble([], TWO_ITEM_SUBSCRIPTION),
+  })
+  const outcome = await projectSubscriptionById({
+    db,
+    client,
+    now: '2026-09-07T12:00:00.000Z',
+  }, 'sub_1')
   assertEquals(outcome.action, 'projected')
-  const seats = db.rows(subscriptionItem).map((row) => [row.providerItemId, row.tierId, row.providerPriceId, row.quantity])
-  assertEquals(seats, [['si_1', TIER_ID, 'price_s1', 2], ['si_2', TIER_S2, 'price_s2', 1]])
+  const seats = db.rows(subscriptionItem).map((
+    row,
+  ) => [row.providerItemId, row.tierId, row.providerPriceId, row.quantity])
+  assertEquals(seats, [['si_1', TIER_ID, 'price_s1', 2], [
+    'si_2',
+    TIER_S2,
+    'price_s2',
+    1,
+  ]])
   // Every projection write sits between `begin` and `commit`; nothing lands outside.
   const begin = db.ops.indexOf('begin')
   const commit = db.ops.indexOf('commit')
   assertEquals(begin >= 0 && commit > begin, true)
-  assertEquals(db.ops.slice(0, begin).some((op) => /^(insert|update|delete):/.test(op)), false)
+  assertEquals(
+    db.ops.slice(0, begin).some((op) => /^(insert|update|delete):/.test(op)),
+    false,
+  )
   assertEquals(db.ops.slice(begin, commit).includes('delete:seat'), true)
-  assertEquals(db.ops.slice(begin, commit).filter((op) => op === 'insert:seat').length, 2)
+  assertEquals(
+    db.ops.slice(begin, commit).filter((op) => op === 'insert:seat').length,
+    2,
+  )
 })
 
 test('a failure between the seat delete and the last seat insert rolls the whole projection back — no partial seat rows', async () => {
@@ -522,20 +880,31 @@ test('a failure between the seat delete and the last seat insert rolls the whole
       return {
         values: (values: Record<string, unknown>) => {
           seatInserts += 1
-          if (seatInserts === 2) throw new Error('injected: seat insert failed')
+          if (seatInserts === 2) {
+            throw new Error('injected: seat insert failed')
+          }
           return chain.values(values)
         },
       }
     },
   })
-  const client = createStripeClient(CONFIG, { fetch: stripeFetchDouble([], TWO_ITEM_SUBSCRIPTION) })
+  const client = createStripeClient(CONFIG, {
+    fetch: stripeFetchDouble([], TWO_ITEM_SUBSCRIPTION),
+  })
   let thrown: unknown
   try {
-    await projectSubscriptionById({ db, client, now: '2026-09-07T12:00:00.000Z' }, 'sub_1')
+    await projectSubscriptionById({
+      db,
+      client,
+      now: '2026-09-07T12:00:00.000Z',
+    }, 'sub_1')
   } catch (err) {
     thrown = err
   }
-  assertEquals(thrown instanceof Error && thrown.message, 'injected: seat insert failed')
+  assertEquals(
+    thrown instanceof Error && thrown.message,
+    'injected: seat insert failed',
+  )
   assertEquals(seatInserts, 2)
   assertEquals(db.ops.includes('rollback'), true)
   // The seat rows are exactly what they were: neither the delete nor the
@@ -545,18 +914,168 @@ test('a failure between the seat delete and the last seat insert rolls the whole
   assertEquals(db.rows(subscription), beforeSub)
 })
 
-test('Workers without a connection string skip projection rather than racing the request client', async () => {
+test('Workers without a task database still persist the projection handoff', async () => {
   const h = await buildApp({ runtime: 'workers' })
   const res = await h.app.request(
-    await signedPost(event('customer.subscription.updated', { id: 'sub_1', object: 'subscription' })),
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }),
+    ),
   )
   assertEquals(res.status, 200)
-  assertEquals(await res.json(), {
-    ok: true,
-    event: 'customer.subscription.updated',
-    result: { scheduled: false, skipped: 'database_unavailable' },
-  })
+  assertEquals(await res.json(), { ok: true })
   assertEquals(h.scheduled.length, 0)
+  const row = h.db.rows(webhookDelivery)[0]
+  assertEquals(row?.externalDeliveryId, 'evt_1')
+  assertEquals(row?.objectId, 'sub_1')
+  assertEquals(row?.projectedAt ?? null, null)
+})
+
+test('a transient Stripe fetch leaves the delivery pending', async () => {
+  const h = await buildApp({
+    stripeFetch: (input) => {
+      const url = new URL(input)
+      h.stripeCalls.push(`${url.pathname}${url.search}`)
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ error: { type: 'api_error', message: 'blip' } }),
+          { status: 500 },
+        ),
+      )
+    },
+  })
+  const res = await h.app.request(
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }),
+    ),
+  )
+  assertEquals(res.status, 200)
+  await h.scheduled[0]!()
+  assertEquals(h.db.rows(webhookDelivery)[0]?.projectedAt ?? null, null)
+  assertEquals(h.trace.includes('insert:payer'), false)
+})
+
+test('a projection task failure leaves the delivery pending', async () => {
+  const h = await buildApp()
+  Object.assign(h.db, {
+    transaction: () => Promise.reject(new Error('injected projection failure')),
+  })
+  const res = await h.app.request(
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }),
+    ),
+  )
+  assertEquals(res.status, 200)
+  await h.scheduled[0]!()
+  assertEquals(h.db.rows(webhookDelivery)[0]?.projectedAt ?? null, null)
+})
+
+test('a failed durable handoff releases the claim and answers 5xx', async () => {
+  const h = await buildApp()
+  const origUpdate = h.db.update.bind(h.db)
+  Object.assign(h.db, {
+    update: (table: unknown) => {
+      if (table === webhookDelivery) {
+        throw new Error('injected handoff failure')
+      }
+      return origUpdate(table as Parameters<typeof origUpdate>[0])
+    },
+  })
+  const res = await h.app.request(
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }),
+    ),
+  )
+  assertEquals(res.status, 503)
+  assertEquals(await res.json(), { error: 'retry' })
+  assertEquals(h.scheduled.length, 0)
+  assertEquals(h.trace.includes('delete:delivery'), true)
+})
+
+test('the maintenance sweep projects a handed-off event when the task database was missing', async () => {
+  const h = await buildApp({ runtime: 'workers' })
+  const res = await h.app.request(
+    await signedPost(
+      event('customer.subscription.updated', {
+        id: 'sub_1',
+        object: 'subscription',
+      }),
+    ),
+  )
+  assertEquals(res.status, 200)
+  assertEquals(h.scheduled.length, 0)
+  const stripeCalls: string[] = []
+  const client = createStripeClient(CONFIG, {
+    fetch: stripeFetchDouble(stripeCalls),
+  })
+  const report = await runPendingStripeProjections({ db: h.db, client })
+  assertEquals(report.attempted, 1)
+  assertEquals(report.completed, 1)
+  assertEquals(typeof h.db.rows(webhookDelivery)[0]?.projectedAt, 'string')
+})
+
+test('the maintenance sweep ignores a claimed Stripe delivery until the object-ref handoff', async () => {
+  const db = createMemoryDb([[webhookDelivery, []]])
+  assertEquals(
+    await claimWebhookDelivery(db, {
+      provider: 'stripe',
+      externalDeliveryId: 'evt_pre_handoff',
+      event: 'customer.subscription.updated',
+    }),
+    true,
+  )
+  const failingClient = createStripeClient(CONFIG, {
+    fetch: () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: { type: 'api_error', message: 'stripe down' },
+          }),
+          { status: 500 },
+        ),
+      ),
+  })
+  const beforeHandoff = await runPendingStripeProjections({
+    db,
+    client: failingClient,
+  })
+  assertEquals(beforeHandoff, { attempted: 0, completed: 0 })
+  assertEquals(db.rows(webhookDelivery)[0]?.projectedAt, null)
+
+  await enqueueStripeProjection(db, {
+    id: 'evt_pre_handoff',
+    type: 'customer.subscription.updated',
+    objectId: 'sub_1',
+    objectType: 'subscription',
+  })
+  const afterFail = await projectAndSettleStripeEvent(
+    { db, client: failingClient },
+    {
+      id: 'evt_pre_handoff',
+      type: 'customer.subscription.updated',
+      objectId: 'sub_1',
+      objectType: 'subscription',
+    },
+  )
+  assertEquals(afterFail, 'pending')
+  assertEquals(db.rows(webhookDelivery)[0]?.projectedAt, null)
+  assertEquals(await listPendingStripeProjections(db, { limit: 10 }), [{
+    id: 'evt_pre_handoff',
+    type: 'customer.subscription.updated',
+    objectId: 'sub_1',
+    objectType: 'subscription',
+  }])
 })
 
 test('a signed body that is not JSON is a bad request', async () => {

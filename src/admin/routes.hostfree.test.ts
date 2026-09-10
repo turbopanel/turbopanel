@@ -24,6 +24,7 @@ import { parseTestSecretsConfig } from '../test-fixtures/secrets.ts'
 import type { Db } from '../db.ts'
 import { server } from '../lib/db/schema.ts'
 import { registerAdminRoutes } from './routes.ts'
+import { registerAdminTierRoutes } from './tier-routes.ts'
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -195,6 +196,7 @@ async function buildApp(opts: Readonly<{
   getEnv?: () => Record<string, string | undefined>
   colocatedServerId?: string
   commandQueue?: { enqueue: (envelope: unknown) => Promise<void> }
+  registerTiers?: boolean
 }> = {}) {
   const secretsConfig = parseTestSecretsConfig('deno')
   const secrets = await deriveSecretsConfig(secretsConfig, 'session-signing')
@@ -236,6 +238,12 @@ async function buildApp(opts: Readonly<{
     runtime: opts.runtime ?? 'deno',
     devSurface: opts.devSurface ?? false,
     ...(opts.getEnv ? { getEnv: opts.getEnv } : {}),
+    ...(opts.registerTiers
+      ? {
+        registerTiers: (admin: Hono<AppEnv>) =>
+          registerAdminTierRoutes(admin, { secrets }),
+      }
+      : {}),
   })
   return { app, cookie, secrets }
 }
@@ -607,9 +615,17 @@ test('the tier catalogue is mounted on Workers only: self-hosted has no billing'
   })
   assertEquals(absent.status, 404)
 
+  // Shared registrar is billing-free: Workers runtime alone does not import
+  // or mount the catalogue. The Workers entry passes registerTiers.
+  const workersBare = await buildApp({ runtime: 'workers' })
+  const unmounted = await workersBare.app.request(`${ADMIN_API_PREFIX}/tiers`, {
+    headers: { Cookie: workersBare.cookie },
+  })
+  assertEquals(unmounted.status, 404)
+
   // Mounted on Workers; with no billingConfig on the context it is the
   // route's own 503, not the aggregator's 404.
-  const workers = await buildApp({ runtime: 'workers' })
+  const workers = await buildApp({ runtime: 'workers', registerTiers: true })
   const mounted = await workers.app.request(`${ADMIN_API_PREFIX}/tiers`, {
     headers: { Cookie: workers.cookie },
   })

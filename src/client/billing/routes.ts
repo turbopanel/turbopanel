@@ -6,7 +6,8 @@
  * route when `c.get('billingConfig')` is absent — self-hosted has no
  * billing surface at all.
  *
- * Mounted by `registerClientRoutes` on Workers only. `GET` routes read
+ * Mounted from `src/workers.ts` via `createApp({ registerBilling })`.
+ * `GET` routes read
  * Postgres only. The mutation routes may call the provider (they are
  * neither ingest nor page load). The quantity mutations are
  * `mutations.ts` — `changeSeats`, `upgradeTier`, `downgradeTier` — which

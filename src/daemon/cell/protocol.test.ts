@@ -1372,11 +1372,13 @@ it("metrics live/sensor result kinds are on the inbound allowlist", () => {
   assertEquals(allowed.has("metrics-live-stop-result"), true);
   assertEquals(allowed.has("topology-overrides-update-result"), true);
   assertEquals(allowed.has("capability-plan-update-result"), true);
+  assertEquals(allowed.has("capability-plan-clear-result"), true);
   // Requests remain outbound-only.
   assertEquals(allowed.has("metrics-live-start"), false);
   assertEquals(allowed.has("metrics-live-stop"), false);
   assertEquals(allowed.has("topology-overrides-update"), false);
   assertEquals(allowed.has("capability-plan-update"), false);
+  assertEquals(allowed.has("capability-plan-clear"), false);
 });
 
 it("validateDaemonInboundFrame validates metrics live/sensor ok-results", () => {
@@ -1386,6 +1388,7 @@ it("validateDaemonInboundFrame validates metrics live/sensor ok-results", () => 
       "metrics-live-stop-result",
       "topology-overrides-update-result",
       "capability-plan-update-result",
+      "capability-plan-clear-result",
     ]
   ) {
     const ok = validateDaemonInboundFrame(
@@ -1527,6 +1530,18 @@ it("wire mappings round-trip metrics live/sensor kinds", () => {
   );
 
   assertEquals(
+    outboundEnvelopeToWireMessage({
+      ...base,
+      kind: "capability-plan-clear",
+    }),
+    {
+      type: "capability-plan-clear",
+      id: "req-m",
+      at: VALID_AT,
+    },
+  );
+
+  assertEquals(
     wireMessageToInboundEnvelope({
       type: "metrics-live-start-result",
       id: "req-m",
@@ -1581,6 +1596,21 @@ it("wire mappings round-trip metrics live/sensor kinds", () => {
     }),
     {
       kind: "capability-plan-update-result",
+      requestId: "req-m",
+      at: VALID_AT,
+      ok: true,
+      error: undefined,
+    },
+  );
+  assertEquals(
+    wireMessageToInboundEnvelope({
+      type: "capability-plan-clear-result",
+      id: "req-m",
+      ok: true,
+      at: VALID_AT,
+    }),
+    {
+      kind: "capability-plan-clear-result",
       requestId: "req-m",
       at: VALID_AT,
       ok: true,

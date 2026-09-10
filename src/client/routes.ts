@@ -30,7 +30,6 @@ import { registerDockerRunRoutes } from './docker-run/routes.ts'
 import { registerHostingRoutes } from './hostings/routes.ts'
 import { registerTlsRoutes } from './tls/routes.ts'
 import { registerLicenseRoutes } from './licenses/routes.ts'
-import { registerBillingRoutes } from './billing/routes.ts'
 import {
   registerOrganizationLimitsRoutes,
   registerProjectPrincipalRoutes,
@@ -49,16 +48,31 @@ import { registerServiceRoutes } from './services/routes.ts'
 import { registerTeamRoutes } from './teams/routes.ts'
 import { registerOrganizationRoutes } from './organizations/routes.ts'
 import { registerWorkspaceRoutes } from './workspaces/routes.ts'
-import { getClientOpenApiSpec } from './openapi/index.ts'
+import {
+  type ClientOpenApiOptions,
+  getClientOpenApiSpec,
+} from './openapi/index.ts'
 import { buildClientScalarHtml } from '../scalar-html.ts'
 import { CLIENT_API_PREFIX } from '../surfaces.ts'
+
+/**
+ * Workers-only billing and OpenAPI hooks. Passed from `src/workers.ts` so
+ * the shared registrar never statically imports Stripe.
+ */
+export type ClientRouteOpts = AuthRouteOpts & {
+  registerBilling?: (client: Hono<AppEnv>, opts: AuthRouteOpts) => void
+  getOpenApiSpec?: (
+    serverUrl: string,
+    options?: ClientOpenApiOptions,
+  ) => object
+}
 
 /**
  * Client (end-user UI) surface. Auth routes plus org-scoped resources for the
  * signed-in user (e.g. servers assigned to their organization).
  * Mounted under {@link CLIENT_API_PREFIX} (`/api/client/v1`).
  */
-export function registerClientRoutes(app: Hono<AppEnv>, opts: AuthRouteOpts) {
+export function registerClientRoutes(app: Hono<AppEnv>, opts: ClientRouteOpts) {
   const client = new Hono<AppEnv>()
 
   registerAuthRoutes(client, opts)
@@ -91,9 +105,7 @@ export function registerClientRoutes(app: Hono<AppEnv>, opts: AuthRouteOpts) {
   registerDatacenterRoutes(client, opts)
   registerIpRoutes(client, opts)
   registerLicenseRoutes(client, opts)
-  // Hosted (Workers) only: self-hosted is free software with no billing, so
-  // `/billing/*` is absent there rather than mounted-and-503.
-  if (opts.runtime === 'workers') registerBillingRoutes(client, opts)
+  opts.registerBilling?.(client, opts)
   registerOrganizationRoutes(client, opts)
   registerAccessRoutes(client, opts)
   registerWorkspaceRoutes(client, opts)
@@ -125,7 +137,10 @@ export function registerClientRoutes(app: Hono<AppEnv>, opts: AuthRouteOpts) {
 
   client.get('/openapi.json', (c) => {
     const origin = new URL(c.req.url).origin
-    return c.json(getClientOpenApiSpec(origin, { runtime: opts.runtime }))
+    const spec = (opts.getOpenApiSpec ?? getClientOpenApiSpec)(origin, {
+      runtime: opts.runtime,
+    })
+    return c.json(spec)
   })
 
   client.get('/reference', (c) => {

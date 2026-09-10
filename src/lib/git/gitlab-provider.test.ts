@@ -89,7 +89,7 @@ test('parseGitlabPipeline releases only a succeeded pipeline', () => {
       ...base,
       object_attributes: { id: 31, ref: 'main', sha: SHA, status: 'success' },
     }),
-    { externalInstallationId: null, repositoryExternalId: '15', commitSha: SHA },
+    { externalInstallationId: null, repositoryExternalId: '15', commitSha: SHA, ref: 'refs/heads/main' },
   )
   // Anything short of a finished green pipeline is not an all-checks-green
   // signal, which is the whole point of `autoDeploy: 'checks_passed'`.
@@ -179,7 +179,15 @@ test('gitlab parseCheck is the pipeline hook', () => {
       project: { id: 15 },
       object_attributes: { sha: SHA, status: 'success' },
     }),
-    { externalInstallationId: null, repositoryExternalId: '15', commitSha: SHA },
+    { externalInstallationId: null, repositoryExternalId: '15', commitSha: SHA, ref: null },
+  )
+  assertEquals(
+    gitlabProvider.parseCheck('Pipeline Hook', {
+      object_kind: 'pipeline',
+      project: { id: 15 },
+      object_attributes: { sha: SHA, status: 'success', ref: 'main' },
+    }),
+    { externalInstallationId: null, repositoryExternalId: '15', commitSha: SHA, ref: 'refs/heads/main' },
   )
 })
 

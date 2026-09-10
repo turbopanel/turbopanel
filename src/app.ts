@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { SessionData } from './client/authn/session-store.ts'
 import type { AuthRateLimiter } from './client/authn/auth-rate-limit.ts'
 import type { DerivedSecretsConfig, SecretsConfig } from './client/authn/secrets.ts'
-import { registerClientRoutes } from './client/routes.ts'
+import { registerClientRoutes, type ClientRouteOpts } from './client/routes.ts'
 import { createBrowserWriteProtectionMiddleware } from './browser-write-protection.ts'
 import { registerCorsMiddleware } from './cors.ts'
 import type { DaemonCellRegistry } from './daemon/cell/contracts.ts'
@@ -74,6 +74,20 @@ export type AppEnv = {
   }
 }
 
+function bindContextValue<K extends keyof AppEnv['Variables']>(
+  app: Hono<AppEnv>,
+  key: K,
+  value: AppEnv['Variables'][K] | undefined,
+): void {
+  if (value === undefined) {
+    return
+  }
+  app.use('*', (c, next) => {
+    c.set(key, value)
+    return next()
+  })
+}
+
 export function createApp({
   db,
   emailQueue,
@@ -94,6 +108,8 @@ export function createApp({
   otpVerifierSecrets,
   platformEnv,
   getPlatformEnv,
+  registerBilling,
+  getClientOpenApiSpec,
 }: {
   db?: Db
   emailQueue?: EmailQueue
@@ -127,6 +143,12 @@ export function createApp({
    */
   platformEnv?: Record<string, string | undefined>
   getPlatformEnv?: () => Record<string, string | undefined>
+  /**
+   * Hosted (Workers) billing surface. Passed from `src/workers.ts` so
+   * this factory never statically imports Stripe.
+   */
+  registerBilling?: NonNullable<ClientRouteOpts['registerBilling']>
+  getClientOpenApiSpec?: NonNullable<ClientRouteOpts['getOpenApiSpec']>
 }): Hono<AppEnv> {
   const app = new Hono<AppEnv>()
   registerCorsMiddleware(app, corsOrigins)
@@ -146,75 +168,20 @@ export function createApp({
   // runtime so Deno proxy-style requests compare against the browser origin
   // (not the internal Unix-socket URL).
   app.use('*', createBrowserWriteProtectionMiddleware(resolvedRuntime))
-  if (db) {
-    app.use('*', (c, next) => {
-      c.set('db', db)
-      return next()
-    })
-  }
-  if (daemonCellRegistry) {
-    app.use('*', (c, next) => {
-      c.set('daemonCellRegistry', daemonCellRegistry)
-      return next()
-    })
-  }
-  if (queryCache) {
-    app.use('*', (c, next) => {
-      c.set('queryCache', queryCache)
-      return next()
-    })
-  }
-  if (serverMetricsStore) {
-    app.use('*', (c, next) => {
-      c.set('serverMetricsStore', serverMetricsStore)
-      return next()
-    })
-  }
-  if (executionLogStore) {
-    app.use('*', (c, next) => {
-      c.set('executionLogStore', executionLogStore)
-      return next()
-    })
-  }
-  if (emailQueue) {
-    app.use('*', (c, next) => {
-      c.set('emailQueue', emailQueue)
-      return next()
-    })
-  }
-  if (commandQueue) {
-    app.use('*', (c, next) => {
-      c.set('commandQueue', commandQueue)
-      return next()
-    })
-  }
-  if (emailFrom || baseUrl) {
-    app.use('*', (c, next) => {
-      if (emailFrom) c.set('emailFrom', emailFrom)
-      if (baseUrl) c.set('baseUrl', baseUrl)
-      return next()
-    })
-  }
-  if (dataEncryptionSecrets) {
-    app.use('*', (c, next) => {
-      c.set('dataEncryptionSecrets', dataEncryptionSecrets)
-      return next()
-    })
-  }
-  if (secretsConfig) {
-    app.use('*', (c, next) => {
-      c.set('secretsConfig', secretsConfig)
-      return next()
-    })
-  }
+  bindContextValue(app, 'db', db)
+  bindContextValue(app, 'daemonCellRegistry', daemonCellRegistry)
+  bindContextValue(app, 'queryCache', queryCache)
+  bindContextValue(app, 'serverMetricsStore', serverMetricsStore)
+  bindContextValue(app, 'executionLogStore', executionLogStore)
+  bindContextValue(app, 'emailQueue', emailQueue)
+  bindContextValue(app, 'commandQueue', commandQueue)
+  bindContextValue(app, 'emailFrom', emailFrom)
+  bindContextValue(app, 'baseUrl', baseUrl)
+  bindContextValue(app, 'dataEncryptionSecrets', dataEncryptionSecrets)
+  bindContextValue(app, 'secretsConfig', secretsConfig)
   // Auth limiter must be set before registerClientRoutes — Deno previously
   // injected it too late (after client auth was already mounted).
-  if (authRateLimiter) {
-    app.use('*', (c, next) => {
-      c.set('authRateLimiter', authRateLimiter)
-      return next()
-    })
-  }
+  bindContextValue(app, 'authRateLimiter', authRateLimiter)
   if (getPlatformEnv || platformEnv) {
     app.use('*', (c, next) => {
       c.set('platformEnv', getPlatformEnv ? getPlatformEnv() : platformEnv)
@@ -227,10 +194,12 @@ export function createApp({
     registerClientRoutes(app, {
       secrets,
       otpVerifierSecrets,
-      runtime: runtime ?? 'workers',
+      runtime: resolvedRuntime,
       signupEnvOverride,
       emailFrom,
       baseUrl,
+      ...(registerBilling ? { registerBilling } : {}),
+      ...(getClientOpenApiSpec ? { getOpenApiSpec: getClientOpenApiSpec } : {}),
     })
   }
   return app

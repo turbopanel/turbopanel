@@ -180,6 +180,7 @@ test("deriveInboundOutcome maps ok-result kinds", () => {
       "tunnel-token-result",
       "update-result",
       "capability-plan-update-result",
+      "capability-plan-clear-result",
     ] as const
   ) {
     assertEquals(

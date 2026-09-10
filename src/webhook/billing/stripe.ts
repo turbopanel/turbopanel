@@ -21,8 +21,11 @@
  *
  * A slow `invoice.created` handler delays finalising **every**
  * automatic-collection invoice on the account for up to 72 hours, so
- * `dispatch` must not do its work inline. It schedules the projection
- * (`runAfterResponse`) and returns `accepted({ scheduled: true })`.
+ * `dispatch` must not do its work inline. It durably stores the event ref
+ * on the claimed delivery row, then schedules the projection
+ * (`runAfterResponse`) and returns `accepted`. The 2xx is only returned
+ * after that handoff succeeds; a failed handoff releases the claim and
+ * answers retryable `5xx`.
  *
  * The deferred task **opens its own DB client and closes it in `finally`**.
  * `src/workers.ts` ends the per-request client in its own `waitUntil`; a
@@ -30,16 +33,16 @@
  * with `write CONNECTION_ENDED` (the hard rule in `AGENTS.md`). Deno's
  * client is process-lived, so there the task uses it and closes nothing.
  *
- * **Residual risk, stated plainly:** the delivery claim is taken *before* the
- * async work, so a crash mid-task leaves the ledger claimed and a Stripe
- * retry would `204`. Recovery is the reconciliation sweep (next phase), not
- * the ledger. The task is kept small and idempotent so the window is narrow.
+ * If the after-response task crashes, the delivery stays claimed with
+ * `projectedAt` unset. Recovery is the maintenance sweep calling
+ * `runPendingStripeProjections` — not `reconcile.ts`, which only compares
+ * Postgres and never refetches Stripe.
  */
 
 import type { Context, Hono } from 'hono'
 import type { AppEnv } from '../../app.ts'
 import { createWorkersDb, endDbConnection, getDb, type Db } from '../../db.ts'
-import { logInfo, logWarn } from '../../logger.ts'
+import { logWarn } from '../../logger.ts'
 import { STRIPE_WEBHOOK_PATH } from '../../surfaces.ts'
 import { stripeWebhookRateLimitKey } from '../../daemon/rate-limit/keys.ts'
 import type { BillingConfig } from '../../lib/billing/config.ts'
@@ -49,15 +52,18 @@ import {
   verifyStripeSignature,
 } from '../../lib/billing/webhook-signature.ts'
 import { type AfterResponseScheduler, runAfterResponse } from '../../lib/http/after-response.ts'
+import { enqueueStripeProjection } from '../../lib/db/webhook-delivery-records.ts'
 import {
   accepted,
+  type DeliveryOutcome,
   type GateContext,
   registerWebhookGate,
+  retryable,
   type WebhookGate,
   type WebhookGateOpts,
 } from '../gate.ts'
 import {
-  projectStripeEvent,
+  projectAndSettleStripeEvent,
   STRIPE_PROJECTION_LOG_SCOPE,
   stripeEventRef,
 } from './stripe-projection.ts'
@@ -142,34 +148,44 @@ function createStripeGate(opts: StripeWebhookRouteOpts): WebhookGate<StripeWebho
     deliveryId: (_ctx, raw) => Promise.resolve(parseEvent(raw)?.id ?? null),
     eventName: (_ctx, raw) => parseEvent(raw)?.type ?? null,
 
-    dispatch(ctx, holder, event, payload) {
+    async dispatch(ctx, holder, event, payload): Promise<DeliveryOutcome> {
       const config = holder.config
-      if (!config) return Promise.resolve(accepted({ scheduled: false, skipped: 'unconfigured' }))
+      if (!config) return accepted({ scheduled: false, skipped: 'unconfigured' })
       const id = typeof payload.id === 'string' ? payload.id : ''
       const ref = stripeEventRef({ id, type: event }, payload)
+
+      try {
+        await enqueueStripeProjection(ctx.db, ref)
+      } catch (err) {
+        logWarn(
+          STRIPE_PROJECTION_LOG_SCOPE,
+          `event ${ref.id} (${ref.type}) projection handoff failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+        return retryable('projection_handoff_failed')
+      }
 
       // Capture everything the task needs now; nothing reads `ctx.c` later.
       const handles = openTaskDb(ctx.c)
       if (!handles) {
-        logWarn(STRIPE_PROJECTION_LOG_SCOPE, `event ${ref.id} (${ref.type}) not projected: no database`)
-        return Promise.resolve(accepted({ scheduled: false, skipped: 'database_unavailable' }))
+        logWarn(
+          STRIPE_PROJECTION_LOG_SCOPE,
+          `event ${ref.id} (${ref.type}) handed off; no task database — sweep will project`,
+        )
+        return accepted({ scheduled: false, deferred: 'database_unavailable' })
       }
       const client = createClient(config)
       const task = async (): Promise<void> => {
         try {
-          const outcome = await projectStripeEvent({ db: handles.db, client }, ref)
-          logInfo(
-            STRIPE_PROJECTION_LOG_SCOPE,
-            `event ${ref.id} (${ref.type}): ${outcome.action}`,
-            JSON.stringify(outcome),
-          )
+          await projectAndSettleStripeEvent({ db: handles.db, client }, ref)
         } finally {
           await handles.close().catch(() => {})
         }
       }
       if (opts.schedule) opts.schedule(task)
       else runAfterResponse(ctx.c, STRIPE_PROJECTION_LOG_SCOPE, task)
-      return Promise.resolve(accepted({ scheduled: true }))
+      return accepted({ scheduled: true })
     },
   }
 }

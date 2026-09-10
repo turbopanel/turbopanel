@@ -12,8 +12,13 @@ import { type AppEnv, createApp } from './app.ts'
 import { createDurableObjectDaemonCellRegistry } from './daemon/cell/do-registry.ts'
 import { runOfflineSweep } from './daemon/cell/offline-sweep.ts'
 import { registerAdminRoutes } from './admin/routes.ts'
+import { registerAdminTierRoutes } from './admin/tier-routes.ts'
+import { getWorkersAdminOpenApiSpec } from './admin/openapi/workers.ts'
 import { registerDaemonApiRoutes } from './daemon/api-routes.ts'
 import { registerWebhookRoutes } from './webhook/routes.ts'
+import { registerStripeWebhookRoutes } from './webhook/billing/stripe.ts'
+import { registerBillingRoutes } from './client/billing/routes.ts'
+import { getWorkersClientOpenApiSpec } from './client/openapi/workers.ts'
 import { resolveBillingConfig } from './lib/billing/config.ts'
 import { registerWorkersDaemonWebSocket } from './daemon/workers-ws.ts'
 import { resolveWorkersEmailQueue } from './lib/email/mailgun/workers-queue.ts'
@@ -222,6 +227,8 @@ async function initWorkerApp(env: CloudflareBindings) {
     executionLogStore: cachedExecutionLogStore,
     dataEncryptionSecrets: cachedDataEncryptionSecrets ?? undefined,
     secretsConfig: cachedSecretsConfig ?? undefined,
+    registerBilling: registerBillingRoutes,
+    getClientOpenApiSpec: getWorkersClientOpenApiSpec,
   })
   warnIfDaemonRateLimitersMissing(env)
   warnIfClientAuthRateLimiterMissing(env)
@@ -253,12 +260,18 @@ async function initWorkerApp(env: CloudflareBindings) {
     runtime: 'workers',
     github: resolveWorkersGithubWebhookRateLimiter(env),
     gitlab: resolveWorkersGitlabWebhookRateLimiter(env),
-    stripe: resolveWorkersStripeWebhookRateLimiter(env),
+  })
+  registerStripeWebhookRoutes(cachedApp, {
+    runtime: 'workers',
+    rateLimiter: resolveWorkersStripeWebhookRateLimiter(env),
   })
   registerAdminRoutes(cachedApp, {
     secrets: cachedSessionSecrets!,
     runtime: 'workers',
     devSurface: isWorkersDevSurface(env),
+    registerTiers: (admin) =>
+      registerAdminTierRoutes(admin, { secrets: cachedSessionSecrets! }),
+    getOpenApiSpec: getWorkersAdminOpenApiSpec,
   })
   cachedDaemonCellRegistryFactory = (env, db) => createDurableObjectDaemonCellRegistry(env, db)
 }

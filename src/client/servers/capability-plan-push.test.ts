@@ -154,12 +154,12 @@ test("enqueueLatestRecordedCapabilityPlan enqueues the recorded plan", async () 
   assertEquals(enqueued[0].plan, PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN);
 });
 
-test("enqueueLatestRecordedCapabilityPlan is a no-op for self-hosted even when a plan is recorded", async () => {
+test("enqueueLatestRecordedCapabilityPlan clears a leftover plan on self-hosted", async () => {
   const enqueued: DaemonOutboundEnvelope[] = [];
   await enqueueLatestRecordedCapabilityPlan(
     {
       select: () => {
-        throw new TypeError("self-hosted replay must not read a recorded plan");
+        throw new TypeError("self-hosted clear must not read a recorded plan");
       },
     } as never,
     "server-1",
@@ -168,5 +168,6 @@ test("enqueueLatestRecordedCapabilityPlan is a no-op for self-hosted even when a
     },
     "self-hosted",
   );
-  assertEquals(enqueued, []);
+  assertEquals(enqueued.length, 1);
+  assertEquals(enqueued[0]?.kind, "capability-plan-clear");
 });

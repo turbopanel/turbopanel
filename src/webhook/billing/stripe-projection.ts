@@ -34,7 +34,13 @@
 import type { Db } from '../../db.ts'
 import { revokeDaemonKey } from '../../daemon/authn/server-identity-db.ts'
 import { logInfo, logWarn } from '../../logger.ts'
+import { StripeApiError } from '../../lib/billing/errors.ts'
 import type { StripeClient } from '../../lib/billing/client.ts'
+import {
+  completeStripeProjection,
+  listPendingStripeProjections,
+  STRIPE_PROJECTION_RETRY_LIMIT,
+} from '../../lib/db/webhook-delivery-records.ts'
 import { resolvePayerSubject } from '../../lib/billing/customer-subject.ts'
 import type { BillingQuantityLock } from '../../lib/billing/quantity-lock.ts'
 import {
@@ -386,4 +392,74 @@ export async function projectStripeEvent(
   }
   if (!subscriptionId) return { action: 'skipped', reason: 'no_subscription' }
   return await projectSubscriptionById(deps, subscriptionId)
+}
+
+export type StripeProjectionSettle = 'completed' | 'pending'
+
+/**
+ * Run one event's projection and mark the delivery settled, or leave it
+ * pending when Stripe (or the write) failed in a retryable way.
+ */
+export async function projectAndSettleStripeEvent(
+  deps: StripeProjectionDeps,
+  event: StripeEventRef,
+): Promise<StripeProjectionSettle> {
+  try {
+    const outcome = await projectStripeEvent(deps, event)
+    await completeStripeProjection(
+      deps.db,
+      event.id,
+      deps.now ?? new Date().toISOString(),
+    )
+    logInfo(
+      STRIPE_PROJECTION_LOG_SCOPE,
+      `event ${event.id} (${event.type}): ${outcome.action}`,
+      JSON.stringify(outcome),
+    )
+    return 'completed'
+  } catch (err) {
+    if (err instanceof StripeApiError && !err.isTransient) {
+      await completeStripeProjection(
+        deps.db,
+        event.id,
+        deps.now ?? new Date().toISOString(),
+      )
+      logWarn(
+        STRIPE_PROJECTION_LOG_SCOPE,
+        `event ${event.id} (${event.type}) permanent Stripe error; settled without projection: ${err.message}`,
+      )
+      return 'completed'
+    }
+    logWarn(
+      STRIPE_PROJECTION_LOG_SCOPE,
+      `event ${event.id} (${event.type}) projection failed; leaving pending: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+    return 'pending'
+  }
+}
+
+export type PendingStripeProjectionReport = Readonly<{
+  attempted: number
+  completed: number
+}>
+
+/**
+ * Bounded retry of unsettled Stripe webhook projections. Used by the
+ * maintenance sweep — not by reconcile, which never refetches Stripe.
+ */
+export async function runPendingStripeProjections(
+  deps: StripeProjectionDeps,
+  opts: { limit?: number } = {},
+): Promise<PendingStripeProjectionReport> {
+  const pending = await listPendingStripeProjections(deps.db, {
+    limit: opts.limit ?? STRIPE_PROJECTION_RETRY_LIMIT,
+  })
+  let completed = 0
+  for (const event of pending) {
+    const settled = await projectAndSettleStripeEvent(deps, event)
+    if (settled === 'completed') completed += 1
+  }
+  return { attempted: pending.length, completed }
 }

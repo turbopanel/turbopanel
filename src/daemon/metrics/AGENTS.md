@@ -118,7 +118,10 @@ emits that family's rows depends entirely on whether the daemon detected the
 hardware. Hosted ingest enforces the ceiling with
 `truncateSampleToCapabilityPlan` (`capability-plan.ts`) — truncates the sample
 to at most `N` entries per capability-gated array. Self-hosted ingest skips
-truncation. Truncation can only shrink what the daemon already reports, never
+truncation. On attach, a self-hosted control plane also sends
+`capability-plan-clear` so a remote daemon that previously stored a hosted
+plan deletes `metrics/capability-plan.json` and stops truncating outbound
+samples. Truncation can only shrink what the daemon already reports, never
 fabricate rows for absent hardware.
 
 **Representative row-count matrix** (`testing/representative-machines.ts` — 17

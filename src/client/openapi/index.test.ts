@@ -1,6 +1,7 @@
 import { assertEquals, assertExists } from '@std/assert'
 import { CLIENT_API_PREFIX } from '../../surfaces.ts'
 import { getClientOpenApiSpec } from './index.ts'
+import { getWorkersClientOpenApiSpec } from './workers.ts'
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -15,27 +16,51 @@ test('getClientOpenApiSpec workers runtime omits install tag and paths', () => {
     tags: { name: string }[]
     paths: Record<string, unknown>
     components: { schemas: Record<string, unknown> }
+    'x-tagGroups': { name: string; tags: string[] }[]
   }
   const tagNames = spec.tags.map((tag) => tag.name)
   assertEquals(tagNames.includes('Install'), false)
   assertEquals(Object.keys(spec.paths).some((path) => path.startsWith('/api/install/v1')), false)
   assertExists(spec.paths[`${CLIENT_API_PREFIX}/licenses`])
   assertExists(spec.components.schemas.LicenseRecord)
-  // Billing is hosted-only, so the Workers spec is the one that documents it.
+  // Billing lives on the Workers-only spec module, not this shared builder.
+  assertEquals(tagNames.includes('Billing'), false)
+  assertEquals(
+    spec['x-tagGroups'].find((group) => group.name === 'Infrastructure')?.tags.includes('Billing'),
+    false,
+  )
+})
+
+test('getWorkersClientOpenApiSpec documents hosted billing', () => {
+  const spec = getWorkersClientOpenApiSpec('https://panel.example.com') as {
+    tags: { name: string }[]
+    paths: Record<string, unknown>
+    'x-tagGroups': { name: string; tags: string[] }[]
+  }
+  const tagNames = spec.tags.map((tag) => tag.name)
   assertEquals(tagNames.includes('Billing'), true)
   assertExists(spec.paths[`${CLIENT_API_PREFIX}/billing/catalog`])
+  assertEquals(
+    spec['x-tagGroups'].find((group) => group.name === 'Infrastructure')?.tags.includes('Billing'),
+    true,
+  )
 })
 
 test('getClientOpenApiSpec deno runtime includes install surface and omits billing', () => {
   const spec = getClientOpenApiSpec('https://localhost:8443', { runtime: 'deno' }) as {
     tags: { name: string }[]
     paths: Record<string, unknown>
+    'x-tagGroups': { name: string; tags: string[] }[]
   }
   assertEquals(spec.tags.some((tag) => tag.name === 'Install'), true)
   assertEquals(Object.keys(spec.paths).some((path) => path.startsWith('/api/install/v1')), true)
   // Self-hosted has no billing surface at all — not mounted, so not documented.
   assertEquals(spec.tags.some((tag) => tag.name === 'Billing'), false)
   assertEquals(Object.keys(spec.paths).some((path) => path.startsWith(`${CLIENT_API_PREFIX}/billing`)), false)
+  assertEquals(
+    spec['x-tagGroups'].find((group) => group.name === 'Infrastructure')?.tags.includes('Billing'),
+    false,
+  )
 })
 
 test('getClientOpenApiSpec wires cookie auth and core resource paths', () => {

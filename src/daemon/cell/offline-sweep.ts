@@ -112,7 +112,7 @@ import { resolveBillingConfig } from '../../lib/billing/config.ts'
 import { createStripeClient } from '../../lib/billing/client.ts'
 import { runGraceClock, shouldRunGraceClock } from '../../lib/billing/grace-clock.ts'
 import { runReconcile, shouldRunReconcile } from '../../lib/billing/reconcile.ts'
-import { projectSubscriptionById } from '../../webhook/billing/stripe-projection.ts'
+import { projectSubscriptionById, runPendingStripeProjections } from '../../webhook/billing/stripe-projection.ts'
 
 /** Grace beyond the daemon's ~60s idle-ping cadence before declaring a server stale. */
 export const OFFLINE_SWEEP_STALE_MS = 90_000
@@ -932,6 +932,7 @@ function optionalPhaseNames(scheduledTime: number | undefined): string[] {
   if (shouldRunScheduledPhase(scheduledTime, shouldSweepTierNotices)) {
     names.push('tier-notices')
   }
+  names.push('billing-stripe-projection')
   if (shouldRunScheduledPhase(scheduledTime, shouldRunGraceClock)) {
     names.push('billing-grace-clock')
   }
@@ -1061,6 +1062,21 @@ async function runBillingOptionalPhases(
   // that way by decision on 2026-09-08; see the v6 ledger.
   const billingConfig = resolveBillingConfig(env as unknown as Record<string, string | undefined>)
   if (!billingConfig) return true
+
+  if (
+    !(await runOptionalPhase(
+      deadlineMs,
+      'billing-stripe-projection',
+      opts.scheduledTime,
+      phasesSkipped,
+      async () => {
+        const client = createStripeClient(billingConfig)
+        await runPendingStripeProjections({ db, client })
+      }
+    ))
+  ) {
+    return false
+  }
 
   if (
     !(await runScheduledOptionalPhase(

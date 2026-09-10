@@ -32,6 +32,17 @@
  * same id, and a claim left behind would turn that retry into a `204` and drop
  * the event with nothing left to recover it from.
  *
+ * The JSON the provider sees is deliberately empty of routing detail:
+ * accepted deliveries are `{ ok: true }`; retryable faults are `{ error: 'retry' }`.
+ * `DeliveryOutcome.result` is logged under {@link WebhookGate.logScope} and
+ * never serialized back to GitHub, GitLab, or Stripe.
+ *
+ * Malformed signed JSON after a successful claim is answered **400** and the
+ * claim is kept. Providers retry 5xx, not a body that will never parse;
+ * releasing would only let the same bytes occupy the ledger again. Unexpected
+ * exceptions after the claim are instance-side faults: the claim is released
+ * (best-effort) and the sender is asked to retry with 5xx.
+ *
  * ## Adding a kind
  *
  * Implement {@link WebhookGate} and register it. The gate is generic over
@@ -56,6 +67,9 @@ import {
 } from '../lib/db/webhook-delivery-records.ts'
 import { resolveClientIp } from '../client/authn/http.ts'
 import { readBoundedBodyBytes } from '../lib/http/bounded-body.ts'
+
+/** GitHub honors this on 429; the webhook Redis buckets are 60s windows. */
+export const WEBHOOK_RATE_LIMIT_RETRY_AFTER_SECONDS = 60
 
 /** Case-insensitive header access, so an adapter never touches Hono directly. */
 export type HeaderReader = { get(name: string): string | null }
@@ -225,6 +239,73 @@ async function readRawBody(
   return read.bytes
 }
 
+async function releaseClaimBestEffort<THolder>(
+  gate: WebhookGate<THolder>,
+  db: Db,
+  deliveryId: string,
+): Promise<void> {
+  try {
+    await releaseWebhookDelivery(db, {
+      provider: gate.kind,
+      externalDeliveryId: deliveryId,
+    })
+  } catch (err) {
+    logWarn(
+      gate.logScope,
+      `failed to release delivery ${deliveryId}: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+}
+
+/**
+ * Step 6 after a successful claim. Malformed JSON stays claimed (400).
+ * Retryable outcomes and unexpected throws release, then answer 5xx with
+ * no internal result body.
+ */
+async function dispatchClaimedDelivery<THolder>(
+  c: Context<AppEnv>,
+  gate: WebhookGate<THolder>,
+  ctx: GateContext,
+  holder: THolder,
+  deliveryId: string,
+  event: string,
+  raw: Uint8Array,
+): Promise<Response> {
+  try {
+    const payload = parsePayload(raw)
+    if (!payload) return c.json({ error: 'Invalid request' }, 400)
+
+    const outcome = await gate.dispatch(ctx, holder, event, payload)
+    if (outcome.retry) {
+      await releaseWebhookDelivery(ctx.db, {
+        provider: gate.kind,
+        externalDeliveryId: deliveryId,
+      })
+      logWarn(
+        gate.logScope,
+        `delivery ${deliveryId} (${event}) could not be acted on; asking for a retry`,
+        JSON.stringify(outcome.result),
+      )
+      return c.json({ error: 'retry' }, 503)
+    }
+    logInfo(
+      gate.logScope,
+      `delivery ${deliveryId} (${event}) accepted`,
+      JSON.stringify(outcome.result),
+    )
+    return c.json({ ok: true as const })
+  } catch (err) {
+    await releaseClaimBestEffort(gate, ctx.db, deliveryId)
+    logWarn(
+      gate.logScope,
+      `delivery ${deliveryId} (${event}) threw after claim; asking for a retry: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+    return c.json({ error: 'retry' }, 503)
+  }
+}
+
 /**
  * Mount one gate on every path it answers.
  *
@@ -246,6 +327,7 @@ export function registerWebhookGate<THolder>(
   const handler = async (c: Context<AppEnv>) => {
     // 1. Rate limit first — it is what protects the verification work below.
     if (!(await withinRateLimit(gate, opts, c))) {
+      c.header('Retry-After', String(WEBHOOK_RATE_LIMIT_RETRY_AFTER_SECONDS))
       return c.json({ error: 'Too many requests' }, 429)
     }
 
@@ -306,25 +388,9 @@ export function registerWebhookGate<THolder>(
       return c.body(null, 204)
     }
 
-    // 6. Parse and act.
-    const payload = parsePayload(raw)
-    if (!payload) return c.json({ error: 'Invalid request' }, 400)
-
-    const outcome = await gate.dispatch(ctx, holder, event, payload)
-    if (outcome.retry) {
-      // Give the id back before answering: the sender retries with the same one,
-      // and a claim left behind would turn that retry into the `204` above.
-      await releaseWebhookDelivery(db, {
-        provider: gate.kind,
-        externalDeliveryId: deliveryId,
-      })
-      logWarn(
-        gate.logScope,
-        `delivery ${deliveryId} (${event}) could not be acted on; asking for a retry`,
-      )
-      return c.json({ ok: false as const, event, result: outcome.result }, 503)
-    }
-    return c.json({ ok: true as const, event, result: outcome.result })
+    // 6. Parse and act. Unexpected throws after the claim must release so
+    //    the provider's retry is not answered 204.
+    return await dispatchClaimedDelivery(c, gate, ctx, holder, deliveryId, event, raw)
   }
 
   for (const path of paths) app.post(path, handler)

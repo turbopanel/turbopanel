@@ -118,9 +118,7 @@ async function handleChecks(
 
   const summary = await resolveGithubCheckTrigger(c, db, commandQueue, {
     forgeId,
-    externalInstallationId: check.externalInstallationId,
-    repositoryExternalId: check.repositoryExternalId,
-    commitSha: check.commitSha,
+    ...check,
   })
   return { retry: triggerSummaryNeedsRetry(summary), result: summary }
 }

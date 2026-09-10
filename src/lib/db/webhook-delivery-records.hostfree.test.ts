@@ -9,10 +9,15 @@ import {
   WEBHOOK_DELIVERY_RETENTION_MS,
   WEBHOOK_DELIVERY_SWEEP_LIMIT,
   claimWebhookDelivery,
+  completeStripeProjection,
+  enqueueStripeProjection,
+  listPendingStripeProjections,
   releaseWebhookDelivery,
   sweepExpiredWebhookDeliveries,
   type WebhookDeliveryProvider,
 } from './webhook-delivery-records.ts'
+import { createMemoryDb } from '../../test-fixtures/memory-db.ts'
+import { webhookDelivery } from './schema.ts'
 
 /**
  * `WebhookDeliveryProvider` is no longer an alias of the git union (that was
@@ -119,4 +124,79 @@ test('sweepExpiredWebhookDeliveries returns the deleted count and clamps the lim
 
   const empty = createDeliveryDb({ swept: [] })
   assertEquals(await sweepExpiredWebhookDeliveries(empty, { limit: 0 }), 0)
+})
+
+test('Stripe projection handoff stores the object ref and lists pending work', async () => {
+  const db = createMemoryDb([[webhookDelivery, []]])
+  assertEquals(
+    await claimWebhookDelivery(db, {
+      provider: 'stripe',
+      externalDeliveryId: 'evt_1',
+      event: 'customer.subscription.updated',
+    }),
+    true,
+  )
+  await enqueueStripeProjection(db, {
+    id: 'evt_1',
+    type: 'customer.subscription.updated',
+    objectId: 'sub_1',
+    objectType: 'subscription',
+  })
+  const pending = await listPendingStripeProjections(db, { limit: 10 })
+  assertEquals(pending, [{
+    id: 'evt_1',
+    type: 'customer.subscription.updated',
+    objectId: 'sub_1',
+    objectType: 'subscription',
+  }])
+  await completeStripeProjection(db, 'evt_1', '2026-09-10T00:00:00.000Z')
+  assertEquals(await listPendingStripeProjections(db, { limit: 10 }), [])
+  assertEquals(db.rows(webhookDelivery)[0]?.projectedAt, '2026-09-10T00:00:00.000Z')
+})
+
+test('Stripe projection sweep skips claimed rows until the object-ref handoff', async () => {
+  const db = createMemoryDb([[webhookDelivery, []]])
+  assertEquals(
+    await claimWebhookDelivery(db, {
+      provider: 'stripe',
+      externalDeliveryId: 'evt_pre_handoff',
+      event: 'customer.subscription.updated',
+    }),
+    true,
+  )
+  assertEquals(await listPendingStripeProjections(db, { limit: 10 }), [])
+  assertEquals(db.rows(webhookDelivery)[0]?.objectId, null)
+})
+
+test('enqueueStripeProjection reopens a settled row for retry', async () => {
+  const db = createMemoryDb([[webhookDelivery, []]])
+  assertEquals(
+    await claimWebhookDelivery(db, {
+      provider: 'stripe',
+      externalDeliveryId: 'evt_1',
+      event: 'customer.subscription.updated',
+    }),
+    true,
+  )
+  await enqueueStripeProjection(db, {
+    id: 'evt_1',
+    type: 'customer.subscription.updated',
+    objectId: 'sub_1',
+    objectType: 'subscription',
+  })
+  await completeStripeProjection(db, 'evt_1', '2026-09-10T00:00:00.000Z')
+  assertEquals(await listPendingStripeProjections(db, { limit: 10 }), [])
+  await enqueueStripeProjection(db, {
+    id: 'evt_1',
+    type: 'customer.subscription.updated',
+    objectId: 'sub_1',
+    objectType: 'subscription',
+  })
+  assertEquals(db.rows(webhookDelivery)[0]?.projectedAt, null)
+  assertEquals(await listPendingStripeProjections(db, { limit: 10 }), [{
+    id: 'evt_1',
+    type: 'customer.subscription.updated',
+    objectId: 'sub_1',
+    objectType: 'subscription',
+  }])
 })

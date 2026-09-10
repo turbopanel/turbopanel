@@ -184,6 +184,9 @@ export function resolveWorkersDaemonRateLimiters(
  * surface a missing binding means 429 rather than an unthrottled, publicly
  * reachable endpoint that performs an HMAC and a database write per request.
  * Dev surfaces get a noop so `wrangler dev` works without the binding.
+ * Self-hosted Deno uses a Redis limiter with a process-local token-bucket
+ * fallback (`onError: 'local'` in `src/deno-server.ts`) so a broker hiccup
+ * still throttles per peer.
  */
 export function resolveWorkersGithubWebhookRateLimiter(
   env: CloudflareBindings,

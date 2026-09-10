@@ -1530,6 +1530,7 @@ import {
   subscription,
   subscriptionItem,
   tier,
+  webhookDelivery,
 } from "../../lib/db/schema.ts";
 import { BILLING_RECONCILE_REPORT_KEY } from "../../lib/billing/reconcile.ts";
 import { deriveEncryptionSecretsConfig } from "../../client/authn/secrets.ts";
@@ -1557,6 +1558,7 @@ function billingSweepDb(opts: { withSubscription: boolean }): MemoryDb {
     [payer, []],
     ...(opts.withSubscription ? [[subscription, []] as [typeof subscription, Record<string, unknown>[]]] : []),
     [subscriptionItem, []],
+    [webhookDelivery, []],
   ]);
 }
 

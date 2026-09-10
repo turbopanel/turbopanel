@@ -53,6 +53,7 @@ import type {
   RepositorySummary,
   WebhookHeaders,
 } from './git-provider.ts'
+import { normalizeCheckRef } from './check-ref.ts'
 import { branchFromGitRef, isCommitSha } from './clone-url.ts'
 import {
   gitlabGetJson,
@@ -172,6 +173,7 @@ export function parseGitlabPipeline(
     externalInstallationId: null,
     repositoryExternalId: repository,
     commitSha: attributes.sha,
+    ref: normalizeCheckRef(attributes.ref),
   }
 }
 
