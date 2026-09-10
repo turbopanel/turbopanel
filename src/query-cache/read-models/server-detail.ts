@@ -49,9 +49,10 @@ export type ServerDetailDisplayPayload = {
  * SQL executed (read-only SELECT only; no transactions, mutations, or stable/
  * volatile PostgreSQL functions such as `now()`, `random()`, `nextval()`,
  * `clock_timestamp()`):
- *   1. `SELECT server.id, name, organization_id, license.id, options,
- *      created_at FROM server LEFT JOIN license ON license.server_id = server.id
- *      WHERE server.id = :serverId AND server.organization_id = :organizationId`
+ *   1. `SELECT server.id, name, organization_id, license.id, machine_class,
+ *      options, created_at FROM server LEFT JOIN license ON
+ *      license.server_id = server.id WHERE server.id = :serverId AND
+ *      server.organization_id = :organizationId`
  *   2. `SELECT id, daemon, metadata, hostname, machine_key, connected,
  *      status_changed_at FROM server WHERE id IN (:serverIds)`
  *      (shared preload for presence + org-scoped colocated enrichment)

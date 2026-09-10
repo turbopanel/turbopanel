@@ -21,7 +21,7 @@ import {
   LICENSE_TIER_UNASSIGNED_ERROR,
 } from "../lib/tiers/tier-enforcement.ts";
 import { getDatabaseUrl } from "../db-url.ts";
-import { createDenoDb } from "../db.ts";
+import { createDenoDb, endDbConnection } from "../db.ts";
 import {
   container,
   environment,
@@ -690,19 +690,23 @@ async function withEnrollFixture(
       extraTierIds,
     });
   } finally {
-    const orgServers = await db
-      .select({ id: server.id })
-      .from(server)
-      .where(eq(server.organizationId, organizationId));
-    for (const row of orgServers) {
-      await deleteOrganizationServerTree(db, organizationId, row.id);
+    try {
+      const orgServers = await db
+        .select({ id: server.id })
+        .from(server)
+        .where(eq(server.organizationId, organizationId));
+      for (const row of orgServers) {
+        await deleteOrganizationServerTree(db, organizationId, row.id);
+      }
+      await db.delete(license).where(eq(license.organizationId, organizationId));
+      await deleteOrganizationPurchase(db, organizationId);
+      for (const id of extraTierIds) {
+        await db.delete(tier).where(eq(tier.id, id));
+      }
+      await db.delete(organization).where(eq(organization.id, organizationId));
+    } finally {
+      await endDbConnection(db);
     }
-    await db.delete(license).where(eq(license.organizationId, organizationId));
-    await deleteOrganizationPurchase(db, organizationId);
-    for (const id of extraTierIds) {
-      await db.delete(tier).where(eq(tier.id, id));
-    }
-    await db.delete(organization).where(eq(organization.id, organizationId));
   }
 }
 
@@ -837,24 +841,28 @@ test("POST /enroll rejects a raw machine-id shaped machineKey", async () => {
     return;
   }
   const db = createDenoDb();
-  const app = await createTestApp(db);
-  const key = await generateKeyMaterial();
-  const response = await app.request("/api/daemon/v1/enroll", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      licenseId: crypto.randomUUID(),
-      licenseToken: "dummy-token",
-      machineKey: RAW_MACHINE_ID,
-      hostname: "host-test",
-      publicJwk: key.publicJwk,
-      challengeId: crypto.randomUUID(),
-      signature: "aa",
-    }),
-  });
-  assertEquals(response.status, 400);
-  const body = (await response.json()) as { error?: string };
-  assertEquals(body.error, "Invalid machineKey");
+  try {
+    const app = await createTestApp(db);
+    const key = await generateKeyMaterial();
+    const response = await app.request("/api/daemon/v1/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        licenseId: crypto.randomUUID(),
+        licenseToken: "dummy-token",
+        machineKey: RAW_MACHINE_ID,
+        hostname: "host-test",
+        publicJwk: key.publicJwk,
+        challengeId: crypto.randomUUID(),
+        signature: "aa",
+      }),
+    });
+    assertEquals(response.status, 400);
+    const body = (await response.json()) as { error?: string };
+    assertEquals(body.error, "Invalid machineKey");
+  } finally {
+    await endDbConnection(db);
+  }
 });
 
 test("POST /enroll returns 400 for malformed tpchallenge id", async () => {
@@ -865,25 +873,29 @@ test("POST /enroll returns 400 for malformed tpchallenge id", async () => {
     return;
   }
   const db = createDenoDb();
-  const app = await createTestApp(db);
-  const key = await generateKeyMaterial();
-  // Invalid base64url signature segment must not 500 — same invalid-challenge contract.
-  const response = await app.request("/api/daemon/v1/enroll", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      licenseId: crypto.randomUUID(),
-      licenseToken: "dummy-token",
-      machineKey: randomMachineKey(),
-      hostname: "host-test",
-      publicJwk: key.publicJwk,
-      challengeId: "tpchallenge.v1.cGF5bG9hZA.%%%",
-      signature: "aa",
-    }),
-  });
-  assertEquals(response.status, 400);
-  const body = (await response.json()) as { error?: string };
-  assertEquals(body.error, "Invalid or expired challenge");
+  try {
+    const app = await createTestApp(db);
+    const key = await generateKeyMaterial();
+    // Invalid base64url signature segment must not 500 — same invalid-challenge contract.
+    const response = await app.request("/api/daemon/v1/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        licenseId: crypto.randomUUID(),
+        licenseToken: "dummy-token",
+        machineKey: randomMachineKey(),
+        hostname: "host-test",
+        publicJwk: key.publicJwk,
+        challengeId: "tpchallenge.v1.cGF5bG9hZA.%%%",
+        signature: "aa",
+      }),
+    });
+    assertEquals(response.status, 400);
+    const body = (await response.json()) as { error?: string };
+    assertEquals(body.error, "Invalid or expired challenge");
+  } finally {
+    await endDbConnection(db);
+  }
 });
 
 test("POST /auth/session returns 400 for malformed tpchallenge id", async () => {

@@ -3,7 +3,7 @@ import { and, eq } from 'drizzle-orm'
 import { Hono } from 'hono'
 import type { AppEnv } from '../../app.ts'
 import { getDatabaseUrl } from '../../db-url.ts'
-import { createDenoDb } from '../../db.ts'
+import { createDenoDb, endDbConnection } from '../../db.ts'
 import type { DaemonCell, DaemonCellRegistry } from '../../daemon/cell/contracts.ts'
 import {
   buildSignedCookie,
@@ -250,6 +250,7 @@ const SERVERS_LIST_SELECT_KEYS = new Set([
   'name',
   'organizationId',
   'licenseId',
+  'machineClass',
   'options',
   'createdAt',
 ])
@@ -351,6 +352,7 @@ test('createListRowsOnlyReadDb rejects partial servers-list select columns', asy
       name: server.name,
       organizationId: server.organizationId,
       licenseId: license.id,
+      machineClass: server.machineClass,
       options: server.options,
       createdAt: server.createdAt,
       daemon: server.daemon,
@@ -365,6 +367,7 @@ test('createListRowsOnlyReadDb rejects partial servers-list select columns', asy
     name: server.name,
     organizationId: server.organizationId,
     licenseId: license.id,
+    machineClass: server.machineClass,
     options: server.options,
     createdAt: server.createdAt,
   })
@@ -412,6 +415,7 @@ const SERVER_DETAIL_SELECT_KEYS = new Set([
   'name',
   'organizationId',
   'licenseId',
+  'machineClass',
   'options',
   'createdAt',
 ])
@@ -551,18 +555,22 @@ async function withServerDeleteFixtures(
       registry,
     })
   } finally {
-    await db.delete(server).where(eq(server.id, serverId))
-    await db.delete(grant).where(and(
-      eq(grant.actorId, userId),
-      eq(grant.entityId, organizationId),
-    ))
-    await db.delete(teammate).where(and(
-      eq(teammate.teamId, teamId),
-      eq(teammate.userId, userId),
-    ))
-    await db.delete(team).where(eq(team.id, teamId))
-    await db.delete(user).where(eq(user.id, userId))
-    await db.delete(organization).where(eq(organization.id, organizationId))
+    try {
+      await db.delete(server).where(eq(server.id, serverId))
+      await db.delete(grant).where(and(
+        eq(grant.actorId, userId),
+        eq(grant.entityId, organizationId),
+      ))
+      await db.delete(teammate).where(and(
+        eq(teammate.teamId, teamId),
+        eq(teammate.userId, userId),
+      ))
+      await db.delete(team).where(eq(team.id, teamId))
+      await db.delete(user).where(eq(user.id, userId))
+      await db.delete(organization).where(eq(organization.id, organizationId))
+    } finally {
+      await endDbConnection(db)
+    }
   }
 }
 
@@ -932,6 +940,7 @@ test('DELETE /servers/:id returns 403 not 503 for self-host-pinned server withou
     ))
     await db.delete(user).where(eq(user.id, userId))
     await db.delete(organization).where(eq(organization.id, organizationId))
+    await endDbConnection(db)
   }
 })
 
@@ -1167,6 +1176,7 @@ test('DELETE /servers/:id invalidates the bound license on Workers runtime', asy
     ))
     await db.delete(user).where(eq(user.id, userId))
     await db.delete(organization).where(eq(organization.id, organizationId))
+    await endDbConnection(db)
   }
 })
 
@@ -1292,6 +1302,7 @@ test('DELETE /servers/:id returns 503 when daemon cell registry is unavailable',
     ))
     await db.delete(user).where(eq(user.id, userId))
     await db.delete(organization).where(eq(organization.id, organizationId))
+    await endDbConnection(db)
   }
 })
 
@@ -1386,6 +1397,7 @@ test('DELETE /servers/:id returns 500 when purge fails after row delete', async 
     ))
     await db.delete(user).where(eq(user.id, userId))
     await db.delete(organization).where(eq(organization.id, organizationId))
+    await endDbConnection(db)
   }
 })
 
@@ -1475,6 +1487,7 @@ test('GET /servers/updates does not call listRequests on the cell', async () => 
     ))
     await db.delete(user).where(eq(user.id, userId))
     await db.delete(organization).where(eq(organization.id, organizationId))
+    await endDbConnection(db)
   }
 })
 
@@ -1759,6 +1772,7 @@ test('GET /servers/:id/cell returns data for an admin user', async () => {
     await db.delete(server).where(eq(server.id, serverId))
     await db.delete(user).where(eq(user.id, userId))
     await db.delete(organization).where(eq(organization.id, organizationId))
+    await endDbConnection(db)
   }
 })
 
@@ -1901,6 +1915,7 @@ test('GET /servers — empty visibleIds short-circuits before cache', async () =
     await db.delete(team).where(eq(team.id, teamId))
     await db.delete(user).where(eq(user.id, userId))
     await db.delete(organization).where(eq(organization.id, organizationId))
+    await endDbConnection(db)
   }
 })
 
@@ -2248,55 +2263,59 @@ test('PATCH /servers/:id rejects datacenterId (membership is via member pins)', 
   if (!dbUrl) return
 
   const db = createDenoDb()
-  const { app, secrets } = await createServerRoutesTestApp(db)
+  try {
+    const { app, secrets } = await createServerRoutesTestApp(db)
 
-  const [orgA] = await db
-    .insert(organization)
-    .values({ name: 'Patch Server Org A' })
-    .returning({ id: organization.id })
+    const [orgA] = await db
+      .insert(organization)
+      .values({ name: 'Patch Server Org A' })
+      .returning({ id: organization.id })
 
-  const [u] = await db
-    .insert(user)
-    .values({ email: `patch-srv-${crypto.randomUUID()}@example.com`, isEmailVerified: true })
-    .returning({ id: user.id })
-  const userId = u!.id
+    const [u] = await db
+      .insert(user)
+      .values({ email: `patch-srv-${crypto.randomUUID()}@example.com`, isEmailVerified: true })
+      .returning({ id: user.id })
+    const userId = u!.id
 
-  await db.insert(grant).values({
-    entityType: 'organization',
-    entityId: orgA!.id,
-    actorType: 'user',
-    actorId: userId,
-    permission: 'organization:manage',
-  })
-
-  const now = new Date().toISOString()
-  const [srv] = await db
-    .insert(server)
-    .values({
-      organizationId: orgA!.id,
-      name: 'Host',
-      createdAt: now,
-      updatedAt: now,
+    await db.insert(grant).values({
+      entityType: 'organization',
+      entityId: orgA!.id,
+      actorType: 'user',
+      actorId: userId,
+      permission: 'organization:manage',
     })
-    .returning({ id: server.id })
 
-  const cookie = await sessionCookie(db, secrets, userId)
+    const now = new Date().toISOString()
+    const [srv] = await db
+      .insert(server)
+      .values({
+        organizationId: orgA!.id,
+        name: 'Host',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: server.id })
 
-  const rejected = await app.request(`/servers/${srv!.id}`, {
-    method: 'PATCH',
-    headers: {
-      Cookie: cookie,
-      [ORG_ID_HEADER]: orgA!.id,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ datacenterId: crypto.randomUUID() }),
-  })
-  assertEquals(rejected.status, 400)
+    const cookie = await sessionCookie(db, secrets, userId)
 
-  await db.delete(server).where(eq(server.id, srv!.id))
-  await db.delete(grant).where(eq(grant.actorId, userId))
-  await db.delete(user).where(eq(user.id, userId))
-  await db.delete(organization).where(eq(organization.id, orgA!.id))
+    const rejected = await app.request(`/servers/${srv!.id}`, {
+      method: 'PATCH',
+      headers: {
+        Cookie: cookie,
+        [ORG_ID_HEADER]: orgA!.id,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ datacenterId: crypto.randomUUID() }),
+    })
+    assertEquals(rejected.status, 400)
+
+    await db.delete(server).where(eq(server.id, srv!.id))
+    await db.delete(grant).where(eq(grant.actorId, userId))
+    await db.delete(user).where(eq(user.id, userId))
+    await db.delete(organization).where(eq(organization.id, orgA!.id))
+  } finally {
+    await endDbConnection(db)
+  }
 })
 
 test('PATCH /servers/:id does not commit hosting.enabled when hierarchy fails', async () => {
