@@ -209,3 +209,42 @@ test('parseCronSchedule rejects malformed schedules and unsupported aliases', ()
   assertEquals(parseCronSchedule('').ok, false)
   assertEquals(parseCronSchedule(7).ok, false)
 })
+
+test('a timezone is appended as systemd\'s trailing calendar field', () => {
+  const result = cronToOnCalendar('0 3 * * *', 'Europe/Berlin')
+  assert(result.ok, 'expected a zoned schedule to translate')
+  assertEquals(result.value, '*-*-* 3:0:00 Europe/Berlin')
+})
+
+test('an underscored zone survives translation', () => {
+  // `America/New_York` is the case that widened the wire charset on both sides.
+  const result = cronToOnCalendar('30 2 * * *', 'America/New_York')
+  assert(result.ok, 'expected an underscored zone to translate')
+  assertEquals(result.value, '*-*-* 2:30:00 America/New_York')
+})
+
+test('an alias schedule keeps its timezone through expansion', () => {
+  const result = cronToOnCalendar('@daily', 'Europe/Berlin')
+  assert(result.ok, 'expected an alias with a zone to translate')
+  assertStringIncludes(result.value, 'Europe/Berlin')
+})
+
+test('omitting a timezone leaves the calendar event unzoned', () => {
+  // Host-local time is what a timer with no zone has always meant; adding a
+  // zone by default would silently move every existing job.
+  assertEquals(calendar('0 3 * * *'), '*-*-* 3:0:00')
+})
+
+test('a timezone that systemd would not accept is refused', () => {
+  for (const bad of ['Not/AZone; rm -rf /', 'Europe/Berlin ', '../etc', '']) {
+    const result = cronToOnCalendar('0 3 * * *', bad)
+    assert(!result.ok, `expected "${bad}" to be rejected as a timezone`)
+  }
+})
+
+test('a rejected schedule is still rejected when a zone is supplied', () => {
+  // The day-field union refusal is the module's whole reason to exist; a zone
+  // must not become a way around it.
+  const result = cronToOnCalendar('0 0 13 * 5', 'Europe/Berlin')
+  assert(!result.ok, 'expected the day-field union to stay refused')
+})

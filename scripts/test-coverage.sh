@@ -248,6 +248,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/repositories/provider-install-state.hostfree.test.ts \
   src/client/forges/routes-helpers.hostfree.test.ts \
   src/client/forges/handlers.hostfree.test.ts \
+  src/client/forges/routes.hostfree.test.ts \
   src/client/repositories/routes-helpers.hostfree.test.ts \
   src/client/repositories/routes.hostfree.test.ts \
   src/client/repositories/webhook-trigger.hostfree.test.ts \
@@ -529,6 +530,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/query-cache/read-models/server-detail.test.ts \
   src/query-cache/read-models/servers-list.test.ts \
   src/query-cache/redis-query-cache.test.ts \
+  src/query-cache/hyperdrive-query-cache.test.ts \
   src/runtime-paths.test.ts \
   src/scalar-html.test.ts \
   src/server-paths.deno.test.ts \
@@ -575,6 +577,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/organizations/fabric-routes.hostfree.test.ts \
   src/client/organizations/fabric-routes-authz.hostfree.test.ts \
   src/client/projects/routes-helpers.hostfree.test.ts \
+  src/client/projects/routes.hostfree.test.ts \
   src/client/services/routes.test.ts \
   src/client/services/routes-helpers.hostfree.test.ts \
   src/client/services/routes.hostfree.test.ts \
@@ -595,6 +598,10 @@ echo "==> Deno LCOV"
 deno coverage coverage/deno-profile --lcov --output=coverage/deno.lcov
 
 # Deno on Linux CI often emits absolute SF: paths; Sonar needs repo-relative.
+# Co-located suites can dynamically import a sibling checkout (e.g.
+# ../turbopaneld/src/metrics/contract.ts); Deno coverage then emits that file as
+# an absolute SF: outside this repo. Drop those records — they are not this
+# project's sources, and leaving them would make SonarCloud drop the report.
 echo "==> Normalize Deno LCOV SF paths"
 export LCOV_FILE=coverage/deno.lcov
 export LCOV_WORKSPACE="$workspace"
@@ -607,6 +614,19 @@ text = path.read_text()
 workspace = os.environ["LCOV_WORKSPACE"].rstrip("/")
 for prefix in (f"file://{workspace}/", f"{workspace}/"):
     text = text.replace(f"SF:{prefix}", "SF:")
+
+parts = text.split("end_of_record")
+kept = []
+dropped = 0
+for part in parts:
+    sf = next((line[3:] for line in part.split("\n") if line.startswith("SF:")), None)
+    if sf is not None and (sf.startswith("/") or sf.startswith("file:")):
+        dropped += 1
+        continue
+    kept.append(part)
+text = "end_of_record".join(kept)
+if dropped:
+    print(f"Dropped {dropped} out-of-repo SF record(s) from {path}")
 path.write_text(text)
 PY
 

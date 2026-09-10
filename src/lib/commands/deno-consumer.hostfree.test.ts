@@ -248,6 +248,45 @@ test('startCommandConsumer close swallows cancel and connection errors', async (
   }
 })
 
+test('startCommandConsumer retries a non-Error connect failure then succeeds', async () => {
+  const broker = createStubBroker()
+  let attempts = 0
+  const connectStub = stub(amqplib, 'connect', () => {
+    attempts += 1
+    if (attempts === 1) return Promise.reject('broker down')
+    return Promise.resolve(broker.connection as never)
+  })
+  try {
+    const handle = await startCommandConsumer({
+      db: missingRowDb(),
+      registry: emptyRegistry(),
+      amqpUrl: 'amqp://retry-string',
+    })
+    assertEquals(attempts, 2)
+    await handle.close()
+  } finally {
+    connectStub.restore()
+  }
+})
+
+test('startCommandConsumer dead-letters a non-Error permanent processing error', async () => {
+  const broker = createStubBroker()
+  const connectStub = stub(amqplib, 'connect', () => Promise.resolve(broker.connection as never))
+  try {
+    const handle = await startCommandConsumer({
+      db: throwingDb('data integrity failure' as unknown as Error),
+      registry: emptyRegistry(),
+      amqpUrl: 'amqp://test',
+    })
+    broker.deliver({ content: { toString: () => PING_ENVELOPE_JSON } })
+    await waitForDisposition(broker.dispositions)
+    assertEquals(broker.dispositions, [{ method: 'nack', requeue: false }])
+    await handle.close()
+  } finally {
+    connectStub.restore()
+  }
+})
+
 test('startCommandConsumer retries AMQP connect once then succeeds', async () => {
   const broker = createStubBroker()
   let attempts = 0

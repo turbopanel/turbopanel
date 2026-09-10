@@ -16,11 +16,13 @@ import type { Db } from "../db.ts";
 import { deriveDaemonJwtKeyring } from "./authn/daemon-jwt-keyring.ts";
 import { issueDaemonJwt } from "./authn/daemon-jwt.ts";
 import { registerDaemonApiRoutes } from "./api-routes.ts";
-import type {
-  ExecutionLogAppendResult,
-  ExecutionLogChunk,
-  ExecutionLogSealResult,
-  ExecutionLogStore,
+import {
+  ExecutionLogGapError,
+  ExecutionLogSealedError,
+  type ExecutionLogAppendResult,
+  type ExecutionLogChunk,
+  type ExecutionLogSealResult,
+  type ExecutionLogStore,
 } from "../lib/execution-logs/types.ts";
 
 const SERVER_ID = "srv-log-seal";
@@ -170,5 +172,86 @@ describe("POST /commands/:commandId/log seal-on-terminal", () => {
     assertEquals(status, 202);
     assertEquals(store.appends, [0]);
     assert(store.seals.length === 0, "a live command must not be compacted");
+  });
+});
+
+async function postChunkWithStore(
+  store: ExecutionLogStore,
+): Promise<Response> {
+  const db = createFakeDb([
+    [activeDaemonKeyRow()],
+    [{ serverId: SERVER_ID, status: "running" }],
+  ]);
+
+  const app = new Hono<AppEnv>();
+  app.use("*", (c, next) => {
+    c.set("db", db);
+    c.set("executionLogStore", store);
+    return next();
+  });
+  const secrets = await testSecrets();
+  registerDaemonApiRoutes(app as unknown as Hono, { secrets });
+
+  const issued = await issueDaemonJwt({ sub: SERVER_ID, kid: KEY_ID }, secrets);
+  return await app.request(
+    `/api/daemon/v1/commands/${COMMAND_ID}/log`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${issued.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ seq: 2, bytes: btoa("output") }),
+    },
+  );
+}
+
+function throwingStore(error: Error): ExecutionLogStore {
+  return {
+    appendChunk() {
+      return Promise.reject(error);
+    },
+    readFrom() {
+      return Promise.resolve(null);
+    },
+    exists() {
+      return Promise.resolve(true);
+    },
+    seal() {
+      return Promise.resolve({ bytes: 0 });
+    },
+    delete() {
+      return Promise.resolve();
+    },
+    sweepExpired() {
+      return Promise.resolve(0);
+    },
+  };
+}
+
+describe("POST /commands/:commandId/log seq errors", () => {
+  it("returns 409 seq gap when append skips a sequence", async () => {
+    const response = await postChunkWithStore(
+      throwingStore(new ExecutionLogGapError(1, 2)),
+    );
+    assertEquals(response.status, 409);
+    const body = await response.json() as {
+      ok?: unknown;
+      error?: unknown;
+      nextSeq?: unknown;
+    };
+    assertEquals(body.ok, false);
+    assertEquals(body.error, "seq gap");
+    assertEquals(body.nextSeq, 1);
+  });
+
+  it("returns 409 log sealed when append arrives after compact", async () => {
+    const response = await postChunkWithStore(
+      throwingStore(new ExecutionLogSealedError(COMMAND_ID)),
+    );
+    assertEquals(response.status, 409);
+    const body = await response.json() as { ok?: unknown; error?: unknown };
+    assertEquals(body.ok, false);
+    assertEquals(body.error, "log sealed");
   });
 });

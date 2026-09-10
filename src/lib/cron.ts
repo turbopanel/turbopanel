@@ -17,8 +17,19 @@
  * monthly — so it is rejected with the reason.
  */
 
+import { isValidTimezone } from './timezones.ts'
+
 /** Cap per service, so one compose block cannot generate an unbounded unit set. */
 export const MAX_CRON_JOBS_PER_SERVICE = 20
+
+/**
+ * Longest run a job may declare, in seconds (24h).
+ *
+ * Rendered as `RuntimeMaxSec=`; a job that outlives it is killed. The ceiling
+ * exists so a typo cannot pin a timer's unit active forever and quietly block
+ * every later firing under `forbid`.
+ */
+export const MAX_CRON_TIMEOUT_SECONDS = 86_400
 
 /** Longest command line accepted, before argv splitting. */
 const MAX_COMMAND_LENGTH = 1000
@@ -399,15 +410,32 @@ export function parseCronSchedule(input: unknown): CronParseResult<string> {
   return { ok: true, value: trimmed }
 }
 
-export function cronToOnCalendar(input: unknown): CronParseResult<string> {
+/**
+ * Translate a cron expression into a systemd `OnCalendar` value.
+ *
+ * `timezone` is an optional IANA identifier. systemd accepts one as a trailing
+ * field on the calendar spec (`Mon *-*-* 03:00:00 Europe/Berlin`), and doing it
+ * here keeps the module's promise that cron is translated in exactly one place:
+ * the daemon validates the string it is handed and renders it, it never parses
+ * a zone itself. Omitted means the host's local time, which is what a timer
+ * with no zone has always meant.
+ */
+export function cronToOnCalendar(
+  input: unknown,
+  timezone?: string | null,
+): CronParseResult<string> {
   if (typeof input !== 'string') return fail('a schedule must be text')
   const trimmed = input.trim()
   if (trimmed.length === 0) return fail('a schedule is required')
   if (trimmed.length > 200) return fail('that schedule is too long to be one')
 
+  if (timezone !== undefined && timezone !== null && !isValidTimezone(timezone)) {
+    return fail('that is not a timezone name systemd will accept')
+  }
+
   if (trimmed.startsWith('@')) {
     const alias = expandCronAlias(trimmed)
-    return alias.ok ? cronToOnCalendar(alias.value) : alias
+    return alias.ok ? cronToOnCalendar(alias.value, timezone) : alias
   }
 
   const parsed = parseCronFields(trimmed)
@@ -429,7 +457,8 @@ export function cronToOnCalendar(input: unknown): CronParseResult<string> {
   const date = `*-${renderNumericField(month)}-${renderNumericField(dom)}`
   const time = `${renderNumericField(hour)}:${renderNumericField(minute)}:00`
   const prefix = weekday.value.length > 0 ? `${weekday.value} ` : ''
-  return { ok: true, value: `${prefix}${date} ${time}` }
+  const zone = timezone ? ` ${timezone}` : ''
+  return { ok: true, value: `${prefix}${date} ${time}${zone}` }
 }
 
 /**

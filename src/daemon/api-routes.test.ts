@@ -3462,6 +3462,79 @@ test("POST /enroll and POST /metrics do not enqueue capability-plan-update for s
   );
 });
 
+test("POST /enroll primes capability-plan-update on hosted runtime", async () => {
+  await withEnrollFixture(
+    async ({ db, licenseId, licenseToken, machineKey, hostname, key }) => {
+      const tracking = createEnqueueTrackingRegistry();
+      const enrollApp = await createTestAppWithRegistry(db, tracking.registry);
+      const enrollResponse = await postEnroll(enrollApp, {
+        licenseId,
+        licenseToken,
+        machineKey,
+        hostname,
+        key,
+      });
+      assertEquals(enrollResponse.status, 200);
+      const enrollBody = (await enrollResponse.json()) as { serverId: string };
+      assertEquals(
+        await waitForCondition(() =>
+          Promise.resolve(
+            tracking.enqueued.some((envelope) =>
+              envelope.kind === "capability-plan-update"
+            ),
+          )
+        ),
+        true,
+      );
+      const primed = await getLatestCapabilityPlanGeneration(
+        db,
+        enrollBody.serverId,
+      );
+      assertExists(primed);
+      assertEquals(typeof primed.generation, "number");
+    },
+    { enroll: false },
+  );
+});
+
+test("POST /enroll still returns 200 when capability-plan prime fails", async () => {
+  await withEnrollFixture(
+    async ({ db, licenseId, licenseToken, machineKey, hostname, key }) => {
+      const tracking = createEnqueueTrackingRegistry();
+      const brokenRegistry: DaemonCellRegistry = {
+        ...tracking.registry,
+        getCell: () => {
+          const cell = tracking.registry.getCell("track");
+          return {
+            ...cell,
+            enqueue: () => Promise.reject(new TypeError("outbox down")),
+          };
+        },
+      };
+      const enrollApp = await createTestAppWithRegistry(db, brokenRegistry);
+      const enrollResponse = await postEnroll(enrollApp, {
+        licenseId,
+        licenseToken,
+        machineKey,
+        hostname,
+        key,
+      });
+      assertEquals(enrollResponse.status, 200);
+      const enrollBody = (await enrollResponse.json()) as {
+        serverId?: unknown;
+        keyId?: unknown;
+      };
+      if (typeof enrollBody.serverId !== "string") {
+        throw new TypeError("expected enroll serverId");
+      }
+      if (typeof enrollBody.keyId !== "string") {
+        throw new TypeError("expected enroll keyId");
+      }
+    },
+    { enroll: false },
+  );
+});
+
 test("POST /metrics rejects an oversized request body", async () => {
   const { app, writes } = await createMetricsTestApp();
   const daemonToken = await issueDaemonToken(
@@ -3524,6 +3597,74 @@ test("POST /auth/session rejects an oversized request body", async () => {
     });
     assertEquals(response.status, 413);
   });
+});
+
+/** Chunked body so Fetch does not attach a truthful Content-Length. */
+function oversizedBodyStream(byteLength: number): ReadableStream<Uint8Array> {
+  const chunk = new Uint8Array(Math.min(byteLength, 8192));
+  chunk.fill(0x78);
+  let remaining = byteLength;
+  return new ReadableStream({
+    pull(controller) {
+      if (remaining <= 0) {
+        controller.close();
+        return;
+      }
+      const n = Math.min(remaining, chunk.byteLength);
+      controller.enqueue(chunk.subarray(0, n));
+      remaining -= n;
+    },
+  });
+}
+
+test("POST /auth/challenge rejects an oversized body without Content-Length", async () => {
+  const app = await createDecryptTestApp();
+  const response = await app.request("/api/daemon/v1/auth/challenge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: oversizedBodyStream(MAX_AUTH_CHALLENGE_BODY_BYTES + 1),
+  });
+  assertEquals(response.status, 413);
+});
+
+test("POST /enroll rejects an oversized body without Content-Length", async () => {
+  await withEnrollFixture(async ({ app }) => {
+    const response = await app.request("/api/daemon/v1/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: oversizedBodyStream(MAX_ENROLL_BODY_BYTES + 1),
+    });
+    assertEquals(response.status, 413);
+  });
+});
+
+test("POST /auth/session rejects an oversized body without Content-Length", async () => {
+  await withEnrollFixture(async ({ app }) => {
+    const response = await app.request("/api/daemon/v1/auth/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: oversizedBodyStream(MAX_AUTH_SESSION_BODY_BYTES + 1),
+    });
+    assertEquals(response.status, 413);
+  });
+});
+
+test("POST /metrics rejects an oversized body without Content-Length", async () => {
+  const { app, writes } = await createMetricsTestApp();
+  const daemonToken = await issueDaemonToken(
+    "srv-metrics-stream",
+    "key-metrics-stream",
+  );
+  const response = await app.request("/api/daemon/v1/metrics", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: oversizedBodyStream(MAX_METRICS_PAYLOAD_BYTES + 1),
+  });
+  assertEquals(response.status, 413);
+  assertEquals(writes.length, 0);
 });
 
 test("POST /metrics rejects JWT after license invalidation", async () => {

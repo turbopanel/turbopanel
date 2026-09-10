@@ -16,12 +16,21 @@ import {
   DEFAULT_DAEMON_METRICS_RATE_PERIOD_SECONDS,
   DEFAULT_DAEMON_REST_RATE_LIMIT,
   DEFAULT_DAEMON_REST_RATE_PERIOD_SECONDS,
+  DEFAULT_GITHUB_WEBHOOK_RATE_LIMIT,
+  DEFAULT_GITHUB_WEBHOOK_RATE_PERIOD_SECONDS,
+  DEFAULT_GITLAB_WEBHOOK_RATE_LIMIT,
+  DEFAULT_GITLAB_WEBHOOK_RATE_PERIOD_SECONDS,
+  DEFAULT_STRIPE_WEBHOOK_RATE_LIMIT,
+  DEFAULT_STRIPE_WEBHOOK_RATE_PERIOD_SECONDS,
   resolveClientAuthRateLimit,
   resolveClientAuthStrictRateLimit,
   resolveDaemonConnectRateLimit,
   resolveDaemonMetricsRateLimit,
   resolveDaemonRestRateLimit,
   resolveDaemonWsInboundLimits,
+  resolveGithubWebhookRateLimit,
+  resolveGitlabWebhookRateLimit,
+  resolveStripeWebhookRateLimit,
 } from './redis-rate-limiter.ts'
 import {
   daemonConnectRateLimitKey,
@@ -260,6 +269,66 @@ test('resolveDaemonWsInboundLimits defaults and env overrides', () => {
     }),
     { limit: 90, windowMs: 45_000 },
   )
+})
+
+test('resolveGithub/Gitlab/Stripe webhook rate limits default and env overrides', () => {
+  const empty = { get: () => undefined }
+  assertEquals(resolveGithubWebhookRateLimit(empty), {
+    limit: DEFAULT_GITHUB_WEBHOOK_RATE_LIMIT,
+    periodSeconds: DEFAULT_GITHUB_WEBHOOK_RATE_PERIOD_SECONDS,
+  })
+  assertEquals(resolveGitlabWebhookRateLimit(empty), {
+    limit: DEFAULT_GITLAB_WEBHOOK_RATE_LIMIT,
+    periodSeconds: DEFAULT_GITLAB_WEBHOOK_RATE_PERIOD_SECONDS,
+  })
+  assertEquals(resolveStripeWebhookRateLimit(empty), {
+    limit: DEFAULT_STRIPE_WEBHOOK_RATE_LIMIT,
+    periodSeconds: DEFAULT_STRIPE_WEBHOOK_RATE_PERIOD_SECONDS,
+  })
+
+  const env = {
+    get: (key: string) => {
+      const values: Record<string, string> = {
+        TURBOPANEL_GITHUB_WEBHOOK_RATE_LIMIT: '80',
+        TURBOPANEL_GITHUB_WEBHOOK_RATE_PERIOD: '30',
+        TURBOPANEL_GITLAB_WEBHOOK_RATE_LIMIT: '90',
+        TURBOPANEL_GITLAB_WEBHOOK_RATE_PERIOD: '45',
+        TURBOPANEL_STRIPE_WEBHOOK_RATE_LIMIT: '20',
+        TURBOPANEL_STRIPE_WEBHOOK_RATE_PERIOD: '15',
+      }
+      return values[key]
+    },
+  }
+  assertEquals(resolveGithubWebhookRateLimit(env), {
+    limit: 80,
+    periodSeconds: 30,
+  })
+  assertEquals(resolveGitlabWebhookRateLimit(env), {
+    limit: 90,
+    periodSeconds: 45,
+  })
+  assertEquals(resolveStripeWebhookRateLimit(env), {
+    limit: 20,
+    periodSeconds: 15,
+  })
+})
+
+test('webhook rate limit resolvers ignore non-positive env values', () => {
+  const env = {
+    get: () => '0',
+  }
+  assertEquals(resolveGithubWebhookRateLimit(env), {
+    limit: DEFAULT_GITHUB_WEBHOOK_RATE_LIMIT,
+    periodSeconds: DEFAULT_GITHUB_WEBHOOK_RATE_PERIOD_SECONDS,
+  })
+  assertEquals(resolveGitlabWebhookRateLimit(env), {
+    limit: DEFAULT_GITLAB_WEBHOOK_RATE_LIMIT,
+    periodSeconds: DEFAULT_GITLAB_WEBHOOK_RATE_PERIOD_SECONDS,
+  })
+  assertEquals(resolveStripeWebhookRateLimit(env), {
+    limit: DEFAULT_STRIPE_WEBHOOK_RATE_LIMIT,
+    periodSeconds: DEFAULT_STRIPE_WEBHOOK_RATE_PERIOD_SECONDS,
+  })
 })
 
 test('resolveClientAuthRateLimit / resolveClientAuthStrictRateLimit defaults match SHARED_POLICIES', () => {

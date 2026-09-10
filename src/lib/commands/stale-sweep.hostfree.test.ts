@@ -59,6 +59,45 @@ test('isStaleCommand handles queued rows that never dispatched', () => {
   assertEquals(isStaleCommand(row, now), true)
 })
 
+test('isStaleCommand treats unparseable timestamps as not stale', () => {
+  const row = candidate({ createdAt: 'not-a-date' })
+  assertEquals(isStaleCommand(row, T0 + 86_400_000), false)
+})
+
+test('isStaleCommand falls back through acked, sent, and dispatch timestamps', () => {
+  const now = T0 + 600_000 + STALE_COMMAND_GRACE_MS + 1_000
+  assertEquals(
+    isStaleCommand(
+      candidate({
+        createdAt: new Date(T0 - 3_600_000).toISOString(),
+        ackedAt: new Date(T0).toISOString(),
+      }),
+      now,
+    ),
+    true,
+  )
+  assertEquals(
+    isStaleCommand(
+      candidate({
+        createdAt: new Date(T0 - 3_600_000).toISOString(),
+        sentAt: new Date(T0).toISOString(),
+      }),
+      now,
+    ),
+    true,
+  )
+  assertEquals(
+    isStaleCommand(
+      candidate({
+        createdAt: new Date(T0 - 3_600_000).toISOString(),
+        dispatchStartedAt: new Date(T0).toISOString(),
+      }),
+      now,
+    ),
+    true,
+  )
+})
+
 test('isStaleCommand respects longer budgets per type', () => {
   // managed.backup budget is 30 minutes — 15 minutes in is not stale.
   const row = candidate({

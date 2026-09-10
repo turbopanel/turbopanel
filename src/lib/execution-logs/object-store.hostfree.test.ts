@@ -204,6 +204,15 @@ describe('ObjectExecutionLogStore', () => {
     )
   })
 
+  it('readFrom returns an empty window when fromSeq is past the last chunk', async () => {
+    const backend = createFakeObjectBackend()
+    const store = new ObjectExecutionLogStore(backend)
+    await store.appendChunk(COMMAND_ID, { seq: 0, bytes: encoder.encode('hi') })
+    const read = await store.readFrom(COMMAND_ID, 99, 1024)
+    assertEquals(read?.bytes.byteLength, 0)
+    assertEquals(read?.nextSeq, 99)
+  })
+
   it('readFrom returns an empty slice when no parts cover the window', async () => {
     const fixedNow = new Date('2026-03-01T12:00:00.000Z')
     const backend = createFakeObjectBackend()

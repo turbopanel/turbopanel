@@ -4,10 +4,17 @@ import { TEST_ONLY_TURBOPANEL_SECRET } from '../test-fixtures/secrets.ts'
 import { deriveSecretsConfig, parseSecretsEnv } from '../client/authn/secrets.ts'
 import { DEVELOPER_API_PREFIX } from '../surfaces.ts'
 import {
+  defaultSystemGitRunner,
+  describeUnknownError,
   dirtyUpgradeError,
+  getUiRepoPath,
   isRuntimePorcelainLine,
   porcelainPath,
   registerSystemRoutes,
+  resetSystemRoutesUpgradeLockForTests,
+  resolveGitInvocation,
+  setSystemRoutesTestHooks,
+  type SystemGitRunner,
 } from './system-routes.ts'
 
 /**
@@ -45,13 +52,15 @@ test('registerSystemRoutes mounts upgrade-status without auth when disabled', as
     parseSecretsEnv(`1:${TEST_ONLY_TURBOPANEL_SECRET}`, 'deno'),
     'session-signing',
   )
-  const app = new Hono()
-  registerSystemRoutes(app, { secrets, authRequired: false })
-  const response = await app.request(
-    `${DEVELOPER_API_PREFIX}/system/upgrade-status`,
-  )
-  assertEquals(typeof response.status, 'number')
-  assertEquals(response.status === 200 || response.status === 500, true)
+  await withSystemRouteEnv({ TURBOPANEL_DEV_USER: 'dev' }, async () => {
+    setSystemRoutesTestHooks({ gitRunner: scriptedGitRunner({}) })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const response = await app.request(
+      `${DEVELOPER_API_PREFIX}/system/upgrade-status`,
+    )
+    assertEquals(response.status, 200)
+  })
 })
 
 test('porcelainPath trims a rename target with extra spaces', () => {
@@ -81,17 +90,20 @@ test('POST /system/upgrade is refused when dirty, git fails, or restart is unset
     parseSecretsEnv(`1:${TEST_ONLY_TURBOPANEL_SECRET}`, 'deno'),
     'session-signing',
   )
-  const app = new Hono()
-  registerSystemRoutes(app, { secrets, authRequired: false })
-  const response = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
-    method: 'POST',
+  await withSystemRouteEnv({ TURBOPANEL_INSTANCE_SERVICE: undefined }, async () => {
+    setSystemRoutesTestHooks({ gitRunner: scriptedGitRunner({}) })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const response = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
+      method: 'POST',
+    })
+    assertEquals(response.status, 503)
+    const body = await response.json()
+    if (typeof body !== 'object' || body === null || !('ok' in body)) {
+      throw new TypeError('upgrade response must be an object with ok')
+    }
+    assertEquals(body.ok, false)
   })
-  assertEquals([409, 500, 503].includes(response.status), true)
-  const body = await response.json()
-  if (typeof body !== 'object' || body === null || !('ok' in body)) {
-    throw new TypeError('upgrade response must be an object with ok')
-  }
-  assertEquals(body.ok, false)
 })
 
 test('GET /system/upgrade-status reports canUpgrade or a git error', async () => {
@@ -99,32 +111,33 @@ test('GET /system/upgrade-status reports canUpgrade or a git error', async () =>
     parseSecretsEnv(`1:${TEST_ONLY_TURBOPANEL_SECRET}`, 'deno'),
     'session-signing',
   )
-  const app = new Hono()
-  registerSystemRoutes(app, { secrets, authRequired: false })
-  const response = await app.request(
-    `${DEVELOPER_API_PREFIX}/system/upgrade-status`,
-  )
-  const body = await response.json()
-  if (typeof body !== 'object' || body === null || !('ok' in body)) {
-    throw new TypeError('upgrade-status response must be an object with ok')
-  }
-  if (response.status === 200) {
+  await withSystemRouteEnv({ TURBOPANEL_DEV_USER: 'dev' }, async () => {
+    setSystemRoutesTestHooks({ gitRunner: scriptedGitRunner({}) })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const response = await app.request(
+      `${DEVELOPER_API_PREFIX}/system/upgrade-status`,
+    )
+    const body = await response.json()
+    if (typeof body !== 'object' || body === null || !('ok' in body)) {
+      throw new TypeError('upgrade-status response must be an object with ok')
+    }
+    assertEquals(response.status, 200)
     assertEquals(body.ok, true)
     if (!('canUpgrade' in body) || !('dirty' in body)) {
       throw new TypeError('successful upgrade-status must include canUpgrade and dirty')
     }
     assertEquals(typeof body.canUpgrade, 'boolean')
     assertEquals(Array.isArray(body.dirty), true)
-    return
-  }
-  assertEquals(response.status, 500)
-  assertEquals(body.ok, false)
+  })
 })
 
 test('GET /system/upgrade-status fails when TURBOPANEL_UI_REPO is not a checkout', async () => {
-  const previous = Deno.env.get('TURBOPANEL_UI_REPO')
-  Deno.env.set('TURBOPANEL_UI_REPO', '/tmp/turbopanel-missing-ui-checkout')
-  try {
+  await withSystemRouteEnv({
+    TURBOPANEL_DEV_USER: 'dev',
+    TURBOPANEL_UI_REPO: '/tmp/turbopanel-missing-ui-checkout',
+  }, async () => {
+    setSystemRoutesTestHooks({ gitRunner: null })
     const secrets = await deriveSecretsConfig(
       parseSecretsEnv(`1:${TEST_ONLY_TURBOPANEL_SECRET}`, 'deno'),
       'session-signing',
@@ -141,10 +154,7 @@ test('GET /system/upgrade-status fails when TURBOPANEL_UI_REPO is not a checkout
     }
     assertEquals(body.ok, false)
     assertEquals(typeof body.error, 'string')
-  } finally {
-    if (previous === undefined) Deno.env.delete('TURBOPANEL_UI_REPO')
-    else Deno.env.set('TURBOPANEL_UI_REPO', previous)
-  }
+  })
 })
 
 test('porcelainPath keeps a path that is not a rename', () => {
@@ -156,4 +166,334 @@ test('isRuntimePorcelainLine matches every runtime prefix', () => {
   assertEquals(isRuntimePorcelainLine('?? .config/foo'), true)
   assertEquals(isRuntimePorcelainLine('?? .cache/bar'), true)
   assertEquals(isRuntimePorcelainLine(' M .local/nested/x'), true)
+})
+
+test('resolveGitInvocation runs git directly or via sudo -u', () => {
+  assertEquals(
+    resolveGitInvocation('/repo', ['status', '--porcelain'], {
+      direct: true,
+      productionGitUser: 'tp',
+    }),
+    { bin: 'git', args: ['-C', '/repo', 'status', '--porcelain'] },
+  )
+  assertEquals(
+    resolveGitInvocation('/repo', ['fetch', 'origin', 'trunk'], {
+      direct: false,
+      productionGitUser: 'tp',
+    }),
+    {
+      bin: 'sudo',
+      args: ['-u', 'tp', 'git', '-C', '/repo', 'fetch', 'origin', 'trunk'],
+    },
+  )
+})
+
+test('describeUnknownError reads Error.message and stringifies other values', () => {
+  assertEquals(describeUnknownError(new Error('boom')), 'boom')
+  assertEquals(describeUnknownError('nope'), 'nope')
+})
+
+test('getUiRepoPath prefers TURBOPANEL_UI_REPO and otherwise sits beside the instance checkout', () => {
+  const previous = Deno.env.get('TURBOPANEL_UI_REPO')
+  try {
+    Deno.env.set('TURBOPANEL_UI_REPO', '/tmp/custom-ui')
+    assertEquals(getUiRepoPath(), '/tmp/custom-ui')
+    Deno.env.delete('TURBOPANEL_UI_REPO')
+    const fallback = getUiRepoPath()
+    assertEquals(fallback.endsWith('/ui'), true)
+  } finally {
+    if (previous === undefined) Deno.env.delete('TURBOPANEL_UI_REPO')
+    else Deno.env.set('TURBOPANEL_UI_REPO', previous)
+  }
+})
+
+function gitVerb(args: string[]): string {
+  const dashC = args.indexOf('-C')
+  if (dashC >= 0) return args[dashC + 2] ?? ''
+  return args[0] ?? ''
+}
+
+function scriptedGitRunner(opts: {
+  statusStdout?: string
+  statusSuccess?: boolean
+  statusStderr?: string
+  fetchSuccess?: boolean
+  resetSuccess?: boolean
+  hangFetch?: { promise: Promise<void> }
+}): SystemGitRunner {
+  return (_bin, args) => {
+    const verb = gitVerb(args)
+    if (verb === 'status') {
+      return Promise.resolve({
+        success: opts.statusSuccess ?? true,
+        stdout: opts.statusStdout ?? '',
+        stderr: opts.statusStderr ?? '',
+      })
+    }
+    if (verb === 'fetch') {
+      if (opts.hangFetch) {
+        return opts.hangFetch.promise.then(() => ({
+          success: opts.fetchSuccess ?? true,
+          stdout: '',
+          stderr: '',
+        }))
+      }
+      return Promise.resolve({
+        success: opts.fetchSuccess ?? true,
+        stdout: '',
+        stderr: opts.fetchSuccess === false ? 'fetch denied' : '',
+      })
+    }
+    if (verb === 'reset') {
+      return Promise.resolve({
+        success: opts.resetSuccess ?? true,
+        stdout: '',
+        stderr: opts.resetSuccess === false ? 'reset denied' : '',
+      })
+    }
+    return Promise.resolve({ success: true, stdout: '', stderr: '' })
+  }
+}
+
+async function withSystemRouteEnv<T>(
+  env: Record<string, string | undefined>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map<string, string | undefined>()
+  for (const key of Object.keys(env)) previous.set(key, Deno.env.get(key))
+  try {
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) Deno.env.delete(key)
+      else Deno.env.set(key, value)
+    }
+    return await fn()
+  } finally {
+    resetSystemRoutesUpgradeLockForTests()
+    setSystemRoutesTestHooks({ gitRunner: null, restarter: null })
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) Deno.env.delete(key)
+      else Deno.env.set(key, value)
+    }
+  }
+}
+
+test('GET /system/upgrade-status reports dirty checkouts and git status failures', async () => {
+  const secrets = await deriveSecretsConfig(
+    parseSecretsEnv(`1:${TEST_ONLY_TURBOPANEL_SECRET}`, 'deno'),
+    'session-signing',
+  )
+  await withSystemRouteEnv({ TURBOPANEL_DEV_USER: 'dev' }, async () => {
+    setSystemRoutesTestHooks({
+      gitRunner: scriptedGitRunner({ statusStdout: ' M src/app.ts\n' }),
+    })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const dirty = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade-status`)
+    assertEquals(dirty.status, 200)
+    const dirtyBody = await dirty.json() as {
+      ok: boolean
+      canUpgrade: boolean
+      dirty: Array<{ repo: string; changes: number }>
+    }
+    assertEquals(dirtyBody.ok, true)
+    assertEquals(dirtyBody.canUpgrade, false)
+    assertEquals(dirtyBody.dirty.length > 0, true)
+    assertEquals(dirtyBody.dirty[0]?.changes, 1)
+  })
+
+  await withSystemRouteEnv({}, async () => {
+    setSystemRoutesTestHooks({
+      gitRunner: scriptedGitRunner({ statusSuccess: false, statusStderr: '' }),
+    })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const failed = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade-status`)
+    assertEquals(failed.status, 500)
+    const body = await failed.json() as { ok: boolean; error: string }
+    assertEquals(body.ok, false)
+    assertEquals(body.error.includes('git status failed'), true)
+  })
+})
+
+test('POST /system/upgrade refuses dirty trees, a missing service, and in-flight upgrades', async () => {
+  const secrets = await deriveSecretsConfig(
+    parseSecretsEnv(`1:${TEST_ONLY_TURBOPANEL_SECRET}`, 'deno'),
+    'session-signing',
+  )
+  await withSystemRouteEnv({ TURBOPANEL_INSTANCE_SERVICE: undefined }, async () => {
+    setSystemRoutesTestHooks({
+      gitRunner: scriptedGitRunner({ statusStdout: ' M src/app.ts\n' }),
+    })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const dirty = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
+      method: 'POST',
+    })
+    assertEquals(dirty.status, 409)
+    const body = await dirty.json() as { ok: boolean; dirty: unknown[] }
+    assertEquals(body.ok, false)
+    assertEquals(Array.isArray(body.dirty), true)
+  })
+
+  await withSystemRouteEnv({ TURBOPANEL_INSTANCE_SERVICE: undefined }, async () => {
+    setSystemRoutesTestHooks({ gitRunner: scriptedGitRunner({}) })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const missing = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
+      method: 'POST',
+    })
+    assertEquals(missing.status, 503)
+  })
+
+  await withSystemRouteEnv({ TURBOPANEL_INSTANCE_SERVICE: 'turbopanel-instance' }, async () => {
+    let releaseFetch: (() => void) | undefined
+    const hang = new Promise<void>((resolve) => {
+      releaseFetch = resolve
+    })
+    let fetchStarted: (() => void) | undefined
+    const started = new Promise<void>((resolve) => {
+      fetchStarted = resolve
+    })
+    setSystemRoutesTestHooks({
+      gitRunner: async (bin, args) => {
+        if (gitVerb(args) === 'fetch') fetchStarted?.()
+        return await scriptedGitRunner({ hangFetch: { promise: hang } })(bin, args)
+      },
+      restarter: () => {},
+    })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const first = app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
+      method: 'POST',
+    })
+    try {
+      await started
+      const second = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
+        method: 'POST',
+      })
+      assertEquals(second.status, 409)
+      const secondBody = await second.json() as { error: string }
+      assertEquals(secondBody.error, 'upgrade already in progress')
+    } finally {
+      releaseFetch?.()
+      await first
+    }
+  })
+})
+
+test('POST /system/upgrade maps fetch/reset failures and restarts when sync succeeds', async () => {
+  const secrets = await deriveSecretsConfig(
+    parseSecretsEnv(`1:${TEST_ONLY_TURBOPANEL_SECRET}`, 'deno'),
+    'session-signing',
+  )
+  await withSystemRouteEnv({
+    TURBOPANEL_INSTANCE_SERVICE: 'turbopanel-instance',
+    TURBOPANEL_DEV_USER: 'dev',
+    TURBOPANEL_TRUNK_BRANCH: 'trunk',
+  }, async () => {
+    setSystemRoutesTestHooks({
+      gitRunner: scriptedGitRunner({ fetchSuccess: false }),
+      restarter: () => {
+        throw new TypeError('must not restart after fetch failure')
+      },
+    })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const fetchFail = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
+      method: 'POST',
+    })
+    assertEquals(fetchFail.status, 500)
+    const fetchBody = await fetchFail.json() as { error: string }
+    assertEquals(fetchBody.error.includes('git fetch failed'), true)
+  })
+
+  await withSystemRouteEnv({
+    TURBOPANEL_INSTANCE_SERVICE: 'turbopanel-instance',
+  }, async () => {
+    setSystemRoutesTestHooks({
+      gitRunner: scriptedGitRunner({ resetSuccess: false }),
+      restarter: () => {
+        throw new TypeError('must not restart after reset failure')
+      },
+    })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const resetFail = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
+      method: 'POST',
+    })
+    assertEquals(resetFail.status, 500)
+    const resetBody = await resetFail.json() as { error: string }
+    assertEquals(resetBody.error.includes('git reset failed'), true)
+  })
+
+  await withSystemRouteEnv({
+    TURBOPANEL_INSTANCE_SERVICE: 'turbopanel-instance',
+  }, async () => {
+    const restarted: string[] = []
+    setSystemRoutesTestHooks({
+      gitRunner: scriptedGitRunner({}),
+      restarter: (service) => {
+        restarted.push(service)
+      },
+    })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const ok = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
+      method: 'POST',
+    })
+    assertEquals(ok.status, 200)
+    const body = await ok.json() as { ok: boolean; commit: string }
+    assertEquals(body.ok, true)
+    assertEquals(typeof body.commit, 'string')
+    assertEquals(restarted, ['turbopanel-instance'])
+  })
+
+  await withSystemRouteEnv({
+    TURBOPANEL_INSTANCE_SERVICE: 'turbopanel-instance',
+  }, async () => {
+    setSystemRoutesTestHooks({
+      gitRunner: scriptedGitRunner({}),
+      restarter: () => {
+        throw new TypeError('restart boom')
+      },
+    })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const failed = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade`, {
+      method: 'POST',
+    })
+    assertEquals(failed.status, 500)
+    const failedBody = await failed.json() as { error: string }
+    assertEquals(failedBody.error, 'restart boom')
+  })
+})
+
+test('GET /system/upgrade-status uses the default git runner', async () => {
+  const secrets = await deriveSecretsConfig(
+    parseSecretsEnv(`1:${TEST_ONLY_TURBOPANEL_SECRET}`, 'deno'),
+    'session-signing',
+  )
+  await withSystemRouteEnv({ TURBOPANEL_DEV_USER: 'dev' }, async () => {
+    setSystemRoutesTestHooks({ gitRunner: null, restarter: null })
+    const app = new Hono()
+    registerSystemRoutes(app, { secrets, authRequired: false })
+    const status = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade-status`)
+    assertEquals(status.status, 200)
+    const body = await status.json() as {
+      ok: boolean
+      canUpgrade: boolean
+      dirty: unknown[]
+    }
+    assertEquals(body.ok, true)
+    assertEquals(typeof body.canUpgrade, 'boolean')
+    assertEquals(Array.isArray(body.dirty), true)
+  })
+})
+
+test('defaultSystemGitRunner maps a missing binary to success:false', async () => {
+  const missing = `/tmp/turbopanel-missing-git-${crypto.randomUUID()}`
+  const result = await defaultSystemGitRunner(missing, ['status', '--porcelain'])
+  assertEquals(result.success, false)
+  assertEquals(result.stdout, '')
+  assertEquals(result.stderr.length > 0, true)
 })

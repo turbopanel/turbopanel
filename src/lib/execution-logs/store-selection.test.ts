@@ -106,6 +106,14 @@ describe('resolveExecutionLogStore', () => {
     assert(store instanceof DisabledExecutionLogStore)
   })
 
+  it('falls back to a disabled store when the S3 driver is selected without a config object', () => {
+    const store = resolveExecutionLogStore({
+      runtime: 'deno',
+      deno: { driver: 's3' },
+    })
+    assert(store instanceof DisabledExecutionLogStore)
+  })
+
   it('falls back to a disabled store when no Deno directory resolved', () => {
     const store = resolveExecutionLogStore({ runtime: 'deno', deno: { directory: '  ' } })
     assert(store instanceof DisabledExecutionLogStore)

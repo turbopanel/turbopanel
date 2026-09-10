@@ -9,6 +9,7 @@ import {
   LOCAL_CONSOLE_CONTENT_SHA256_HEADER,
   LOCAL_CONSOLE_INFO,
   LOCAL_CONSOLE_MAX_SKEW_MS,
+  LOCAL_CONSOLE_SCHEME,
   localConsoleRequestTarget,
   verifyLocalConsoleAuthorization,
 } from './local-console-auth.ts'
@@ -359,8 +360,78 @@ describe('verifyLocalConsoleAuthorization', () => {
       assertEquals(await verifyRequest(req), false)
     }, 'not-a-valid-keyring')
   })
-})
 
+  it('rejects malformed authorization material and a missing digest header', async () => {
+    await withDevSurface(async () => {
+      const noScheme = new Request(`http://localhost${PATH}`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer nope' },
+        body: '{}',
+      })
+      assertEquals(await verifyRequest(noScheme, undefined, SECRET), false)
+
+      const noDot = new Request(`http://localhost${PATH}`, {
+        method: 'POST',
+        headers: { Authorization: `${LOCAL_CONSOLE_SCHEME} nodot` },
+        body: '{}',
+      })
+      assertEquals(await verifyRequest(noDot, undefined, SECRET), false)
+
+      const badB64 = new Request(`http://localhost${PATH}`, {
+        method: 'POST',
+        headers: { Authorization: `${LOCAL_CONSOLE_SCHEME} %%%.$$$` },
+        body: '{}',
+      })
+      assertEquals(await verifyRequest(badB64, undefined, SECRET), false)
+
+      const notADate = new Request(`http://localhost${PATH}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `${LOCAL_CONSOLE_SCHEME} ${btoa('not-a-date')}.aaaaaaaa`,
+          [LOCAL_CONSOLE_CONTENT_SHA256_HEADER]: 'digest',
+        },
+        body: '{}',
+      })
+      assertEquals(await verifyRequest(notADate, undefined, SECRET), false)
+
+      const missingDigest = await signedRequest()
+      const withoutDigest = new Request(missingDigest.url, {
+        method: 'POST',
+        headers: { Authorization: missingDigest.headers.get('Authorization') ?? '' },
+        body: '{}',
+      })
+      assertEquals(await verifyRequest(withoutDigest, undefined, SECRET), false)
+
+      const noHeader = new Request(`http://localhost${PATH}`, {
+        method: 'POST',
+        body: '{}',
+      })
+      assertEquals(await verifyRequest(noHeader, undefined, SECRET), false)
+
+      const leadingDot = new Request(`http://localhost${PATH}`, {
+        method: 'POST',
+        headers: { Authorization: `${LOCAL_CONSOLE_SCHEME} .aaaaaaaa` },
+        body: '{}',
+      })
+      assertEquals(await verifyRequest(leadingDot, undefined, SECRET), false)
+
+      const timestamp = btoa(new Date().toISOString())
+      const shortSig = btoa(String.fromCodePoint(1, 2, 3))
+      const lengthMismatch = new Request(`http://localhost${PATH}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `${LOCAL_CONSOLE_SCHEME} ${timestamp}.${shortSig}`,
+          [LOCAL_CONSOLE_CONTENT_SHA256_HEADER]: 'digest',
+        },
+        body: '{}',
+      })
+      assertEquals(await verifyRequest(lengthMismatch, undefined, SECRET), false)
+
+      const emptySecret = await signedRequest()
+      assertEquals(await verifyRequest(emptySecret, undefined, ''), false)
+    })
+  })
+})
 test('local-console auth suite loaded', () => {
   assertEquals(typeof verifyLocalConsoleAuthorization, 'function')
 })

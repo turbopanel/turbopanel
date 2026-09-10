@@ -346,3 +346,29 @@ test("splitNativeAppServices leaves restartPolicy absent when none is authored",
   const { apps } = splitNativeAppServices({ web: nodeService() });
   assertEquals("restartPolicy" in (apps[0] ?? {}), false);
 });
+
+test("splitNativeAppServices carries authored cron on a node service", () => {
+  // `cron` has always been legal on `serviceKind: node` (HOST_NATIVE_KINDS is
+  // ["site", "node"]), but this split used to drop it — so a Next.js app's jobs
+  // passed the linter and then vanished before the deploy payload was built.
+  const { apps } = splitNativeAppServices({
+    web: nodeService({
+      framework: "next",
+      cron: [
+        { name: "nightly", schedule: "0 3 * * *", command: "/usr/bin/node cron.js" },
+      ],
+    }),
+  });
+
+  assertEquals(apps.length, 1);
+  assertEquals(apps[0]?.cron?.length, 1);
+  assertEquals(apps[0]?.cron?.[0]?.name, "nightly");
+  // Untranslated on purpose: deploy-prepare owns the single cron -> OnCalendar
+  // translation, and doing it here would make two places able to disagree.
+  assertEquals(apps[0]?.cron?.[0]?.schedule, "0 3 * * *");
+});
+
+test("splitNativeAppServices omits cron when the author wrote none", () => {
+  const { apps } = splitNativeAppServices({ web: nodeService() });
+  assertEquals(apps[0]?.cron, undefined);
+});

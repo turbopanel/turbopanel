@@ -325,15 +325,45 @@ type ConsumerFakeDbOptions = Readonly<{
   dispatchPayload?: unknown
   /** Returned by `getCommandMetadata` (metadata-only select). */
   commandMetadata?: Record<string, unknown> | null
+  /** `managed.options` for backup side effects. */
+  managedOptions?: Record<string, unknown> | null
+  /** Relay public key; `null` means stamp fills a missing key. */
+  relayPublicKey?: string | null
+  /** `replica.serverId` for promote / failover pin updates. */
+  replicaServerId?: string
+  replicaMember?: { serverId: string; ordinal: number }
+  managedEnvironmentId?: string
+  fabricRow?: { id: string; organizationId: string; cidr: string; options: unknown }
+  gateSiblings?: Array<{ id: string; status: string }>
+  hierarchy?: {
+    workspaceId: string
+    projectId: string
+    environmentId: string
+    serviceId: string
+    containerRowId: string
+    containerName: string
+  }
+  throwOnReplicaObservedUpdate?: boolean
+  throwOnManagedReadyUpdate?: boolean
+  throwOnManagedFailedUpdate?: boolean
+  throwOnManagedOptionsUpdate?: boolean
 }>
 
 function createConsumerFakeDb(options: ConsumerFakeDbOptions = {}): {
   db: Db
   transitions: Array<{ status: string; error?: string }>
+  inserts: Array<Record<string, unknown>>
+  managedUpdates: Array<Record<string, unknown>>
+  relayUpdates: Array<Record<string, unknown>>
+  leafUpserts: number
   dispatchDeletes: number
   dispatchRetentions: string[]
 } {
   const transitions: Array<{ status: string; error?: string }> = []
+  const inserts: Array<Record<string, unknown>> = []
+  const managedUpdates: Array<Record<string, unknown>> = []
+  const relayUpdates: Array<Record<string, unknown>> = []
+  const leafState = { upserts: 0 }
   const dispatchState = { deletes: 0, retentions: [] as string[] }
   const dispatchPayload =
     options.dispatchPayload === undefined ? {} : options.dispatchPayload
@@ -343,64 +373,111 @@ function createConsumerFakeDb(options: ConsumerFakeDbOptions = {}): {
 
   const db = {
     select: (fields?: Record<string, unknown>) => ({
-      from: () => ({
-        where: () => {
-          // getCommandRecord / listServerCommands: explicit command columns
-          if (fields && 'name' in fields && 'attempts' in fields) {
-            return queryResult(commandRow ? [commandRow] : [])
-          }
-          // getCommandDispatchPayload
-          if (fields && 'payload' in fields) {
-            return queryResult(
-              dispatchPayload === null ? [] : [{ payload: dispatchPayload }],
-            )
-          }
-          if (fields === undefined) {
-            return queryResult(commandRow ? [commandRow] : [])
-          }
-          // getServerLicenseBinding first hop
-          if ('organizationId' in fields && !('id' in fields)) {
-            return queryResult(
-              serverExists ? [{ organizationId: '00000000-0000-4000-8000-000000000099' }] : []
-            )
-          }
-          // getCommandMetadata
-          if ('metadata' in fields && !('daemon' in fields) && !('name' in fields)) {
-            return queryResult([{ metadata: options.commandMetadata ?? null }])
-          }
-          // getServerLicenseBinding license hops
-          if ('id' in fields && !('daemon' in fields) && !('metadata' in fields)) {
-            return queryResult([{ id: 'license-1' }])
-          }
-          // resolveFleetPresence
-          if ('daemon' in fields || 'connected' in fields) {
-            return queryResult(
-              serverExists
-                ? [
-                    {
-                      id: SERVER_ID,
-                      daemon: {
-                        key: {
-                          id: 'key-1',
-                          algorithm: 'Ed25519',
-                          publicJwk: { kty: 'OKP', crv: 'Ed25519', x: 'abc' },
-                          fingerprint: 'fp',
-                          createdAt: '2020-01-01T00:00:00.000Z',
+      from: () => {
+        const source = {
+          innerJoin: () => source,
+          where: () => {
+            // getCommandRecord / listServerCommands: explicit command columns
+            if (fields && 'name' in fields && 'attempts' in fields) {
+              return queryResult(commandRow ? [commandRow] : [])
+            }
+            // getCommandDispatchPayload
+            if (fields && 'payload' in fields) {
+              return queryResult(
+                dispatchPayload === null ? [] : [{ payload: dispatchPayload }],
+              )
+            }
+            if (fields === undefined) {
+              return queryResult(commandRow ? [commandRow] : [])
+            }
+            if ('workspaceId' in fields && 'containerRowId' in fields) {
+              return queryResult(options.hierarchy ? [options.hierarchy] : [])
+            }
+            if ('options' in fields && !('cidr' in fields) && !('id' in fields)) {
+              return queryResult(
+                options.managedOptions === undefined || options.managedOptions === null
+                  ? []
+                  : [{ options: options.managedOptions }],
+              )
+            }
+            if ('id' in fields && 'organizationId' in fields && 'cidr' in fields) {
+              return queryResult(options.fabricRow ? [options.fabricRow] : [])
+            }
+            if ('publicKey' in fields) {
+              return queryResult(
+                options.relayPublicKey === undefined
+                  ? []
+                  : [{ publicKey: options.relayPublicKey }],
+              )
+            }
+            if ('serverId' in fields && 'ordinal' in fields) {
+              return queryResult(options.replicaMember ? [options.replicaMember] : [])
+            }
+            if ('environmentId' in fields) {
+              return queryResult(
+                options.managedEnvironmentId
+                  ? [{ environmentId: options.managedEnvironmentId }]
+                  : [],
+              )
+            }
+            if ('id' in fields && 'status' in fields && !('name' in fields)) {
+              return queryResult(options.gateSiblings ?? [])
+            }
+            if (
+              'serverId' in fields &&
+              !('organizationId' in fields) &&
+              !('daemon' in fields) &&
+              !('connected' in fields)
+            ) {
+              return queryResult(
+                options.replicaServerId ? [{ serverId: options.replicaServerId }] : [],
+              )
+            }
+            // getServerLicenseBinding first hop
+            if ('organizationId' in fields && !('id' in fields)) {
+              return queryResult(
+                serverExists ? [{ organizationId: '00000000-0000-4000-8000-000000000099' }] : []
+              )
+            }
+            // getCommandMetadata / replica.metadata / relay.metadata
+            if ('metadata' in fields && !('daemon' in fields) && !('name' in fields)) {
+              return queryResult([{ metadata: options.commandMetadata ?? null }])
+            }
+            // getServerLicenseBinding license hops / service.id
+            if ('id' in fields && !('daemon' in fields) && !('metadata' in fields)) {
+              return queryResult([{ id: 'license-1' }])
+            }
+            // resolveFleetPresence
+            if ('daemon' in fields || 'connected' in fields) {
+              return queryResult(
+                serverExists
+                  ? [
+                      {
+                        id: SERVER_ID,
+                        daemon: {
+                          key: {
+                            id: 'key-1',
+                            algorithm: 'Ed25519',
+                            publicJwk: { kty: 'OKP', crv: 'Ed25519', x: 'abc' },
+                            fingerprint: 'fp',
+                            createdAt: '2020-01-01T00:00:00.000Z',
+                          },
                         },
+                        metadata: null,
+                        hostname: 'host-1',
+                        machineKey: null,
+                        connected: serverConnected,
+                        statusChangedAt: '2020-01-01T00:00:00.000Z',
                       },
-                      metadata: null,
-                      hostname: 'host-1',
-                      machineKey: null,
-                      connected: serverConnected,
-                      statusChangedAt: '2020-01-01T00:00:00.000Z',
-                    },
-                  ]
-                : []
-            )
-          }
-          return queryResult([])
-        },
-      }),
+                    ]
+                  : []
+              )
+            }
+            return queryResult([])
+          },
+        }
+        return source
+      },
     }),
     delete: () => ({
       where: () => {
@@ -408,8 +485,57 @@ function createConsumerFakeDb(options: ConsumerFakeDbOptions = {}): {
         return Promise.resolve(undefined)
       },
     }),
+    insert: () => ({
+      values: (row: Record<string, unknown>) => {
+        inserts.push(row)
+        const inserted = {
+          ...baseCommandRow({
+            id: '00000000-0000-4000-8000-0000000000fe',
+            name: typeof row.name === 'string' ? row.name : 'managed.apply',
+            status: 'queued',
+            serverId: typeof row.serverId === 'string' ? row.serverId : SERVER_ID,
+          }),
+        }
+        return Object.assign(Promise.resolve(undefined), {
+          returning: () => Promise.resolve([inserted]),
+          onConflictDoUpdate: () => {
+            leafState.upserts += 1
+            return Promise.resolve(undefined)
+          },
+        })
+      },
+    }),
     update: () => ({
       set: (patch: Record<string, unknown>) => {
+        if (
+          options.throwOnReplicaObservedUpdate &&
+          typeof patch.status === 'string' &&
+          typeof patch.metadata === 'object' &&
+          patch.metadata !== null &&
+          'replication' in patch.metadata
+        ) {
+          throw new Error('replica observed update failed')
+        }
+        if (
+          options.throwOnManagedReadyUpdate &&
+          patch.status === 'ready' &&
+          !('errorMessage' in patch) &&
+          !('resultSummary' in patch) &&
+          !('attempts' in patch)
+        ) {
+          throw new Error('managed ready update failed')
+        }
+        if (options.throwOnManagedOptionsUpdate && 'options' in patch) {
+          throw new Error('managed options update failed')
+        }
+        if (
+          options.throwOnManagedFailedUpdate &&
+          patch.status === 'failed' &&
+          !('errorMessage' in patch) &&
+          !('attempts' in patch)
+        ) {
+          throw new Error('managed failed update failed')
+        }
         if (typeof patch.status === 'string') {
           transitions.push({
             status: patch.status,
@@ -417,7 +543,26 @@ function createConsumerFakeDb(options: ConsumerFakeDbOptions = {}): {
               ? { error: patch.errorMessage }
               : {}),
           })
-        } else if (typeof patch.expiresAt === 'string') {
+        }
+        if (
+          'options' in patch ||
+          ('serverId' in patch && !('name' in patch)) ||
+          (
+            (patch.status === 'ready' || patch.status === 'stopped' || patch.status === 'failed') &&
+            !('errorMessage' in patch) &&
+            !('attempts' in patch) &&
+            !('resultSummary' in patch) &&
+            !('name' in patch)
+          )
+        ) {
+          managedUpdates.push(patch)
+        }
+        if ('publicKey' in patch || (typeof patch.metadata === 'object' &&
+          patch.metadata !== null &&
+          'appliedPayloadHash' in patch.metadata)) {
+          relayUpdates.push(patch)
+        }
+        if (typeof patch.expiresAt === 'string' && !('status' in patch)) {
           // retainCommandDispatch — failure-retention stamp.
           dispatchState.retentions.push(patch.expiresAt)
         }
@@ -452,6 +597,12 @@ function createConsumerFakeDb(options: ConsumerFakeDbOptions = {}): {
   return {
     db,
     transitions,
+    inserts,
+    managedUpdates,
+    relayUpdates,
+    get leafUpserts() {
+      return leafState.upserts
+    },
     get dispatchDeletes() {
       return dispatchState.deletes
     },
@@ -914,6 +1065,62 @@ const VALID_HA_FAILOVER_PAYLOAD = {
   engine: 'postgres',
 }
 
+const MANAGED_NETWORK = '00000000-0000-4000-8000-0000000000ee'
+
+const VALID_INGRESS_RECONCILE_PAYLOAD = {
+  serverId: SERVER_ID,
+  managedNetwork: MANAGED_NETWORK,
+  clusters: [] as unknown[],
+}
+
+const HA_SERVICE_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+
+const VALID_HA_RECONCILE_PAYLOAD = {
+  serverId: SERVER_ID,
+  managedNetwork: MANAGED_NETWORK,
+  desired: 'absent' as const,
+  raft: null,
+  clusters: [] as unknown[],
+  identity: {
+    serviceId: HA_SERVICE_ID,
+    composeServiceName: 'orchestrator',
+    containerName: `${HA_SERVICE_ID}-ha`,
+  },
+}
+
+const SYSTEM_HIERARCHY = {
+  workspaceId: '00000000-0000-4000-8000-0000000000a1',
+  projectId: PROJECT_ID,
+  environmentId: ENV_ID,
+  serviceId: SERVICE_ID,
+  containerRowId: '00000000-0000-4000-8000-0000000000a2',
+  containerName: `${SERVICE_ID}-in`,
+}
+
+const INGRESS_DONE = {
+  summary: 'ok',
+  appliedUsers: [] as string[],
+  appliedBackends: [] as string[],
+  restarted: false,
+}
+
+const HA_RECONCILE_DONE = {
+  summary: 'absent',
+  registeredClusters: [] as string[],
+  restarted: false,
+}
+
+function followUpSecrets(queue: { enqueue: (envelope: { commandId: string; type: string }) => Promise<void> }) {
+  return {
+    commandQueue: queue,
+    secretsConfig: { versioned: [] } as never,
+    dataEncryptionSecrets: {
+      current: { version: 1, key: {} as CryptoKey },
+      fallbacks: [],
+    },
+  }
+}
+
 function typedEnvelope(type: CommandEnvelope['type']): CommandEnvelope {
   return {
     commandId: COMMAND_ID,
@@ -932,17 +1139,20 @@ async function runOnline(
   type: CommandEnvelope['type'],
   payload: unknown,
   pending: PendingRequestRecord | null,
-  extras: { commandMetadata?: Record<string, unknown> | null } = {},
+  extras: ConsumerFakeDbOptions & {
+    deps?: Parameters<typeof processCommandEnvelope>[3]
+  } = {},
 ) {
+  const { deps, ...dbOptions } = extras
   const fake = createConsumerFakeDb({
     serverExists: true,
     serverConnected: true,
     dispatchPayload: payload,
     commandRow: baseCommandRow({ name: type }),
-    ...extras,
+    ...dbOptions,
   })
   const { registry } = onlineRegistry(pending)
-  await processCommandEnvelope(fake.db, registry, typedEnvelope(type))
+  await processCommandEnvelope(fake.db, registry, typedEnvelope(type), deps)
   return fake
 }
 
@@ -1194,6 +1404,7 @@ test('processCommandEnvelope managed.backup success returns early without a mana
 test('processCommandEnvelope managed.restore success projects ready', async () => {
   const fake = await runOnline('managed.restore', VALID_RESTORE_PAYLOAD, doneWith({}))
   assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(fake.managedUpdates.some((patch) => patch.status === 'ready'), true)
 })
 
 test('processCommandEnvelope managed.destroy success returns when the managed row is missing', async () => {
@@ -1274,4 +1485,617 @@ test('processCommandEnvelope managed.lifecycle failure with recovery metadata ad
     { commandMetadata: { recoveryId: 'rec-1', fencePhase: 'stop' } },
   )
   assertEquals(fake.transitions.some((t) => t.status === 'failed'), true)
+})
+
+const WG_PUBKEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+
+const MANAGED_OPTIONS_WITH_BACKUP = {
+  settings: {},
+  databases: ['postgres'],
+  backups: [{
+    id: 'bk_old',
+    createdAt: '2020-01-01T00:00:00.000Z',
+    sizeBytes: 8,
+    checksum: 'a'.repeat(64),
+    path: '/var/lib/backups/old.dump',
+  }],
+}
+
+function liveQueue() {
+  const envelopes: Array<{ commandId: string; type: string }> = []
+  return {
+    envelopes,
+    queue: {
+      enqueue: (envelope: { commandId: string; type: string }) => {
+        envelopes.push({ commandId: envelope.commandId, type: envelope.type })
+        return Promise.resolve()
+      },
+    },
+  }
+}
+
+test('processCommandEnvelope fabric success stamps a missing publicKey and desired hash', async () => {
+  const fake = await runOnline(
+    'server.fabric.reconcile',
+    VALID_FABRIC_ENABLED,
+    doneWith({
+      summary: 'TurboFabric reconciled',
+      publicKey: WG_PUBKEY,
+      peers: [{ publicKey: WG_PUBKEY, health: 'healthy' }],
+    }),
+    {
+      commandMetadata: { desiredHash: 'desired-hash-1' },
+      relayPublicKey: null,
+      fabricRow: {
+        id: FABRIC_ID,
+        organizationId: ORG_ID,
+        cidr: '10.192.0.0/16',
+        options: {},
+      },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(fake.relayUpdates.some((patch) => patch.publicKey === WG_PUBKEY), true)
+  assertEquals(
+    fake.relayUpdates.some((patch) =>
+      typeof patch.metadata === 'object' &&
+      patch.metadata !== null &&
+      (patch.metadata as { appliedPayloadHash?: string }).appliedPayloadHash === 'desired-hash-1'
+    ),
+    true,
+  )
+})
+
+test('processCommandEnvelope managed.apply projects member health and swallows replica update errors', async () => {
+  const fake = await runOnline(
+    'managed.apply',
+    VALID_MANAGED_APPLY_PAYLOAD,
+    doneWith({
+      host: '203.0.113.10',
+      port: 5432,
+      member: {
+        memberId: MEMBER_ID,
+        role: 'primary',
+        status: 'ready',
+        replication: {
+          state: 'streaming',
+          observedAt: '2020-01-01T00:00:00.000Z',
+          lagBytes: 0,
+          lagSeconds: 0,
+        },
+      },
+    }),
+    { throwOnReplicaObservedUpdate: true },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.apply enqueues pending standby applies', async () => {
+  const { queue, envelopes } = liveQueue()
+  const fake = await runOnline(
+    'managed.apply',
+    VALID_MANAGED_APPLY_PAYLOAD,
+    doneWith({ host: '127.0.0.1', port: 5432 }),
+    {
+      commandMetadata: {
+        pendingStandbyApplies: [
+          { serverId: SERVER_ID, memberId: MEMBER_ID },
+          {
+            serverId: SERVER_ID,
+            memberId: MEMBER_ID,
+            payload: { ...VALID_MANAGED_APPLY_PAYLOAD, memberRole: 'replica' },
+          },
+        ],
+      },
+      deps: { commandQueue: queue },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(fake.inserts.some((row) => row.name === 'managed.apply'), true)
+  assertEquals(envelopes.some((entry) => entry.type === 'managed.apply'), true)
+})
+
+test('processCommandEnvelope managed.apply marks a follow-up failed when the queue rejects', async () => {
+  const fake = await runOnline(
+    'managed.apply',
+    VALID_MANAGED_APPLY_PAYLOAD,
+    doneWith({ host: '127.0.0.1', port: 5432 }),
+    {
+      commandMetadata: {
+        pendingStandbyApplies: [{
+          serverId: SERVER_ID,
+          memberId: MEMBER_ID,
+          payload: { ...VALID_MANAGED_APPLY_PAYLOAD, memberRole: 'replica' },
+        }],
+      },
+      deps: {
+        commandQueue: {
+          enqueue: () => Promise.reject(new Error('queue down')),
+        },
+      },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(
+    fake.transitions.some((t) => t.status === 'failed' && t.error === 'Command queue unavailable'),
+    true,
+  )
+})
+
+test('processCommandEnvelope managed.apply commits a pending TLS leaf best-effort', async () => {
+  const fake = await runOnline(
+    'managed.apply',
+    VALID_MANAGED_APPLY_PAYLOAD,
+    doneWith({ host: '127.0.0.1', port: 5432 }),
+    {
+      commandMetadata: {
+        pendingTlsLeaf: {
+          kind: 'engine',
+          organizationId: ORG_ID,
+          serverId: SERVER_ID,
+          caId: '00000000-0000-4000-8000-0000000000ca',
+          caGeneration: 1,
+          notAfter: '2030-01-01T00:00:00.000Z',
+          managedId: MANAGED_ID,
+          replicaId: MEMBER_ID,
+        },
+      },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(fake.leafUpserts, 1)
+})
+
+test('processCommandEnvelope managed.lifecycle stop enqueues a follow-up promote', async () => {
+  const { queue, envelopes } = liveQueue()
+  const fake = await runOnline(
+    'managed.lifecycle',
+    { managedId: MANAGED_ID, action: 'stop', engine: 'postgres' },
+    doneWith({
+      status: 'stopped',
+      member: { memberId: MEMBER_ID, role: 'replica', status: 'stopped' },
+    }),
+    {
+      commandMetadata: {
+        followUpPromote: {
+          serverId: SERVER_ID,
+          payload: { managedId: MANAGED_ID, memberId: MEMBER_ID, demoteMemberId: DEMOTE_ID },
+        },
+      },
+      deps: { commandQueue: queue },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(envelopes.some((entry) => entry.type === 'managed.promote'), true)
+})
+
+test('processCommandEnvelope managed.lifecycle stop with recoveryId advances the fence', async () => {
+  const fake = await runOnline(
+    'managed.lifecycle',
+    { managedId: MANAGED_ID, action: 'stop', engine: 'postgres' },
+    doneWith({ status: 'stopped' }),
+    { commandMetadata: { recoveryId: 'rec-1', fencePhase: 'stop' } },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.backup create and delete rewrite options', async () => {
+  const created = await runOnline(
+    'managed.backup',
+    VALID_BACKUP_PAYLOAD,
+    doneWith({
+      backupId: 'bk_1700000000000',
+      path: '/var/lib/backups/x.dump',
+      sizeBytes: 12,
+      checksum: 'c'.repeat(64),
+      database: 'appdb',
+      pruned: ['bk_old'],
+      completedAt: '2020-01-02T00:00:00.000Z',
+    }),
+    { managedOptions: MANAGED_OPTIONS_WITH_BACKUP },
+  )
+  assertEquals(created.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(created.managedUpdates.some((patch) => 'options' in patch), true)
+
+  const deleted = await runOnline(
+    'managed.backup',
+    { ...VALID_BACKUP_PAYLOAD, action: 'delete' },
+    doneWith({ backupId: 'bk_old' }),
+    { managedOptions: MANAGED_OPTIONS_WITH_BACKUP },
+  )
+  assertEquals(deleted.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.backup swallows a ready-row update failure', async () => {
+  const fake = await runOnline(
+    'managed.backup',
+    VALID_BACKUP_PAYLOAD,
+    doneWith({
+      backupId: 'bk_1700000000000',
+      path: '/var/lib/backups/x.dump',
+      sizeBytes: 12,
+      checksum: 'c'.repeat(64),
+    }),
+    {
+      managedOptions: MANAGED_OPTIONS_WITH_BACKUP,
+      throwOnManagedOptionsUpdate: true,
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.destroy uses payload environmentId and deletes the member', async () => {
+  const fake = await runOnline(
+    'managed.destroy',
+    {
+      managedId: MANAGED_ID,
+      removeVolumes: true,
+      deleteAfterDestroy: true,
+      deleteMemberAfterDestroy: true,
+      memberId: MEMBER_ID,
+      environmentId: ENV_ID,
+    },
+    doneWith({ status: 'stopped', containers: [] }),
+    {
+      replicaMember: { serverId: SERVER_ID, ordinal: 1 },
+      managedEnvironmentId: ENV_ID,
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.destroy looks up environmentId and opens the replica gate', async () => {
+  const { queue, envelopes } = liveQueue()
+  const fake = await runOnline(
+    'managed.destroy',
+    { managedId: MANAGED_ID, removeVolumes: true, memberId: MEMBER_ID },
+    doneWith({ status: 'stopped', containers: [] }),
+    {
+      managedEnvironmentId: ENV_ID,
+      gateSiblings: [{ id: COMMAND_ID, status: 'succeeded' }],
+      commandMetadata: {
+        managedDestroyGate: {
+          gateId: 'gate-1',
+          memberIds: [MEMBER_ID],
+          followups: [{
+            serverId: SERVER_ID,
+            memberId: MANAGED_ID,
+            payload: {
+              managedId: MANAGED_ID,
+              removeVolumes: true,
+              deleteAfterDestroy: true,
+            },
+          }],
+        },
+      },
+      deps: { commandQueue: queue },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(envelopes.some((entry) => entry.type === 'managed.destroy'), true)
+})
+
+test('processCommandEnvelope managed.promote flips the replica pin then swallows a unique-index clash', async () => {
+  const fake = await runOnline(
+    'managed.promote',
+    { managedId: MANAGED_ID, memberId: MEMBER_ID, demoteMemberId: DEMOTE_ID },
+    doneWith({
+      status: 'ready',
+      role: 'primary',
+      promotedMemberId: MEMBER_ID,
+      demotedMemberId: DEMOTE_ID,
+      demoted: true,
+      replication: {
+        state: 'streaming',
+        observedAt: '2020-01-01T00:00:00.000Z',
+      },
+    }),
+    {
+      replicaServerId: SERVER_ID,
+      throwOnManagedReadyUpdate: true,
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.ha.failover drain with recoveryId is best-effort', async () => {
+  const fake = await runOnline(
+    'managed.ha.failover',
+    VALID_HA_FAILOVER_PAYLOAD,
+    doneWith({ summary: 'drained', phase: 'drain' }),
+    { commandMetadata: { recoveryId: 'rec-1', fencePhase: 'drain' } },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.ha.failover recover flips roles when the replica pin exists', async () => {
+  const fake = await runOnline(
+    'managed.ha.failover',
+    { ...VALID_HA_FAILOVER_PAYLOAD, phase: 'recover' },
+    doneWith({ summary: 'recovered', phase: 'recover' }),
+    { replicaServerId: SERVER_ID },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.restore invalid payload is swallowed', async () => {
+  const fake = await runOnline('managed.restore', {}, doneWith({}))
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.apply failure without a managed id skips the failed-row write', async () => {
+  const fake = await runOnline('managed.apply', { managedId: 'x' }, {
+    ...donePending(),
+    status: 'failed',
+    error: 'apply exploded',
+    result: undefined,
+  })
+  assertEquals(fake.transitions.some((t) => t.status === 'failed'), true)
+})
+
+test('processCommandEnvelope managed.promote failure without recovery metadata marks rows failed', async () => {
+  const fake = await runOnline(
+    'managed.promote',
+    { managedId: MANAGED_ID, memberId: MEMBER_ID, demoteMemberId: DEMOTE_ID },
+    {
+      ...donePending(),
+      status: 'failed',
+      error: 'promote exploded',
+      result: undefined,
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'failed'), true)
+})
+
+test('processCommandEnvelope fabric success with a live queue still stamps after key fill', async () => {
+  const { queue } = liveQueue()
+  const fake = await runOnline(
+    'server.fabric.reconcile',
+    VALID_FABRIC_ENABLED,
+    doneWith({
+      summary: 'TurboFabric reconciled',
+      publicKey: WG_PUBKEY,
+      peers: [{ publicKey: WG_PUBKEY, health: 'stale' }],
+    }),
+    {
+      commandMetadata: { desiredHash: 'desired-hash-2' },
+      relayPublicKey: null,
+      fabricRow: {
+        id: FABRIC_ID,
+        organizationId: ORG_ID,
+        cidr: '10.192.0.0/16',
+        options: {},
+      },
+      deps: { commandQueue: queue },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(fake.relayUpdates.some((patch) => patch.publicKey === WG_PUBKEY), true)
+})
+
+test('processCommandEnvelope managed.apply standby follow-up carries a pending TLS leaf', async () => {
+  const { queue, envelopes } = liveQueue()
+  const fake = await runOnline(
+    'managed.apply',
+    VALID_MANAGED_APPLY_PAYLOAD,
+    doneWith({ host: '127.0.0.1', port: 5432 }),
+    {
+      commandMetadata: {
+        pendingStandbyApplies: [{
+          serverId: SERVER_ID,
+          memberId: MEMBER_ID,
+          payload: { ...VALID_MANAGED_APPLY_PAYLOAD, memberRole: 'replica' },
+          pendingTlsLeaf: {
+            kind: 'engine',
+            organizationId: ORG_ID,
+            serverId: SERVER_ID,
+            caId: '00000000-0000-4000-8000-0000000000ca',
+            caGeneration: 1,
+            notAfter: '2030-01-01T00:00:00.000Z',
+            managedId: MANAGED_ID,
+            replicaId: MEMBER_ID,
+          },
+        }],
+      },
+      deps: { commandQueue: queue },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(envelopes.some((entry) => entry.type === 'managed.apply'), true)
+  assertEquals(
+    fake.inserts.some((row) =>
+      typeof row.metadata === 'object' &&
+      row.metadata !== null &&
+      'pendingTlsLeaf' in (row.metadata as Record<string, unknown>)
+    ),
+    true,
+  )
+})
+
+test('processCommandEnvelope managed.ingress.reconcile skips omitted containers', async () => {
+  const fake = await runOnline(
+    'managed.ingress.reconcile',
+    VALID_INGRESS_RECONCILE_PAYLOAD,
+    doneWith(INGRESS_DONE),
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.ingress.reconcile returns when hierarchy is missing', async () => {
+  const fake = await runOnline(
+    'managed.ingress.reconcile',
+    VALID_INGRESS_RECONCILE_PAYLOAD,
+    doneWith({ ...INGRESS_DONE, containers: [] }),
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.ingress.reconcile reconciles a hierarchy row best-effort', async () => {
+  const fake = await runOnline(
+    'managed.ingress.reconcile',
+    VALID_INGRESS_RECONCILE_PAYLOAD,
+    doneWith({ ...INGRESS_DONE, containers: [] }),
+    { hierarchy: SYSTEM_HIERARCHY },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.ha.reconcile skips omitted containers', async () => {
+  const fake = await runOnline(
+    'managed.ha.reconcile',
+    VALID_HA_RECONCILE_PAYLOAD,
+    doneWith(HA_RECONCILE_DONE),
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.ha.reconcile reconciles a hierarchy row best-effort', async () => {
+  const fake = await runOnline(
+    'managed.ha.reconcile',
+    VALID_HA_RECONCILE_PAYLOAD,
+    doneWith({ ...HA_RECONCILE_DONE, containers: [] }),
+    { hierarchy: SYSTEM_HIERARCHY },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+})
+
+test('processCommandEnvelope managed.destroy re-applies the primary after member cleanup', async () => {
+  const { queue, envelopes } = liveQueue()
+  const fake = await runOnline(
+    'managed.destroy',
+    {
+      managedId: MANAGED_ID,
+      removeVolumes: true,
+      deleteMemberAfterDestroy: true,
+      memberId: MEMBER_ID,
+      environmentId: ENV_ID,
+    },
+    doneWith({ status: 'stopped', containers: [] }),
+    {
+      replicaMember: { serverId: SERVER_ID, ordinal: 1 },
+      managedEnvironmentId: ENV_ID,
+      commandMetadata: {
+        pendingPrimaryReapply: {
+          serverId: SERVER_ID,
+          payload: VALID_MANAGED_APPLY_PAYLOAD,
+        },
+      },
+      deps: followUpSecrets(queue),
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(envelopes.some((entry) => entry.type === 'managed.apply'), true)
+})
+
+test('processCommandEnvelope managed.destroy leaves the gate closed while a sibling is pending', async () => {
+  const { queue, envelopes } = liveQueue()
+  const fake = await runOnline(
+    'managed.destroy',
+    { managedId: MANAGED_ID, removeVolumes: true, memberId: MEMBER_ID },
+    doneWith({ status: 'stopped', containers: [] }),
+    {
+      gateSiblings: [{ id: COMMAND_ID, status: 'sent' }],
+      commandMetadata: {
+        managedDestroyGate: {
+          gateId: 'gate-2',
+          memberIds: [MEMBER_ID],
+          followups: [{
+            serverId: SERVER_ID,
+            memberId: MANAGED_ID,
+            payload: {
+              managedId: MANAGED_ID,
+              removeVolumes: true,
+              deleteAfterDestroy: true,
+            },
+          }],
+        },
+      },
+      deps: { commandQueue: queue },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(envelopes.some((entry) => entry.type === 'managed.destroy'), false)
+})
+
+test('processCommandEnvelope managed.destroy marks a gated follow-up failed when the queue rejects', async () => {
+  const fake = await runOnline(
+    'managed.destroy',
+    { managedId: MANAGED_ID, removeVolumes: true, memberId: MEMBER_ID },
+    doneWith({ status: 'stopped', containers: [] }),
+    {
+      gateSiblings: [{ id: COMMAND_ID, status: 'succeeded' }],
+      commandMetadata: {
+        managedDestroyGate: {
+          gateId: 'gate-3',
+          memberIds: [MEMBER_ID],
+          followups: [{
+            serverId: SERVER_ID,
+            memberId: MANAGED_ID,
+            payload: {
+              managedId: MANAGED_ID,
+              removeVolumes: true,
+              deleteAfterDestroy: true,
+            },
+          }],
+        },
+      },
+      deps: {
+        commandQueue: {
+          enqueue: () => Promise.reject(new Error('queue down')),
+        },
+      },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(
+    fake.transitions.some((t) => t.status === 'failed' && t.error === 'Command queue unavailable'),
+    true,
+  )
+})
+
+test('processCommandEnvelope managed.promote without a replica pin still marks ready', async () => {
+  const fake = await runOnline(
+    'managed.promote',
+    { managedId: MANAGED_ID, memberId: MEMBER_ID, demoteMemberId: DEMOTE_ID },
+    doneWith({
+      status: 'ready',
+      role: 'primary',
+      promotedMemberId: MEMBER_ID,
+      demotedMemberId: DEMOTE_ID,
+      demoted: true,
+    }),
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
+  assertEquals(
+    fake.managedUpdates.some((patch) => patch.status === 'ready' && !('serverId' in patch)),
+    true,
+  )
+})
+
+test('processCommandEnvelope managed.promote failure swallows a failed-row write error', async () => {
+  const fake = await runOnline(
+    'managed.promote',
+    { managedId: MANAGED_ID, memberId: MEMBER_ID, demoteMemberId: DEMOTE_ID },
+    {
+      ...donePending(),
+      status: 'failed',
+      error: 'promote exploded',
+      result: undefined,
+    },
+    { throwOnManagedFailedUpdate: true },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'failed'), true)
+})
+
+test('processCommandEnvelope managed.ha.failover recover with recoveryId is best-effort', async () => {
+  const fake = await runOnline(
+    'managed.ha.failover',
+    { ...VALID_HA_FAILOVER_PAYLOAD, phase: 'recover' },
+    doneWith({ summary: 'recovered', phase: 'recover' }),
+    {
+      replicaServerId: SERVER_ID,
+      commandMetadata: { recoveryId: 'rec-2' },
+    },
+  )
+  assertEquals(fake.transitions.some((t) => t.status === 'succeeded'), true)
 })

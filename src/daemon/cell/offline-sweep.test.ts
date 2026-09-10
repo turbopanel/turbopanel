@@ -536,6 +536,41 @@ it("dispatch-expiry sweep failures stay isolated from the rest of the tick", asy
   await sweepExpiredCommandDispatchSafely(db);
 });
 
+it("stale-command sweep failures stay isolated after a successful dispatch delete", async () => {
+  const traces: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => {
+    traces.push(args.map(String).join(" "));
+  };
+  const db = {
+    delete: () => ({
+      where: () => ({
+        returning: () => Promise.resolve([{ commandId: "cmd-1" }]),
+      }),
+    }),
+    select: () => {
+      throw new TypeError("stale select failed");
+    },
+  } as unknown as Db;
+
+  try {
+    await sweepExpiredCommandDispatchSafely(db);
+  } finally {
+    console.info = originalInfo;
+  }
+
+  assertEquals(
+    traces.some((line) =>
+      line.includes("event=command-dispatch-swept") && line.includes("deleted=1")
+    ),
+    true,
+  );
+  assertEquals(
+    traces.some((line) => line.includes("event=stale-command-sweep-failed")),
+    true,
+  );
+});
+
 type SweepLockValue = {
   owner: string;
   expiresAt: string;
@@ -651,6 +686,79 @@ it("second tick skips while the offline-sweep lease is held", async () => {
   );
   await endOfflineSweep(db, first!);
   assertEquals((await tryBeginOfflineSweep(db)) !== null, true);
+});
+
+it("runOfflineSweep isolates a listConnected throw as sweep-failed", async () => {
+  const db = createOfflineSweepLockMemoryDb();
+  const traces: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => {
+    traces.push(args.map(String).join(" "));
+  };
+  try {
+    await runOfflineSweep(inertEnv(), null, {
+      db,
+      sweepOnceDeps: {
+        listConnected: () => {
+          throw new TypeError("listConnected boom");
+        },
+        listRecentlyOffline: () => Promise.resolve([]),
+        resolveActiveServerIds: () => Promise.resolve(new Map()),
+        onDisconnected: () => Promise.resolve(),
+        onConnected: () => Promise.resolve(),
+      },
+    });
+  } finally {
+    console.info = originalInfo;
+  }
+  assertEquals(
+    traces.some((line) => line.includes("event=sweep-failed")),
+    true,
+  );
+  assertEquals(
+    traces.some((line) => line.includes("event=tick-complete")),
+    true,
+  );
+  assertEquals((await tryBeginOfflineSweep(db)) !== null, true);
+});
+
+it("runOfflineSweep skips liveness when the tick deadline is already due", async () => {
+  const db = createOfflineSweepLockMemoryDb();
+  let listed = 0;
+  const traces: string[] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => {
+    traces.push(args.map(String).join(" "));
+  };
+  try {
+    await runOfflineSweep(inertEnv(), null, {
+      db,
+      deadlineMs: Date.now() - 1,
+      sweepOnceDeps: {
+        listConnected: () => {
+          listed += 1;
+          return Promise.resolve([]);
+        },
+        listRecentlyOffline: () => Promise.resolve([]),
+        resolveActiveServerIds: () => Promise.resolve(new Map()),
+        onDisconnected: () => Promise.resolve(),
+        onConnected: () => Promise.resolve(),
+      },
+    });
+  } finally {
+    console.info = originalInfo;
+  }
+  assertEquals(listed, 0);
+  assertEquals(
+    traces.some((line) =>
+      line.includes("event=budget-exhausted") && line.includes("phase=liveness")
+    ),
+    true,
+  );
+  assertEquals(
+    traces.some((line) => line.includes("event=tick-complete")),
+    true,
+  );
 });
 
 it("offline-sweep lease is released when a phase throws", async () => {
@@ -1424,6 +1532,8 @@ import {
   tier,
 } from "../../lib/db/schema.ts";
 import { BILLING_RECONCILE_REPORT_KEY } from "../../lib/billing/reconcile.ts";
+import { deriveEncryptionSecretsConfig } from "../../client/authn/secrets.ts";
+import { parseTestSecretsConfig } from "../../test-fixtures/secrets.ts";
 
 /** Every scheduled phase fires on the hour: execution logs, tier notices, grace clock, reconcile. */
 const ON_THE_HOUR = Date.parse("2026-01-01T00:00:00.000Z");
@@ -1450,7 +1560,12 @@ function billingSweepDb(opts: { withSubscription: boolean }): MemoryDb {
   ]);
 }
 
-async function runTickCapturingTrace(env: CloudflareBindings, db: Db): Promise<string[]> {
+async function runTickCapturingTrace(
+  env: CloudflareBindings,
+  db: Db,
+  tlsRenewal?: Parameters<typeof runOfflineSweep>[1],
+  scheduledTime: number = ON_THE_HOUR,
+): Promise<string[]> {
   const traces: string[] = [];
   const originalInfo = console.info;
   console.info = (...args: unknown[]) => {
@@ -1459,9 +1574,9 @@ async function runTickCapturingTrace(env: CloudflareBindings, db: Db): Promise<s
   try {
     // `scheduledTime` picks the phases; the budget clock is the real one, so
     // `nowMs` must be live or every phase reads as over budget before it runs.
-    await runOfflineSweep(env, null, {
+    await runOfflineSweep(env, tlsRenewal, {
       db,
-      scheduledTime: ON_THE_HOUR,
+      scheduledTime,
       nowMs: Date.now(),
       sweepOnceDeps: inertSweep,
     });
@@ -1515,4 +1630,76 @@ it("T12 · finding: a throwing grace clock is NOT isolated — reconcile and the
   assertEquals(reconcileReport(db), null);
   // The tick lease is still released.
   assertEquals((await tryBeginOfflineSweep(db)) !== null, true);
+});
+
+function commandQueueEnv(): CloudflareBindings {
+  return {
+    TURBOPANEL_COMMAND_QUEUE: { send: () => Promise.resolve() },
+  } as unknown as CloudflareBindings;
+}
+
+async function testTlsRenewal(): Promise<
+  NonNullable<Parameters<typeof runOfflineSweep>[1]>
+> {
+  const secretsConfig = parseTestSecretsConfig("workers");
+  return {
+    secretsConfig,
+    dataEncryptionSecrets: await deriveEncryptionSecretsConfig(
+      secretsConfig,
+      "data-encryption",
+    ),
+  };
+}
+
+/** Off the hour / :15 so scheduled billing, tier-notices, and execution-logs stay idle. */
+const MID_HOUR = Date.parse("2026-01-01T00:01:00.000Z");
+
+it("queued cron: system reconcile execute throw is isolated as system-reconcile-sweep-failed", async () => {
+  // MemoryDb has no `execute`; runSystemReconcileSweep's raw SQL throws and
+  // the outer catch traces without aborting the tick.
+  const db = billingSweepDb({ withSubscription: true });
+  const traces = await runTickCapturingTrace(
+    commandQueueEnv(),
+    db,
+    null,
+    MID_HOUR,
+  );
+  assertEquals(
+    traces.some((line) => line.includes("event=system-reconcile-sweep-failed")),
+    true,
+  );
+  assertEquals(tickComplete(traces).includes("phasesSkipped=[]"), true);
+});
+
+it("queued cron: leaf renewal and managed-ingress orphan failures are isolated after reconcile succeeds", async () => {
+  const db = billingSweepDb({ withSubscription: true });
+  let executeCalls = 0;
+  Object.assign(db, {
+    execute: () => {
+      executeCalls += 1;
+      if (executeCalls === 1) return Promise.resolve([]);
+      return Promise.reject(new TypeError("orphan boom"));
+    },
+  });
+  const traces = await runTickCapturingTrace(
+    commandQueueEnv(),
+    db,
+    await testTlsRenewal(),
+    MID_HOUR,
+  );
+  assertEquals(
+    traces.some((line) => line.includes("event=system-reconcile-sweep-failed")),
+    false,
+  );
+  assertEquals(
+    traces.some((line) => line.includes("event=leaf-renewal-sweep-failed")),
+    true,
+  );
+  assertEquals(
+    traces.some((line) =>
+      line.includes("event=managed-ingress-orphan-sweep-failed")
+    ),
+    true,
+  );
+  assertEquals(tickComplete(traces).includes("phasesSkipped=[]"), true);
 });

@@ -573,6 +573,82 @@ test("reencryptAtRestSecrets email ignores non-object setting values", async () 
   }
 });
 
+test("reencryptAtRestSecrets sweeps storage including a null contentEnvelope skip", async () => {
+  await resetReencryptSweepLockForTests();
+  const v1Only = await deriveV1Only();
+  const { secrets: rotated } = await deriveRotated();
+  const oldContent = await encryptSecret(v1Only, "storage-blob");
+  const db = stagedSweepDb({
+    pages: {
+      storage: [[
+        { id: "00000000-0000-4000-8000-0000000000c0", contentEnvelope: null },
+        {
+          id: "00000000-0000-4000-8000-0000000000c1",
+          contentEnvelope: oldContent,
+        },
+      ]],
+    },
+  });
+
+  const batch = await reencryptAtRestSecrets(db, rotated, {
+    cursor: { stage: "storage" },
+    limit: 50,
+  });
+  assertEquals(batch.reencrypted, 1);
+  assertEquals(batch.scanned, 1);
+  assertEquals(batch.completed, true);
+});
+
+test("reencryptAtRestSecrets sweeps the secret table including daemon-bound envelopes", async () => {
+  await resetReencryptSweepLockForTests();
+  const v1Only = await deriveV1Only();
+  const { secrets: rotated } = await deriveRotated();
+  const oldSecret = await encryptSecret(v1Only, "secret-row");
+  const db = stagedSweepDb({
+    pages: {
+      secrets: [[
+        {
+          id: "00000000-0000-4000-8000-0000000000s1",
+          secretEnvelope: oldSecret,
+        },
+      ]],
+    },
+  });
+
+  const batch = await reencryptAtRestSecrets(db, rotated, {
+    cursor: { stage: "secrets" },
+    limit: 50,
+  });
+  assertEquals(batch.reencrypted, 1);
+  assertEquals(batch.scanned, 1);
+  assertEquals(batch.completed, true);
+});
+
+test("tryBeginReencryptSweep treats a malformed lock as held and steals a non-date expiry", async () => {
+  const malformed = createSweepLockMemoryDb({
+    owner: "x",
+    expiresAt: "2020-01-01T00:00:00.000Z",
+  });
+  Object.assign(malformed, {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: () => Promise.resolve([{ value: { expiresAt: "soon" } }]),
+        }),
+      }),
+    }),
+  });
+  assertEquals(await tryBeginReencryptSweep(malformed), null);
+
+  const invalidExpiry = createSweepLockMemoryDb({
+    owner: "stale-owner",
+    expiresAt: "not-a-date",
+  });
+  const stolen = await tryBeginReencryptSweep(invalidExpiry);
+  assertEquals(stolen !== null, true);
+  await endReencryptSweep(invalidExpiry, stolen!);
+});
+
 test("reencryptAtRestSecretsToCompletion resumes across incomplete batches", async () => {
   await resetReencryptSweepLockForTests();
   const v1Only = await deriveV1Only();

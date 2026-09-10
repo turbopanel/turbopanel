@@ -1,4 +1,5 @@
 import { assertEquals } from "@std/assert";
+import { stub } from "@std/testing/mock";
 import { Hono } from "hono";
 import { it } from "@std/testing/bdd";
 import { deriveDaemonJwtKeyring } from "./authn/daemon-jwt-keyring.ts";
@@ -29,6 +30,7 @@ import type {
 import { DAEMON_CELL_PING, DAEMON_CELL_PONG } from "./cell/protocol.ts";
 import { issueDaemonJwt } from "./authn/daemon-jwt.ts";
 import {
+  handleDaemonCellPing,
   isClosedConnectionError,
   registerDaemonWebSocket,
   wsMessageDataToString,
@@ -142,6 +144,7 @@ function createProjectionTrackingDb(
   getDaemon: () => ServerDaemonState;
   getStatus: () => ServerDaemonStatus;
   getUpdateCallCount: () => number;
+  getPatches: () => Record<string, unknown>[];
 } {
   let daemon: ServerDaemonState = { ...initialDaemon };
   const defaults = buildDefaultDaemonStatus();
@@ -151,6 +154,7 @@ function createProjectionTrackingDb(
       defaults.statusChangedAt,
   };
   let updateCalls = 0;
+  const patches: Record<string, unknown>[] = [];
 
   const db = {
     select: () =>
@@ -167,6 +171,7 @@ function createProjectionTrackingDb(
     update: () => ({
       set: (patch: Record<string, unknown>) => {
         updateCalls += 1;
+        patches.push(patch);
         if (patch.daemon !== undefined) {
           daemon = patch.daemon as ServerDaemonState;
         }
@@ -188,6 +193,7 @@ function createProjectionTrackingDb(
     getDaemon: () => daemon,
     getStatus: () => mapServerDaemonStatusFromColumns(columns),
     getUpdateCallCount: () => updateCalls,
+    getPatches: () => patches,
   };
 }
 
@@ -201,6 +207,7 @@ function createTrackingDaemonCell(serverId: string) {
     handleInbound: 0,
     readOutboxBatch: 0,
   };
+  const detachReasons: string[] = [];
   let snapshot: DaemonCellSnapshot = {
     serverId,
     version: 0,
@@ -226,8 +233,9 @@ function createTrackingDaemonCell(serverId: string) {
         },
       });
     },
-    detachDaemonSocket: () => {
+    detachDaemonSocket: (params) => {
       calls.detach += 1;
+      if (params.reason !== undefined) detachReasons.push(params.reason);
       snapshot = {
         ...snapshot,
         connected: false,
@@ -303,6 +311,7 @@ function createTrackingDaemonCell(serverId: string) {
     cell,
     calls,
     enqueued,
+    detachReasons,
     getSnapshot: () => snapshot,
   };
 }
@@ -1336,6 +1345,84 @@ test("wsMessageDataToString accepts string, Blob, and ArrayBuffer views", async 
   );
 });
 
+function fakePingSocket(): { ws: { send: (data: string) => void }; sent: string[] } {
+  const sent: string[] = [];
+  return {
+    sent,
+    ws: {
+      send: (data: string) => {
+        sent.push(data);
+      },
+    },
+  };
+}
+
+test("handleDaemonCellPing repairs Postgres-only false offline", async () => {
+  const serverId = "srv-ping-pg-offline";
+  const { db, getStatus } = createProjectionTrackingDb(
+    serverId,
+    { key: baseDaemonKey },
+    {
+      connected: false,
+      statusChangedAt: "2020-01-01T00:00:00.000Z",
+    },
+  );
+  const tracking = createTrackingDaemonCell(serverId);
+  tracking.cell.getSnapshot = () =>
+    Promise.resolve({
+      serverId,
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      connected: true,
+      connectedAt: "2020-01-01T00:00:00.000Z",
+    });
+  const { ws, sent } = fakePingSocket();
+
+  await handleDaemonCellPing({
+    cell: tracking.cell,
+    db,
+    serverId,
+    connectionId: "track-conn",
+    ws: ws as never,
+  });
+
+  assertEquals(sent, [DAEMON_CELL_PONG]);
+  assertEquals(tracking.calls.recordInbound, 1);
+  assertEquals(getStatus().connected, true);
+});
+
+test("handleDaemonCellPing re-projects when the cell snapshot is disconnected", async () => {
+  const serverId = "srv-ping-cell-offline";
+  const { db, getStatus } = createProjectionTrackingDb(
+    serverId,
+    { key: baseDaemonKey },
+    {
+      connected: false,
+      statusChangedAt: "2020-01-01T00:00:00.000Z",
+    },
+  );
+  const tracking = createTrackingDaemonCell(serverId);
+  tracking.cell.getSnapshot = () =>
+    Promise.resolve({
+      serverId,
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      connected: false,
+    });
+  const { ws, sent } = fakePingSocket();
+
+  await handleDaemonCellPing({
+    cell: tracking.cell,
+    db,
+    serverId,
+    connectionId: "track-conn",
+    ws: ws as never,
+  });
+
+  assertEquals(sent, [DAEMON_CELL_PONG]);
+  assertEquals(getStatus().connected, true);
+});
+
 it("WS upgrade returns 503 when database is unavailable", async () => {
   const app = new Hono();
   const secrets = await createDaemonJwtSecrets();
@@ -2263,6 +2350,73 @@ test("live WS ping repairs Postgres-only false offline", async () => {
   );
 });
 
+test("live WS hello persists os hostname machineKey docker and timeSync", async () => {
+  const secrets = await createDaemonJwtSecrets();
+  const serverId = "srv-live-hello-meta";
+  const { db, getPatches } = createProjectionTrackingDb(
+    serverId,
+    { key: baseDaemonKey },
+    {
+      connected: true,
+      statusChangedAt: "2020-01-01T00:00:00.000Z",
+    },
+  );
+  const tracking = createTrackingDaemonCell(serverId);
+
+  await withLiveDaemonServer(
+    {
+      secrets,
+      db,
+      registry: createTrackingRegistry(tracking.cell),
+    },
+    async ({ port }) => {
+      const issued = await issueDaemonJwt(
+        { sub: serverId, kid: "key-test" },
+        secrets,
+      );
+      const ws = await openLiveDaemonWs({
+        port,
+        token: issued.token,
+        remoteIp: LIVE_REMOTE_IP,
+      });
+      ws.send(
+        JSON.stringify({
+          type: "hello",
+          at: new Date().toISOString(),
+          daemonBuild: { commit: "hello-meta", buildId: "hello-meta-build" },
+          hostname: "hello-meta-host",
+          machineKey: "a".repeat(64),
+          os: {
+            id: "debian",
+            family: "linux",
+            version: "13.5",
+            prettyName: "Debian GNU/Linux 13 (trixie)",
+          },
+          docker: { version: "28.3.3", composeVersion: "2.39.1" },
+          timeSync: {
+            timezone: "UTC",
+            ntpEnabled: true,
+            ntpServers: ["time.cloudflare.com"],
+          },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const identity = getPatches().find((patch) =>
+        patch.hostname === "hello-meta-host"
+      );
+      if (!identity) {
+        throw new TypeError("expected hello metadata patch");
+      }
+      assertEquals(identity.machineKey, "a".repeat(64));
+      assertEquals(identity.osId, "debian");
+      assertEquals(identity.timezone, "UTC");
+      assertEquals(tracking.calls.recordInbound >= 1, true);
+      ws.close(1000, "done");
+      await waitForWsClose(ws);
+    },
+  );
+});
+
 test("live WS update-result and heartbeat with addresses cover inbound dispatch", async () => {
   const secrets = await createDaemonJwtSecrets();
   const serverId = "srv-live-inbound";
@@ -2578,6 +2732,208 @@ test("live WS detach ignores closed-connection errors from detachDaemonSocket", 
       await waitForWsClose(ws);
       await new Promise((resolve) => setTimeout(resolve, 40));
       assertEquals(tracking.calls.detach, 1);
+    },
+  );
+});
+
+function captureStderr(): { writes: string[]; restore: () => void } {
+  const writes: string[] = [];
+  const writeStub = stub(Deno.stderr, "writeSync", (data) => {
+    writes.push(new TextDecoder().decode(data));
+    return data.byteLength;
+  });
+  return {
+    writes,
+    restore: () => writeStub.restore(),
+  };
+}
+
+test("live WS detach logs non-closed detachDaemonSocket failures", async () => {
+  const secrets = await createDaemonJwtSecrets();
+  const serverId = "srv-live-detach-warn";
+  const tracking = createTrackingDaemonCell(serverId);
+  tracking.cell.detachDaemonSocket = (params) => {
+    tracking.calls.detach += 1;
+    if (params.reason !== undefined) tracking.detachReasons.push(params.reason);
+    return Promise.reject(new TypeError("detach boom"));
+  };
+  const stderr = captureStderr();
+
+  try {
+    await withLiveDaemonServer(
+      {
+        secrets,
+        db: createMockDb(),
+        registry: createTrackingRegistry(tracking.cell),
+      },
+      async ({ port }) => {
+        const issued = await issueDaemonJwt(
+          { sub: serverId, kid: "key-test" },
+          secrets,
+        );
+        const ws = await openLiveDaemonWs({
+          port,
+          token: issued.token,
+          remoteIp: LIVE_REMOTE_IP,
+        });
+        ws.close(1000, "done");
+        await waitForWsClose(ws);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        assertEquals(tracking.calls.detach, 1);
+        assertEquals(tracking.detachReasons.includes("closed"), true);
+        assertEquals(
+          stderr.writes.some((line) =>
+            line.includes("detachDaemonSocket failed")
+          ),
+          true,
+        );
+      },
+    );
+  } finally {
+    stderr.restore();
+  }
+});
+
+test("live WS outbox pump swallows a late error after abort", async () => {
+  const secrets = await createDaemonJwtSecrets();
+  const serverId = "srv-live-outbox-abort-catch";
+  const tracking = createTrackingDaemonCell(serverId);
+  let releaseRead: (() => void) | undefined;
+  const blocked = new Promise<void>((resolve) => {
+    releaseRead = resolve;
+  });
+  tracking.cell.readOutboxBatch = async () => {
+    tracking.calls.readOutboxBatch += 1;
+    await blocked;
+    throw new TypeError("transient after abort");
+  };
+  const stderr = captureStderr();
+
+  try {
+    await withLiveDaemonServer(
+      {
+        secrets,
+        db: createMockDb(),
+        registry: createTrackingRegistry(tracking.cell),
+      },
+      async ({ port }) => {
+        const issued = await issueDaemonJwt(
+          { sub: serverId, kid: "key-test" },
+          secrets,
+        );
+        const ws = await openLiveDaemonWs({
+          port,
+          token: issued.token,
+          remoteIp: LIVE_REMOTE_IP,
+        });
+        // Close first so onClose sets abortRef before the pending read rejects.
+        ws.close(1000, "done");
+        await waitForWsClose(ws);
+        releaseRead?.();
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        assertEquals(
+          stderr.writes.some((line) => line.includes("outbox pump error")),
+          false,
+        );
+      },
+    );
+  } finally {
+    stderr.restore();
+  }
+});
+
+async function readHttpHead(conn: Deno.Conn): Promise<string> {
+  const decoder = new TextDecoder();
+  let text = "";
+  const chunk = new Uint8Array(1024);
+  while (!text.includes("\r\n\r\n")) {
+    const n = await conn.read(chunk);
+    if (n === null) break;
+    text += decoder.decode(chunk.subarray(0, n));
+  }
+  return text;
+}
+
+/** Reserved opcode 0xB, masked, empty payload — a protocol error, not an inbound frame. */
+function reservedOpcodeFrame(): Uint8Array {
+  return new Uint8Array([0x8b, 0x80, 0x01, 0x02, 0x03, 0x04]);
+}
+
+test("live WS detach uses reason error when the peer violates the protocol", async () => {
+  const secrets = await createDaemonJwtSecrets();
+  const serverId = "srv-live-detach-error";
+  const tracking = createTrackingDaemonCell(serverId);
+
+  await withLiveDaemonServer(
+    {
+      secrets,
+      db: createMockDb(),
+      registry: createTrackingRegistry(tracking.cell),
+    },
+    async ({ port }) => {
+      const issued = await issueDaemonJwt(
+        { sub: serverId, kid: "key-test" },
+        secrets,
+      );
+      const conn = await Deno.connect({ hostname: "127.0.0.1", port });
+      try {
+        const upgrade = [
+          `GET ${DAEMON_WS_PATH} HTTP/1.1`,
+          `Host: 127.0.0.1:${port}`,
+          "Upgrade: websocket",
+          "Connection: Upgrade",
+          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+          "Sec-WebSocket-Version: 13",
+          `Authorization: Bearer ${issued.token}`,
+          `X-Real-IP: ${LIVE_REMOTE_IP}`,
+          "",
+          "",
+        ].join("\r\n");
+        await conn.write(new TextEncoder().encode(upgrade));
+        const head = await readHttpHead(conn);
+        if (!head.startsWith("HTTP/1.1 101")) {
+          throw new TypeError(`expected 101, got ${head.slice(0, 80)}`);
+        }
+        const deadline = Date.now() + 500;
+        while (tracking.calls.attach === 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 15));
+        }
+        assertEquals(tracking.calls.attach, 1);
+        await conn.write(reservedOpcodeFrame());
+        const detachDeadline = Date.now() + 400;
+        while (
+          !tracking.detachReasons.includes("error") &&
+          Date.now() < detachDeadline
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 15));
+        }
+        if (!tracking.detachReasons.includes("error")) {
+          // Abrupt TCP drop is the other documented onError path.
+          try {
+            conn.close();
+          } catch {
+            // Already closed.
+          }
+          const rstDeadline = Date.now() + 400;
+          while (
+            !tracking.detachReasons.includes("error") &&
+            Date.now() < rstDeadline
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 15));
+          }
+        }
+        assertEquals(
+          tracking.detachReasons.includes("error"),
+          true,
+          `expected onError detach, got ${JSON.stringify(tracking.detachReasons)}`,
+        );
+      } finally {
+        try {
+          conn.close();
+        } catch {
+          // Already closed.
+        }
+      }
     },
   );
 });

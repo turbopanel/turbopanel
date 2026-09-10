@@ -51,6 +51,23 @@ test('childErrorDetail returns undefined for null child', async () => {
   assertEquals(await childErrorDetail(null), undefined)
 })
 
+test('childErrorDetail waits for a failed child or times out a hanging one', async () => {
+  const failed = {
+    status: Promise.resolve({ success: false, code: 7 }),
+  } as unknown as Deno.ChildProcess
+  assertEquals(await childErrorDetail(failed), 'drizzle studio exited (code 7)')
+
+  const ok = {
+    status: Promise.resolve({ success: true, code: 0 }),
+  } as unknown as Deno.ChildProcess
+  assertEquals(await childErrorDetail(ok), undefined)
+
+  const hanging = {
+    status: new Promise<{ success: boolean; code: number }>(() => {}),
+  } as unknown as Deno.ChildProcess
+  assertEquals(await childErrorDetail(hanging), undefined)
+})
+
 test('waitForStudioPort resolves when probe succeeds', async () => {
   let calls = 0
   const ready = await waitForStudioPort(async () => {

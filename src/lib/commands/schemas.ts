@@ -2,7 +2,10 @@ import { HOSTNAME_MAX_LENGTH, isValidHostname } from "./hostname.ts";
 import { isValidCidr, isValidIpAddress } from "../ip-address.ts";
 import { ALLOWED_PRINCIPAL_SHELLS } from "../principal-options.ts";
 import { isCanonicalSshPublicKey } from "../ssh-public-key.ts";
-import { MAX_CRON_JOBS_PER_SERVICE } from "../cron.ts";
+import {
+  MAX_CRON_JOBS_PER_SERVICE,
+  MAX_CRON_TIMEOUT_SECONDS,
+} from "../cron.ts";
 import {
   isManagedIngressProtocolPort,
   type ManagedIngressFamily,
@@ -1066,10 +1069,32 @@ export type EnvironmentDeploySitePrincipal = {
  */
 export type EnvironmentDeployCronJob = {
   name: string;
-  /** systemd `OnCalendar` value. */
+  /**
+   * systemd `OnCalendar` value, optionally carrying a trailing IANA zone
+   * (`Mon *-*-* 03:00:00 Europe/Berlin`). The control plane appends it —
+   * `lib/cron.ts` is the only translator — so the daemon validates and renders
+   * the string as given and never parses a zone itself.
+   */
   schedule: string;
   /** argv; `command[0]` is an absolute path. */
   command: string[];
+  /**
+   * Wall-clock ceiling for one run, rendered as `RuntimeMaxSec=`. Omitted means
+   * no ceiling, which is systemd's default and what every job did before this
+   * field existed.
+   */
+  timeoutSeconds?: number;
+  /**
+   * What happens when the timer fires while the previous run is still going.
+   *
+   * Only `forbid` is carried today, and it is what systemd already does with a
+   * unit that is still active — a second start is queued, never run alongside.
+   * `allow` and `replace` are refused at the API rather than sent: under the
+   * `User=` drop these jobs run as, a unit cannot spawn a second instance of
+   * itself without a privileged helper, so honouring them needs a unit topology
+   * this contract does not have yet. Refusing beats accepting and ignoring.
+   */
+  concurrencyPolicy?: "forbid";
 };
 
 export type EnvironmentDeploySite = {
@@ -1240,6 +1265,18 @@ export type EnvironmentDeployNativeAppService = {
    * container one.
    */
   serviceLabels?: Record<string, string>;
+  /**
+   * Scheduled jobs, run as this app's principal out of its release tree.
+   *
+   * The compose extension has always accepted `cron` on a `node` service —
+   * `HOST_NATIVE_KINDS` is `["site", "node"]` — but before this field the
+   * control plane only rendered it for sites, so an author's jobs on a Next.js
+   * app passed the linter and vanished at deploy. The daemon resolves the
+   * account and the working directory from the same release binding it already
+   * builds for the app's own unit, so unlike a site there is no principal to
+   * repeat here.
+   */
+  cron?: EnvironmentDeployCronJob[];
 };
 
 /**
@@ -2214,7 +2251,7 @@ const CRON_JOB_NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
  * answers to one question. This only ensures nothing structural can reach a
  * unit file.
  */
-const ON_CALENDAR_RE = /^[A-Za-z0-9 ,.:*/-]{1,200}$/;
+const ON_CALENDAR_RE = /^[A-Za-z0-9 ,.:*/_-]{1,200}$/;
 
 function parseDeployCronJobs(
   value: unknown,
@@ -2241,11 +2278,31 @@ function parseDeployCronJobs(
     if (seen.has(raw.name)) {
       throw new Error(`Duplicate sites cron job: ${raw.name}`);
     }
+    if (
+      raw.timeoutSeconds !== undefined &&
+      (typeof raw.timeoutSeconds !== "number" ||
+        !Number.isInteger(raw.timeoutSeconds) ||
+        raw.timeoutSeconds <= 0 ||
+        raw.timeoutSeconds > MAX_CRON_TIMEOUT_SECONDS)
+    ) {
+      throw new Error("Invalid sites cron entry");
+    }
+    if (
+      raw.concurrencyPolicy !== undefined && raw.concurrencyPolicy !== "forbid"
+    ) {
+      throw new Error("Invalid sites cron entry");
+    }
     seen.add(raw.name);
     return {
       name: raw.name,
       schedule: raw.schedule,
       command: [...raw.command] as string[],
+      ...(raw.timeoutSeconds === undefined
+        ? {}
+        : { timeoutSeconds: raw.timeoutSeconds }),
+      ...(raw.concurrencyPolicy === undefined
+        ? {}
+        : { concurrencyPolicy: "forbid" as const }),
     };
   });
 }
@@ -2715,6 +2772,26 @@ function parseNativeAppMode(
   return value as NonNullable<EnvironmentDeployNativeAppService["appMode"]>;
 }
 
+function parseNativeAppEnabled(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new TypeError("Invalid nativeAppServices enabled");
+  }
+  return value;
+}
+
+/**
+ * `startupFile` becomes part of an `ExecStart` line, so it gets the same
+ * relative-path rule as `outputDirectory` — never the looser command rule.
+ */
+function parseNativeAppStartupFile(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isSafeSourceSubdirectory(value)) {
+    throw new Error("Invalid nativeAppServices startupFile");
+  }
+  return value;
+}
+
 function parseDeployNativeAppServiceEntry(
   entry: unknown,
 ): EnvironmentDeployNativeAppService {
@@ -2745,24 +2822,16 @@ function parseDeployNativeAppServiceEntry(
   if (nodeVersion !== undefined) app.nodeVersion = nodeVersion;
   const appMode = parseNativeAppMode(entry.appMode);
   if (appMode !== undefined) app.appMode = appMode;
-  if (entry.enabled !== undefined) {
-    if (typeof entry.enabled !== "boolean") {
-      throw new TypeError("Invalid nativeAppServices enabled");
-    }
-    app.enabled = entry.enabled;
-  }
-  if (entry.startupFile !== undefined) {
-    // It becomes part of an ExecStart line, so it gets the same relative-path
-    // rule as outputDirectory, never the looser command rule.
-    if (!isSafeSourceSubdirectory(entry.startupFile)) {
-      throw new Error("Invalid nativeAppServices startupFile");
-    }
-    app.startupFile = entry.startupFile;
-  }
+  const enabled = parseNativeAppEnabled(entry.enabled);
+  if (enabled !== undefined) app.enabled = enabled;
+  const startupFile = parseNativeAppStartupFile(entry.startupFile);
+  if (startupFile !== undefined) app.startupFile = startupFile;
   const resources = parseNativeAppResources(entry.resources);
   if (resources) app.resources = resources;
   const accountLimits = parseNativeAppAccountLimits(entry.accountLimits);
   if (accountLimits) app.accountLimits = accountLimits;
+  const cron = parseDeployCronJobs(entry.cron);
+  if (cron?.length) app.cron = cron;
   return app;
 }
 

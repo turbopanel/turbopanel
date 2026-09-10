@@ -163,6 +163,60 @@ test('createDenoAmqpCommandQueue close is safe when never connected', async () =
   await queue.close()
 })
 
+test('createDenoAmqpCommandQueue reuses a live channel and closes it', async () => {
+  const channel = createRecordingChannel()
+  const fakeConnection = {
+    createConfirmChannel: async () => channel,
+    close: async () => undefined,
+  }
+  const connectStub = stub(amqplib, 'connect', () => Promise.resolve(fakeConnection as never))
+  const envelope: CommandEnvelope = {
+    commandId: 'cmd-reuse',
+    serverId: 'srv-1',
+    type: 'daemon.ping',
+    attempt: 1,
+    queuedAt: '2020-01-01T00:00:00.000Z',
+  }
+  try {
+    const queue = createDenoAmqpCommandQueue({ amqpUrl: 'amqp://test' })
+    await queue.enqueue(envelope)
+    await queue.enqueue(envelope)
+    if (!queue.close) throw new TypeError('expected a closable command queue')
+    await queue.close()
+    assertEquals(channel.calls.filter((call) => call.method === 'publish').length, 2)
+  } finally {
+    connectStub.restore()
+  }
+})
+
+test('createDenoAmqpCommandQueue close swallows channel and connection errors', async () => {
+  const channel = createRecordingChannel()
+  channel.close = async () => {
+    throw new Error('channel close failed')
+  }
+  const fakeConnection = {
+    createConfirmChannel: async () => channel,
+    close: async () => {
+      throw new Error('connection close failed')
+    },
+  }
+  const connectStub = stub(amqplib, 'connect', () => Promise.resolve(fakeConnection as never))
+  try {
+    const queue = createDenoAmqpCommandQueue({ amqpUrl: 'amqp://test' })
+    await queue.enqueue({
+      commandId: 'cmd-close',
+      serverId: 'srv-1',
+      type: 'daemon.ping',
+      attempt: 1,
+      queuedAt: '2020-01-01T00:00:00.000Z',
+    })
+    if (!queue.close) throw new TypeError('expected a closable command queue')
+    await queue.close()
+  } finally {
+    connectStub.restore()
+  }
+})
+
 test('probeCommandAmqpBrokerReachable returns false when connect fails', async () => {
   const connectStub = stub(
     amqplib,

@@ -544,3 +544,24 @@ test('a failure between the seat delete and the last seat insert rolls the whole
   // The subscription upsert in the same transaction was rolled back too.
   assertEquals(db.rows(subscription), beforeSub)
 })
+
+test('Workers without a connection string skip projection rather than racing the request client', async () => {
+  const h = await buildApp({ runtime: 'workers' })
+  const res = await h.app.request(
+    await signedPost(event('customer.subscription.updated', { id: 'sub_1', object: 'subscription' })),
+  )
+  assertEquals(res.status, 200)
+  assertEquals(await res.json(), {
+    ok: true,
+    event: 'customer.subscription.updated',
+    result: { scheduled: false, skipped: 'database_unavailable' },
+  })
+  assertEquals(h.scheduled.length, 0)
+})
+
+test('a signed body that is not JSON is a bad request', async () => {
+  const h = await buildApp()
+  const res = await h.app.request(await signedPost('not-json'))
+  assertEquals(res.status, 400)
+  assertEquals(h.scheduled.length, 0)
+})

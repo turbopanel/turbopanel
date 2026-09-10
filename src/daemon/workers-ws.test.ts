@@ -48,14 +48,17 @@ function createForwardCaptureEnv(): {
   env: CloudflareBindings;
   getForwardedRequest: () => Request | undefined;
   getByNameArg: () => string | undefined;
+  getByNameOptions: () => { locationHint?: string } | undefined;
 } {
   let forwardedRequest: Request | undefined;
   let byNameArg: string | undefined;
+  let byNameOptions: { locationHint?: string } | undefined;
 
   const env = {
     DAEMON_CELL: {
-      getByName: (name: string) => {
+      getByName: (name: string, options?: { locationHint?: string }) => {
         byNameArg = name;
+        byNameOptions = options;
         return {
           fetch: (request: Request) => {
             forwardedRequest = request;
@@ -70,7 +73,36 @@ function createForwardCaptureEnv(): {
     env,
     getForwardedRequest: () => forwardedRequest,
     getByNameArg: () => byNameArg,
+    getByNameOptions: () => byNameOptions,
   };
+}
+
+function createLocationHintDb(locationHint: string): Db {
+  return {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: () =>
+            Promise.resolve([
+              { options: { cellLocationHint: locationHint }, metadata: null },
+            ]),
+        }),
+      }),
+    }),
+  } as unknown as Db;
+}
+
+function createWorkersWsAppWithDb(
+  secrets: Awaited<ReturnType<typeof createTestSecrets>>,
+  db: Db,
+) {
+  const app = new Hono<{ Variables: AppEnv["Variables"]; Bindings: CloudflareBindings }>();
+  app.use("*", async (c, next) => {
+    c.set("db", db);
+    await next();
+  });
+  registerWorkersDaemonWebSocket(app as unknown as Hono, { secrets });
+  return app;
 }
 
 function createWorkersWsApp(secrets: Awaited<ReturnType<typeof createTestSecrets>>) {
@@ -282,5 +314,27 @@ describe("registerWorkersDaemonWebSocket forwarding", () => {
     expect(response.status).toBe(200);
     expect(getForwardedRequest()).toBeDefined();
     expect(getByNameArg()).toBe(serverId);
+  });
+
+  it("passes a cell location hint on the first getByName call", async () => {
+    const serverId = "test-srv-ws-location-hint";
+    const secrets = await createTestSecrets();
+    const app = createWorkersWsAppWithDb(secrets, createLocationHintDb("wnam"));
+    const token = await issueTestToken(serverId);
+    const { env, getByNameArg, getByNameOptions } = createForwardCaptureEnv();
+
+    const response = await app.fetch(
+      new Request(`https://instance.test${DAEMON_WS_PATH}`, {
+        headers: {
+          Upgrade: "websocket",
+          Authorization: `Bearer ${token}`,
+        },
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(getByNameArg()).toBe(serverId);
+    expect(getByNameOptions()).toEqual({ locationHint: "wnam" });
   });
 });

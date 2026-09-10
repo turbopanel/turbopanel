@@ -105,3 +105,20 @@ test('runApprovedCachedReadModel uses passthrough cache integration', async () =
   )
   assertEquals(loaded, ['row'])
 })
+
+test('runApprovedCachedReadModel joins an empty key-parts list', async () => {
+  const db = { kind: 'db' } as unknown as Db
+  const { cache, calls } = createRecordingCache(db)
+
+  await runApprovedCachedReadModel(
+    cache,
+    db,
+    'servers-list',
+    [],
+    async () => [],
+  )
+
+  const call = calls[0]
+  if (!call) throw new TypeError()
+  assertEquals(call.key, queryCacheKey('servers-list'))
+})

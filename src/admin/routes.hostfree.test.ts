@@ -21,6 +21,8 @@ import {
 import type { DaemonCell, DaemonCellRegistry, PendingRequestRecord } from '../daemon/cell/contracts.ts'
 import { ADMIN_API_PREFIX } from '../surfaces.ts'
 import { parseTestSecretsConfig } from '../test-fixtures/secrets.ts'
+import type { Db } from '../db.ts'
+import { server } from '../lib/db/schema.ts'
 import { registerAdminRoutes } from './routes.ts'
 
 /**
@@ -153,6 +155,36 @@ function createRegistry(opts: Readonly<{
   }
 }
 
+function wrapDbWithColocatedServer(db: Db, serverId: string): Db {
+  const original = db as unknown as {
+    select: (...args: unknown[]) => {
+      from: (table: unknown) => unknown
+    }
+  }
+  const rows = Promise.resolve([{ id: serverId }])
+  return {
+    ...original,
+    select: (...args: unknown[]) => {
+      const chain = original.select(...args)
+      return {
+        from: (table: unknown) => {
+          if (table === server) {
+            return {
+              where: () => ({
+                limit: () => rows,
+                then: rows.then.bind(rows),
+                catch: rows.catch.bind(rows),
+                finally: rows.finally.bind(rows),
+              }),
+            }
+          }
+          return chain.from(table)
+        },
+      }
+    },
+  } as unknown as Db
+}
+
 async function buildApp(opts: Readonly<{
   role?: 'admin' | 'superadmin' | 'user'
   runtime?: 'deno' | 'workers'
@@ -161,6 +193,8 @@ async function buildApp(opts: Readonly<{
   withDataEncryption?: boolean
   devSurface?: boolean
   getEnv?: () => Record<string, string | undefined>
+  colocatedServerId?: string
+  commandQueue?: { enqueue: (envelope: unknown) => Promise<void> }
 }> = {}) {
   const secretsConfig = parseTestSecretsConfig('deno')
   const secrets = await deriveSecretsConfig(secretsConfig, 'session-signing')
@@ -176,7 +210,10 @@ async function buildApp(opts: Readonly<{
     email: `admin-hostfree-${crypto.randomUUID()}@example.com`,
     role: opts.role ?? 'superadmin',
   })
-  const db = createMockAuthDb(state)
+  const rawDb = createMockAuthDb(state)
+  const db = opts.colocatedServerId
+    ? wrapDbWithColocatedServer(rawDb, opts.colocatedServerId)
+    : rawDb
   const signed = await buildSignedCookie(token, secrets)
   const cookie = `${HTTP_SESSION_COOKIE_NAME}=${signed}`
 
@@ -188,6 +225,9 @@ async function buildApp(opts: Readonly<{
     }
     if (dataEncryptionSecrets) {
       c.set('dataEncryptionSecrets', dataEncryptionSecrets)
+    }
+    if (opts.commandQueue) {
+      c.set('commandQueue', opts.commandQueue)
     }
     return next()
   })
@@ -450,6 +490,26 @@ test('POST /instance/public-urls/apply covers workers and short-circuit branches
   assertEquals(badBody.status, 400)
 })
 
+test('POST /instance/public-urls/apply returns 200 and fans out via commandQueue', async () => {
+  const serverId = crypto.randomUUID()
+  const { app, cookie } = await buildApp({
+    colocatedServerId: serverId,
+    registry: createRegistry({
+      snapshots: new Map([[serverId, { connected: true }]]),
+    }),
+    commandQueue: {
+      enqueue: () => Promise.resolve(),
+    },
+  })
+  const res = await app.request(`${ADMIN_API_PREFIX}/instance/public-urls/apply`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'content-type': 'application/json' },
+    body: '{}',
+  })
+  assertEquals(res.status, 200)
+  assertEquals(await res.json(), { ok: true, applied: true })
+})
+
 test('GET /daemon/addresses returns empty fleet list', async () => {
   const { app, cookie } = await buildApp()
   const res = await app.request(`${ADMIN_API_PREFIX}/daemon/addresses`, {
@@ -554,4 +614,57 @@ test('the tier catalogue is mounted on Workers only: self-hosted has no billing'
     headers: { Cookie: workers.cookie },
   })
   assertEquals(mounted.status, 503)
+})
+
+test('instance-wide forge collection routes are reachable for an admin session', async () => {
+  const { app, cookie } = await buildApp()
+  const headers = { Cookie: cookie, 'content-type': 'application/json' }
+  const list = await app.request(`${ADMIN_API_PREFIX}/forges`, { headers })
+  assertEquals(typeof list.status, 'number')
+
+  const create = await app.request(`${ADMIN_API_PREFIX}/forges`, {
+    method: 'POST',
+    headers,
+    body: '{}',
+  })
+  assertEquals(typeof create.status, 'number')
+
+  const manifest = await app.request(`${ADMIN_API_PREFIX}/forges/github/manifest`, {
+    method: 'POST',
+    headers,
+    body: '{}',
+  })
+  assertEquals(typeof manifest.status, 'number')
+
+  const callback = await app.request(
+    `${ADMIN_API_PREFIX}/forges/github/manifest/callback`,
+    { headers: { Cookie: cookie } },
+  )
+  assertEquals(typeof callback.status, 'number')
+
+  const id = crypto.randomUUID()
+  const sync = await app.request(`${ADMIN_API_PREFIX}/forges/${id}/sync`, {
+    method: 'POST',
+    headers,
+    body: '{}',
+  })
+  assertEquals(typeof sync.status, 'number')
+
+  const get = await app.request(`${ADMIN_API_PREFIX}/forges/${id}`, {
+    headers: { Cookie: cookie },
+  })
+  assertEquals(typeof get.status, 'number')
+
+  const patch = await app.request(`${ADMIN_API_PREFIX}/forges/${id}`, {
+    method: 'PATCH',
+    headers,
+    body: '{}',
+  })
+  assertEquals(typeof patch.status, 'number')
+
+  const del = await app.request(`${ADMIN_API_PREFIX}/forges/${id}`, {
+    method: 'DELETE',
+    headers: { Cookie: cookie },
+  })
+  assertEquals(typeof del.status, 'number')
 })

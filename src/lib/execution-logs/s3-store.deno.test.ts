@@ -134,6 +134,34 @@ describe('S3ExecutionLogStore', () => {
     }
   })
 
+  it('addresses list requests virtual-hosted when forcePathStyle is false', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: Request[] = []
+    globalThis.fetch = (input: URL | RequestInfo, init?: RequestInit) => {
+      const request = new Request(input as RequestInfo, init)
+      requests.push(request)
+      return Promise.resolve(
+        new Response('<ListBucketResult></ListBucketResult>', { status: 200 }),
+      )
+    }
+    try {
+      await new S3ExecutionLogStore({
+        ...CONFIG,
+        forcePathStyle: false,
+      }).sweepExpired({
+        now: new Date('2020-01-01T00:00:00.000Z'),
+        retentionDays: 1,
+        limit: 1,
+      })
+      const list = requests.find((request) => new URL(request.url).searchParams.get('list-type') === '2')
+      assert(list)
+      assertEquals(new URL(list.url).host, 'transcripts.s3.example.test')
+      assertEquals(new URL(list.url).pathname, '/')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('throws when PUT is rejected', async () => {
     const originalFetch = globalThis.fetch
     globalThis.fetch = (input: URL | RequestInfo, init?: RequestInit) => {

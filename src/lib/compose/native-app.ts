@@ -11,6 +11,7 @@
  */
 
 import {
+  type ComposeServiceCronJob,
   type ComposeServiceTurbopanelExtension,
   isNodeComposeService,
   type NativeRuntimeFramework,
@@ -71,6 +72,15 @@ export type NativeAppServiceSpec = {
    * the document said nothing about supervision — see
    * {@link NativeAppRestartPolicy}.
    */
+  /**
+   * Authored `x-turbopanel.cron[]`, untranslated.
+   *
+   * `cron` has always been legal on `serviceKind: node` (`HOST_NATIVE_KINDS`),
+   * but this split used to drop it, so a Next.js app's jobs passed the linter
+   * and never reached a host. Carried here in the shape the author wrote;
+   * deploy-prepare translates it exactly once, the same call sites use.
+   */
+  cron?: ComposeServiceCronJob[]
   restartPolicy?: NativeAppRestartPolicy
   /**
    * Authored `deploy.labels`, when the document set any.
@@ -404,6 +414,7 @@ function nativeAppSpecFor(
     // Read from the service body, not from the extension: these are plain
     // Compose keys that would otherwise leave with the service when it is
     // pulled out of `containerServices` by the split above.
+    ...(extension.cron === undefined ? {} : { cron: extension.cron }),
     ...(restartPolicy === undefined ? {} : { restartPolicy }),
     ...(serviceLabels === undefined ? {} : { serviceLabels }),
   }

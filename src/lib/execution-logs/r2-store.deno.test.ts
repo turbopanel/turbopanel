@@ -53,6 +53,39 @@ describe('R2ExecutionLogStore', () => {
     assertEquals(bucket.keys(), [])
   })
 
+  it('pages R2 list results when a listing is truncated with a cursor', async () => {
+    const listed: string[] = []
+    const bucket = {
+      get: () => Promise.resolve(null),
+      put: () => Promise.resolve(undefined),
+      delete: () => Promise.resolve(),
+      list: ({ cursor }: { cursor?: string }) => {
+        if (!cursor) {
+          listed.push('page-1')
+          return Promise.resolve({
+            objects: [{ key: 'execution-logs/data/2020/01/01/cmd-a.log.gz' }],
+            truncated: true,
+            cursor: 'next',
+          })
+        }
+        listed.push('page-2')
+        return Promise.resolve({
+          objects: [{ key: 'execution-logs/data/2020/01/01/cmd-b.log.gz' }],
+          truncated: false,
+        })
+      },
+    }
+    const store = new R2ExecutionLogStore(bucket)
+    await store.sweepExpired({
+      retentionDays: 1,
+      limit: 10,
+      now: new Date('2026-01-01T00:00:00.000Z'),
+    })
+    // Sweep lists the data prefix, then lists again per expired transcript to
+    // drop leftover parts — pagination must fire on the first of those calls.
+    assertEquals(listed.slice(0, 2), ['page-1', 'page-2'])
+  })
+
   it('bounds one sweep tick to the requested limit', async () => {
     const bucket = createFakeR2Bucket()
     const store = new R2ExecutionLogStore(bucket)

@@ -1,7 +1,11 @@
 import type { Context } from 'hono'
 import type { AppEnv } from '../../app.ts'
 import { nowIso } from '../../lib/commands/ids.ts'
-import { parseCronCommand, parseCronSchedule } from '../../lib/cron.ts'
+import {
+  MAX_CRON_TIMEOUT_SECONDS,
+  parseCronCommand,
+  parseCronSchedule,
+} from '../../lib/cron.ts'
 import {
   parseTaskNameInput,
   TASK_CONCURRENCY_POLICIES,
@@ -13,8 +17,13 @@ import { parseJsonbObject } from '../shared.ts'
 
 export { MAX_CRON_JOBS_PER_SERVICE } from '../../lib/cron.ts'
 
-/** Longest accepted timeout: 24 hours. */
-export const MAX_TASK_TIMEOUT_SECONDS = 86400
+/**
+ * Longest accepted timeout: 24 hours.
+ *
+ * Aliased from `lib/cron.ts` rather than restated, so the value the API accepts
+ * and the value the deploy wire parser enforces cannot drift apart.
+ */
+export const MAX_TASK_TIMEOUT_SECONDS = MAX_CRON_TIMEOUT_SECONDS
 
 export type TaskListFilters = {
   serviceId?: string

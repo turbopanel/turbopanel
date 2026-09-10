@@ -24,6 +24,7 @@ import {
   INBOUND_PROJECTION_COALESCE_MS,
   inboundHeartbeatProjectionDue,
   listConnectedServerIdsFromProjection,
+  listConnectedServersForSweep,
   listEnrolledDaemonServerIds,
   listRecentlyOfflineServersForSweep,
   loadServerRowsForFleetPresence,
@@ -1004,6 +1005,29 @@ test('listConnectedServerIdsFromProjection includes rows with connected column s
 
   const ids = await listConnectedServerIdsFromProjection(db)
   assertEquals(ids, [serverId])
+})
+
+test('listConnectedServersForSweep maps connectedAt from statusChangedAt', async () => {
+  const connectedAt = '2020-06-01T12:00:00.000Z'
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          orderBy: () =>
+            Promise.resolve([
+              { id: 'srv-a', connectedAt },
+              { id: 'srv-b', connectedAt: null },
+            ]),
+        }),
+      }),
+    }),
+  } as unknown as Db
+
+  const candidates = await listConnectedServersForSweep(db)
+  assertEquals(candidates, [
+    { id: 'srv-a', connectedAt },
+    { id: 'srv-b', connectedAt: null },
+  ])
 })
 
 test('inboundHeartbeatProjectionDue is false for unchanged daemonBuild within coalesce window', () => {

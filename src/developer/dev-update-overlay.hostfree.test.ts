@@ -240,3 +240,20 @@ test("ensureDevOverlayCurrent rejects when the build fails", async () => {
     "exited 7",
   );
 });
+
+test("readDevOverlayIdentity rejects non-object manifests", async () => {
+  assertEquals(
+    await readDevOverlayIdentity("/repo", () => Promise.resolve("null")),
+    null,
+  );
+  assertEquals(
+    await readDevOverlayIdentity("/repo", () => Promise.resolve("42")),
+    null,
+  );
+});
+
+test("computeDaemonSourceFingerprint uses the default git runner", async () => {
+  await assertRejects(() =>
+    computeDaemonSourceFingerprint("/tmp/turbopanel-missing-overlay-repo")
+  );
+});

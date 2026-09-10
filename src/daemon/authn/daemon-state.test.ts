@@ -137,6 +137,18 @@ test("parseServerDaemonState rejects invalid shapes", () => {
   assertEquals(parseServerDaemonState({
     key: { ...baseKey, publicJwk: { kty: "RSA" } },
   }), null);
+  assertEquals(parseServerDaemonState({
+    key: { ...baseKey, publicJwk: [] },
+  }), null);
+});
+
+test("parseServerDaemonState ignores a non-object projection", () => {
+  const parsed = parseServerDaemonState({
+    key: baseKey,
+    projection: [],
+  });
+  assertEquals(parsed?.key.id, "key-1");
+  assertEquals(parsed?.projection, undefined);
 });
 
 test("parseServerDaemonState parses daemonBuild and update projection fields", () => {

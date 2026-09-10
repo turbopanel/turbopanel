@@ -67,7 +67,11 @@ The guard is wired into `pnpm test:hook` and CI `build.yml`.
     for imported-but-untested modules) or naive Deno+Vitest line-union (dilutes
     Workers/DO with zero-hit transitive SF rows). Selective Workers/DO 0% with a
     healthy overall project coverage % is almost always an LCOV merge/path bug,
-    not Automatic Analysis (AA being on fails the CI scanner entirely).
+    not Automatic Analysis (AA being on fails the CI scanner entirely). (4) Co-located
+    sibling imports (metrics `contract.ts` parity against `../turbopaneld`) can leak
+    an absolute `SF:` path outside this repo. After prefix stripping,
+    `test-coverage.sh` drops those out-of-repo LCOV records so SonarCloud does not
+    discard the whole report.
 - **`sonar.sources` / `sonar.tests` / `sonar.test.inclusions`** must stay set in
   `sonar-project.properties` (and mirrored in vestigial
   `.sonarcloud.properties`). Tests are co-located (`**/*.test.ts` under

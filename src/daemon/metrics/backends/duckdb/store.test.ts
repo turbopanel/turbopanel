@@ -1,4 +1,4 @@
-import { assertEquals, assertExists } from '@std/assert'
+import { assertEquals, assertExists, assertRejects, assertThrows } from '@std/assert'
 import { it } from '@std/testing/bdd'
 import { buildMetricsSample } from '../../contract.ts'
 import type {
@@ -1138,4 +1138,127 @@ it("writeSample splits diagnostics across the host row's cpu_diagnostics_* colum
       handle.close()
     }
   })
+})
+
+it('startUiServer rejects a non-TCP port before opening DuckDB', async () => {
+  await withStore(async (store) => {
+    await assertRejects(
+      () => store.startUiServer(0),
+      TypeError,
+      'port must be a valid TCP port',
+    )
+    await assertRejects(
+      () => store.startUiServer(65536),
+      TypeError,
+      'port must be a valid TCP port',
+    )
+    await assertRejects(
+      () => store.startUiServer(1.5),
+      TypeError,
+      'port must be a valid TCP port',
+    )
+  })
+})
+
+it('constructor rejects non-positive threads / retentionDays before opening DuckDB', async () => {
+  const metricsDir = await Deno.makeTempDir({ prefix: 'tp-duckdb-store-ctor-' })
+  try {
+    assertThrows(
+      () => new DuckDbParquetServerMetricsStore({ metricsDir, threads: 0 }),
+      TypeError,
+      'threads must be a positive integer',
+    )
+    assertThrows(
+      () => new DuckDbParquetServerMetricsStore({ metricsDir, retentionDays: -1 }),
+      TypeError,
+      'retentionDays must be a positive integer',
+    )
+  } finally {
+    await Deno.remove(metricsDir, { recursive: true })
+  }
+})
+
+it('queryHostSeries rejects unsafe ids, inverted ranges, and empty metrics', async () => {
+  await withStore(async (store) => {
+    await assertRejects(
+      () =>
+        store.queryHostSeries({
+          serverId: 'not-a-uuid',
+          metrics: ['host.cpu.busyPercent'],
+          from: new Date(DAY_START).toISOString(),
+          to: new Date(DAY_START + 60_000).toISOString(),
+        }),
+      TypeError,
+      'invalid serverId for DuckDB',
+    )
+    await assertRejects(
+      () =>
+        store.queryHostSeries({
+          serverId: SERVER_A,
+          metrics: ['host.cpu.busyPercent'],
+          from: 'not-an-instant',
+          to: new Date(DAY_START + 60_000).toISOString(),
+        }),
+      TypeError,
+      'invalid from timestamp',
+    )
+    await assertRejects(
+      () =>
+        store.queryHostSeries({
+          serverId: SERVER_A,
+          metrics: ['host.cpu.busyPercent'],
+          from: new Date(DAY_START + 60_000).toISOString(),
+          to: new Date(DAY_START).toISOString(),
+        }),
+      TypeError,
+      'from must be <= to',
+    )
+    await assertRejects(
+      () =>
+        store.queryHostSeries({
+          serverId: SERVER_A,
+          metrics: [],
+          from: new Date(DAY_START).toISOString(),
+          to: new Date(DAY_START + 60_000).toISOString(),
+        }),
+      TypeError,
+      'metrics must be a non-empty list of v5 canonical names',
+    )
+    await assertRejects(
+      () =>
+        store.queryHostSeries({
+          serverId: SERVER_A,
+          metrics: ['host.cpu.busyPercent'],
+          from: new Date(DAY_START).toISOString(),
+          to: new Date(DAY_START + 60_000).toISOString(),
+          resolutionSeconds: 0,
+        }),
+      TypeError,
+      'resolutionSeconds must be a positive integer',
+    )
+  })
+})
+
+it('age-based flush writes a sample that is under the row batch cap', async () => {
+  const metricsDir = await Deno.makeTempDir({ prefix: 'tp-duckdb-store-age-' })
+  const store = new DuckDbParquetServerMetricsStore(
+    { metricsDir },
+    { writeBatchMaxRows: 50, writeBatchMaxAgeMs: 5 },
+  )
+  try {
+    await store.writeSample(sample({ atMs: DAY_START, cpuBusyPercent: 7 }))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    const result = await store.queryHostSeries({
+      serverId: SERVER_A,
+      metrics: ['host.cpu.busyPercent'],
+      from: new Date(DAY_START).toISOString(),
+      to: new Date(DAY_START + 60_000).toISOString(),
+      resolutionSeconds: 60,
+    })
+    assertEquals(result.sampleCount, 1)
+    assertEquals(result.points[0]?.values['host.cpu.busyPercent'], 7)
+  } finally {
+    await store.close()
+    await Deno.remove(metricsDir, { recursive: true })
+  }
 })

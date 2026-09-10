@@ -657,9 +657,9 @@ test('a scoped path whose App id header names a different app is 401', async () 
   assertEquals(res.status, 401)
 })
 
-test('a signed push that is not a branch ref is accepted as skipped', async () => {
+test('a signed push whose ref is not a string is a non-branch skip', async () => {
   const app = await buildApp({ webhookSecret: 'shh' })
-  const res = await signedDispatch(app, JSON.stringify({ ref: 'refs/tags/v1' }), {
+  const res = await signedDispatch(app, JSON.stringify({ ref: 12 }), {
     'x-github-event': 'push',
   })
   assertEquals(res.status, 200)

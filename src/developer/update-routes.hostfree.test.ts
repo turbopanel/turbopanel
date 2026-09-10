@@ -276,3 +276,59 @@ test('POST /daemon/update fans out skip and success rows', async () => {
   assertEquals(body.ok, true)
   assertEquals(body.results[0]?.skipped, true)
 })
+
+test('POST /daemon/update validates override, requires a database, and maps remote failures', async () => {
+  const noDb = await createApp({ db: null, registry: createRegistry({ onlineIds: [SERVER_ID] }) })
+  const missingDb = await noDb.request(`${DEVELOPER_API_PREFIX}/daemon/update`, {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: '{}',
+  })
+  assertEquals(missingDb.status, 503)
+
+  const bad = await (await createApp({
+    registry: createRegistry({ onlineIds: [SERVER_ID] }),
+  })).request(`${DEVELOPER_API_PREFIX}/daemon/update`, {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ updateUrl: HTTPS_URL }),
+  })
+  assertEquals(bad.status, 400)
+
+  const okApp = await createApp({
+    db: createDb(),
+    registry: createRegistry({ onlineIds: [SERVER_ID], connected: true }),
+  })
+  const ok = await okApp.request(`${DEVELOPER_API_PREFIX}/daemon/update`, {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: '{}',
+  })
+  assertEquals(ok.status, 200)
+  const okBody = await ok.json() as {
+    ok: boolean
+    results: Array<{ ok: boolean; skipped?: boolean }>
+  }
+  assertEquals(okBody.ok, true)
+  assertEquals(okBody.results[0]?.skipped, undefined)
+
+  const failedApp = await createApp({
+    db: createDb(),
+    registry: createRegistry({
+      onlineIds: [SERVER_ID],
+      connected: false,
+    }),
+  })
+  const failed = await failedApp.request(`${DEVELOPER_API_PREFIX}/daemon/update`, {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: '{}',
+  })
+  assertEquals(failed.status, 200)
+  const failedBody = await failed.json() as {
+    ok: boolean
+    results: Array<{ ok: boolean; error?: string }>
+  }
+  assertEquals(failedBody.ok, false)
+  assertEquals(typeof failedBody.results[0]?.error, 'string')
+})

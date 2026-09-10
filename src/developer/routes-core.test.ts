@@ -53,8 +53,10 @@ type RequestWaitBehavior =
   | "done"
   | "done-with-addresses"
   | "failed"
+  | "failed-no-error"
   | "expired"
-  | "throw";
+  | "throw"
+  | "throw-string";
 
 function queryResult<T>(rows: T[]) {
   const promise = Promise.resolve(rows);
@@ -216,6 +218,9 @@ function createDiagnosticsCell(
       if (requestBehavior === "throw") {
         return Promise.reject(new Error("daemon not connected"));
       }
+      if (requestBehavior === "throw-string") {
+        return Promise.reject("string-boom");
+      }
       const base: PendingRequestRecord = {
         serverId,
         requestId: outbound.requestId,
@@ -229,6 +234,12 @@ function createDiagnosticsCell(
           ...base,
           status: "failed",
           error: "failed to fetch addresses",
+        });
+      }
+      if (requestBehavior === "failed-no-error") {
+        return Promise.resolve({
+          ...base,
+          status: "failed",
         });
       }
       if (requestBehavior === "expired") {
@@ -748,6 +759,38 @@ describe("developer address routes", () => {
     expect(successBody.servers[0]?.ips?.map((ip) => ip.address)).toContain(
       "203.0.113.10",
     );
+
+    const expiredApp = await createTestApp({
+      db,
+      registry: createRegistry(SERVER_ID, {
+        onlineIds: [SERVER_ID],
+        requestBehavior: "expired",
+      }),
+    });
+    const expired = await expiredApp.app.request(
+      `${DEVELOPER_API_PREFIX}/daemon/addresses`,
+    );
+    expect(expired.status).toBe(200);
+    const expiredBody = await expired.json() as {
+      servers: Array<{ error?: string }>;
+    };
+    expect(expiredBody.servers[0]?.error).toBe("timeout waiting for addresses");
+
+    const throwApp = await createTestApp({
+      db,
+      registry: createRegistry(SERVER_ID, {
+        onlineIds: [SERVER_ID],
+        requestBehavior: "throw-string",
+      }),
+    });
+    const thrown = await throwApp.app.request(
+      `${DEVELOPER_API_PREFIX}/daemon/addresses`,
+    );
+    expect(thrown.status).toBe(200);
+    const thrownBody = await thrown.json() as {
+      servers: Array<{ error?: string }>;
+    };
+    expect(thrownBody.servers[0]?.error).toBe("string-boom");
   });
 
   it("handles per-server address fetch paths", async () => {
@@ -811,6 +854,19 @@ describe("developer address routes", () => {
     };
     expect(body.ok).toBe(true);
     expect(body.ips.map((ip) => ip.address)).toContain("203.0.113.10");
+
+    const failedNoErrorApp = await createTestApp({
+      db: onlineDb,
+      registry: createRegistry(SERVER_ID, {
+        requestBehavior: "failed-no-error",
+      }),
+    });
+    const failedNoError = await failedNoErrorApp.app.request(
+      `${DEVELOPER_API_PREFIX}/daemon/${SERVER_ID}/addresses`,
+    );
+    expect(failedNoError.status).toBe(500);
+    const failedBody = await failedNoError.json() as { error: string };
+    expect(failedBody.error).toBe("failed to fetch addresses");
   });
 });
 

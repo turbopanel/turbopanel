@@ -5,6 +5,8 @@
 import { assertEquals, assertThrows } from '@std/assert'
 import { managedHaContainerNameFromService } from '../naming.ts'
 import {
+  parseCommandPayload,
+  parseCommandResult,
   parseDeploySecretPlan,
   parseManagedHaFailoverPayload,
   parseManagedHaFailoverResult,
@@ -107,6 +109,23 @@ test('parsePrincipalsReconcileResult validates integer and boolean fields', () =
     Error,
     'keysChanged must be an array of strings',
   )
+  assertThrows(
+    () => parsePrincipalsReconcileResult(null),
+    Error,
+    'Invalid principals reconcile result',
+  )
+  assertThrows(
+    () =>
+      parsePrincipalsReconcileResult({
+        principalsApplied: 1,
+        keysChanged: [],
+        keysRemoved: [],
+        sshdReloaded: 'yes',
+        warnings: [],
+      }),
+    TypeError,
+    'sshdReloaded must be a boolean',
+  )
 })
 
 test('parseTlsTrustReconcilePayload validates PEM bundle and optional allowRemoval', () => {
@@ -141,6 +160,25 @@ test('parseTlsTrustReconcilePayload validates PEM bundle and optional allowRemov
     TypeError,
     'allowRemoval must be a boolean',
   )
+  assertThrows(
+    () => parseTlsTrustReconcilePayload(null),
+    Error,
+    'Invalid tls trust reconcile payload',
+  )
+  assertThrows(
+    () =>
+      parseTlsTrustReconcilePayload({
+        bundlePem: '   ',
+        fingerprint: 'a'.repeat(64),
+      }),
+    Error,
+    'bundlePem must be a non-empty PEM string',
+  )
+  assertThrows(
+    () => parseTlsTrustReconcilePayload({ bundlePem: PEM, fingerprint: '   ' }),
+    Error,
+    'fingerprint must be a non-empty string',
+  )
 })
 
 test('parseTlsTrustReconcileResult requires applied and fingerprint', () => {
@@ -155,6 +193,11 @@ test('parseTlsTrustReconcileResult requires applied and fingerprint', () => {
     () => parseTlsTrustReconcileResult({ applied: true, fingerprint: '' }),
     Error,
     'fingerprint must be a non-empty string',
+  )
+  assertThrows(
+    () => parseTlsTrustReconcileResult(null),
+    Error,
+    'Invalid tls trust reconcile result',
   )
 })
 
@@ -249,8 +292,25 @@ test('parseManagedReplicationHealth accepts valid snapshots and drops malformed 
     },
   )
   assertEquals(parseManagedReplicationHealth(undefined), undefined)
+  assertEquals(parseManagedReplicationHealth('x'), undefined)
   assertEquals(parseManagedReplicationHealth({ state: 'bogus' }), undefined)
   assertEquals(parseManagedReplicationHealth({ state: 'streaming', observedAt: 'not-iso' }), undefined)
+  assertEquals(
+    parseManagedReplicationHealth({
+      state: 'needs_resync',
+      observedAt: '2020-01-01T00:00:00.000Z',
+      lagBytes: -1,
+      lagSeconds: Number.NaN,
+    }),
+    { state: 'needs_resync', observedAt: '2020-01-01T00:00:00.000Z' },
+  )
+  assertEquals(
+    parseManagedReplicationHealth({
+      state: 'catchup',
+      observedAt: '2020-01-01T00:00:00.000Z',
+    }),
+    { state: 'catchup', observedAt: '2020-01-01T00:00:00.000Z' },
+  )
 })
 
 test('parseManagedHaReconcilePayload accepts raft peers and cluster members', () => {
@@ -496,5 +556,349 @@ test('parseManagedHaFailoverPayload and result validate phase and ids', () => {
       }),
     TypeError,
     'Invalid managed.ha.failover payload',
+  )
+  assertThrows(
+    () => parseManagedHaFailoverPayload(null),
+    TypeError,
+    'Invalid managed.ha.failover payload',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: 'managed-pg-1',
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: '00000000-0000-4000-8000-0000000000ee',
+        phase: 'drain',
+        engine: 'sqlite',
+      }),
+    TypeError,
+    'Invalid managed.ha.failover payload',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: 'managed-pg-1',
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: '00000000-0000-4000-8000-0000000000ee',
+        phase: 'drain',
+        sourceHost: '',
+      }),
+    TypeError,
+    'Invalid managed.ha.failover payload',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: 'managed-pg-1',
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: '00000000-0000-4000-8000-0000000000ee',
+        phase: 'drain',
+        targetPort: 0,
+      }),
+    TypeError,
+    'Invalid managed.ha.failover payload',
+  )
+  assertEquals(
+    parseManagedHaFailoverPayload({
+      managedId: 'managed-pg-1',
+      sourceMemberId: MEMBER_ID,
+      targetMemberId: '00000000-0000-4000-8000-0000000000ee',
+      phase: 'recover',
+      targetHost: '203.0.113.40',
+      targetPort: 5433,
+    }).targetHost,
+    '203.0.113.40',
+  )
+  assertThrows(
+    () => parseManagedHaFailoverResult(null),
+    TypeError,
+    'Invalid managed.ha.failover result',
+  )
+  assertThrows(
+    () => parseManagedHaFailoverResult({ summary: 'ok', phase: 'promote' }),
+    TypeError,
+    'Invalid managed.ha.failover result',
+  )
+})
+
+test('parseManagedHaReconcilePayload rejects raft, cluster, and member field errors', () => {
+  const containerName = managedHaContainerNameFromService(HA_SERVICE_ID)
+  const identity = {
+    serviceId: HA_SERVICE_ID,
+    composeServiceName: 'orchestrator',
+    containerName,
+  }
+  const member = {
+    memberId: MEMBER_ID,
+    role: 'replica' as const,
+    replicaClass: 'failover' as const,
+    host: 'db-2',
+    port: 5432,
+    promotionRule: 'must_not' as const,
+    containerName: '01936b3e-aaaa-bbbb-cccc-123456789abc-2',
+  }
+  const cluster = {
+    managedId: 'managed-pg-1',
+    clusterAlias: 'managed-pg-1',
+    engine: 'postgres',
+    members: [member],
+    replicationUsername: 'tp_repl',
+    replicationPasswordEnvelope: 'tpdaemon.v1.server.key.payload',
+  }
+  const parsed = parseManagedHaReconcilePayload({
+    serverId: SERVER_ID,
+    managedNetwork: MANAGED_NETWORK,
+    desired: 'present',
+    raft: {
+      nodeId: SERVER_ID,
+      advertiseAddress: '203.0.113.10',
+      httpPort: 33001,
+      raftPort: 33002,
+      peers: [],
+    },
+    clusters: [cluster],
+    identity,
+  })
+  assertEquals(parsed.clusters[0]?.members[0]?.replicaClass, 'failover')
+  assertEquals(parsed.clusters[0]?.members[0]?.containerName, member.containerName)
+
+  assertThrows(
+    () => parseManagedHaReconcilePayload(null),
+    TypeError,
+    'Invalid managed.ha.reconcile payload',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'maybe',
+        raft: null,
+        clusters: [],
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile payload',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: null,
+        clusters: Array.from({ length: 65 }, () => cluster),
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile payload',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: 'x',
+        clusters: [],
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile raft',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: {
+          nodeId: SERVER_ID,
+          advertiseAddress: '203.0.113.10',
+          httpPort: 33001,
+          raftPort: 33002,
+          peers: Array.from({ length: 33 }, (_, index) => ({
+            nodeId: `00000000-0000-4000-8000-0000000000${String(index).padStart(2, '0')}`,
+            address: '203.0.113.11',
+            raftPort: 33002,
+            httpPort: 33001,
+          })),
+        },
+        clusters: [],
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile raft',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: {
+          nodeId: SERVER_ID,
+          advertiseAddress: '203.0.113.10',
+          httpPort: 33001,
+          raftPort: 33002,
+          peers: [null],
+        },
+        clusters: [],
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile raft peer',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: null,
+        clusters: [null],
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile cluster',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: null,
+        clusters: [{ ...cluster, members: [] }],
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile cluster',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: null,
+        clusters: [{ ...cluster, members: [null] }],
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile cluster member',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: null,
+        clusters: [{
+          ...cluster,
+          members: [{ ...member, replicaClass: 'standby' }],
+        }],
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile cluster member',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: null,
+        clusters: [{
+          ...cluster,
+          members: [{ ...member, containerName: 'Bad Name' }],
+        }],
+        identity,
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile cluster member',
+  )
+  assertThrows(
+    () =>
+      parseManagedHaReconcilePayload({
+        serverId: SERVER_ID,
+        managedNetwork: MANAGED_NETWORK,
+        desired: 'present',
+        raft: null,
+        clusters: [],
+        identity: 'x',
+      }),
+    TypeError,
+    'Invalid managed.ha.reconcile identity',
+  )
+})
+
+test('parseCommandPayload and parseCommandResult dispatch HA and principals types', () => {
+  const containerName = managedHaContainerNameFromService(HA_SERVICE_ID)
+  const haPayload = {
+    serverId: SERVER_ID,
+    managedNetwork: MANAGED_NETWORK,
+    desired: 'absent' as const,
+    raft: null,
+    clusters: [],
+    identity: {
+      serviceId: HA_SERVICE_ID,
+      composeServiceName: 'orchestrator',
+      containerName,
+    },
+  }
+  assertEquals(
+    parseCommandPayload('managed.ha.reconcile', haPayload),
+    parseManagedHaReconcilePayload(haPayload),
+  )
+  assertEquals(
+    parseCommandResult('managed.ha.reconcile', {
+      summary: 'absent',
+      registeredClusters: [],
+      restarted: false,
+    }),
+    { summary: 'absent', registeredClusters: [], restarted: false },
+  )
+  assertEquals(
+    parseCommandPayload('managed.ha.failover', {
+      managedId: 'managed-pg-1',
+      sourceMemberId: MEMBER_ID,
+      targetMemberId: '00000000-0000-4000-8000-0000000000ee',
+      phase: 'drain',
+      engine: 'postgres',
+      sourceHost: '10.0.0.1',
+      sourcePort: 5432,
+    }),
+    parseManagedHaFailoverPayload({
+      managedId: 'managed-pg-1',
+      sourceMemberId: MEMBER_ID,
+      targetMemberId: '00000000-0000-4000-8000-0000000000ee',
+      phase: 'drain',
+      engine: 'postgres',
+      sourceHost: '10.0.0.1',
+      sourcePort: 5432,
+    }),
+  )
+  assertEquals(
+    parseCommandResult('managed.ha.failover', { summary: 'drained', phase: 'drain' }),
+    { summary: 'drained', phase: 'drain' },
+  )
+  assertEquals(
+    parseCommandResult('server.principals.reconcile', {
+      principalsApplied: 0,
+      keysChanged: [],
+      keysRemoved: [],
+      sshdReloaded: false,
+      warnings: [],
+    }),
+    {
+      principalsApplied: 0,
+      keysChanged: [],
+      keysRemoved: [],
+      sshdReloaded: false,
+      warnings: [],
+    },
   )
 })

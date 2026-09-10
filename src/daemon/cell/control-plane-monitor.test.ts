@@ -21,7 +21,9 @@ import {
   onDaemonUpdateQueued,
   onDaemonUpdateReset,
   onDaemonUpdateResult,
+  sweepStalePresence,
 } from './control-plane-monitor.ts'
+import type { RedisDaemonCellRegistry } from './redis/registry.ts'
 import { resolveFleetPresence } from './fleet-presence.ts'
 import {
   resetTrunkManifestCacheForTests,
@@ -942,5 +944,212 @@ test('onDaemonConnectedFromEvidence emits self_heal; onDaemonConnected emits con
   )
   assertEquals(events.length, 1)
   assertEquals(events[0]?.reason, 'connect')
+  resetServerStatusEventSinkForTests()
+})
+
+test('repairStaleProjectedUpdate expires when the daemon commit does not match trunk', async () => {
+  const { db, getDaemon } = createTrackingDb({
+    key: baseKey,
+    projection: {
+      update: {
+        status: 'updating',
+        requestId: 'req-expire',
+        channel: 'trunk',
+        queuedAt: '2020-01-01T00:00:00.000Z',
+      },
+    },
+  })
+
+  const { repairStaleProjectedUpdate } = await import('./control-plane-monitor.ts')
+  const repaired = await repairStaleProjectedUpdate(
+    db,
+    serverId,
+    {
+      status: 'updating',
+      requestId: 'req-expire',
+      channel: 'trunk',
+      queuedAt: '2020-01-01T00:00:00.000Z',
+    },
+    {
+      currentCommit: 'old-commit',
+      targetCommit: 'new-commit',
+    },
+  )
+
+  assertEquals(repaired, true)
+  const update = parseServerDaemonState(getDaemon())?.projection?.update
+  assertEquals(update?.status, 'expired')
+  assertEquals(update?.requestId, 'req-expire')
+})
+
+test('maybeRepairUpdateFromDaemonBuildHello uses the trunk manifest when targetCommit is omitted', async () => {
+  resetTrunkManifestCacheForTests()
+  seedTrunkManifestCacheForTests({
+    commit: 'manifest-commit',
+    buildId: 'b-manifest',
+    builtAt: '2020-01-01T00:00:00.000Z',
+    channel: 'trunk',
+    manifestUrl: 'https://dl.trbp.nl/channels/trunk/manifest.json',
+  })
+  const { db, getDaemon } = createTrackingDb({
+    key: baseKey,
+    projection: {
+      update: {
+        status: 'updating',
+        requestId: 'req-manifest',
+        channel: 'trunk',
+        queuedAt: '2020-01-01T00:00:00.000Z',
+      },
+    },
+  })
+
+  const { maybeRepairUpdateFromDaemonBuildHello } = await import('./control-plane-monitor.ts')
+  await maybeRepairUpdateFromDaemonBuildHello(
+    db,
+    serverId,
+    { commit: 'manifest-commit', buildId: 'b1', channel: 'trunk' },
+  )
+
+  const update = parseServerDaemonState(getDaemon())?.projection?.update
+  assertEquals(update?.status, 'done')
+  resetTrunkManifestCacheForTests()
+})
+
+test('maybeRepairUpdateFromDaemonBuildHello no-ops without a commit or idle update', async () => {
+  const { db, getDaemon } = createTrackingDb({
+    key: baseKey,
+    projection: {
+      update: {
+        status: 'idle',
+        requestId: 'req-idle',
+      },
+    },
+  })
+
+  const { maybeRepairUpdateFromDaemonBuildHello } = await import('./control-plane-monitor.ts')
+  await maybeRepairUpdateFromDaemonBuildHello(db, serverId)
+  await maybeRepairUpdateFromDaemonBuildHello(
+    db,
+    serverId,
+    { commit: 'other', buildId: 'b1' },
+  )
+
+  const update = parseServerDaemonState(getDaemon())?.projection?.update
+  assertEquals(update?.status, 'idle')
+})
+
+test('onDaemonHeartbeat skips Postgres when the server row is missing', async () => {
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: () => {
+          const rows = Promise.resolve([])
+          return Object.assign(rows, { limit: () => rows })
+        },
+      }),
+    }),
+    update: () => {
+      throw new TypeError('heartbeat must not write when the server is missing')
+    },
+  } as unknown as Db
+
+  const daemonBuild = {
+    commit: 'missing-row',
+    buildId: 'b-missing',
+    channel: 'trunk' as const,
+  }
+  await onDaemonHeartbeat(
+    db,
+    serverId,
+    createMockCell({
+      connected: true,
+      lastSeenAt: '2020-01-01T00:00:00.000Z',
+      daemonBuild: { commit: 'other', buildId: 'other-build' },
+    }) as never,
+    daemonBuild,
+  )
+})
+
+test('sweepStalePresence demotes online servers whose cell reports stale', async () => {
+  resetServerStatusEventSinkForTests()
+  const events: ServerStatusEvent[] = []
+  setServerStatusEventSink({
+    writeStatusEvent(event) {
+      events.push(event)
+    },
+  })
+  const { db } = createTrackingDb(
+    { key: baseKey, projection: { hostname: 'host-1' } },
+    {
+      connected: true,
+      statusChangedAt: '2020-01-01T00:00:00.000Z',
+    },
+  )
+
+  const registry = {
+    listOnlineServerIds: () => Promise.resolve([serverId]),
+    getCell: () => ({
+      reconcileStalePresence: () => Promise.resolve(true),
+      getSnapshot: () =>
+        Promise.resolve({
+          serverId,
+          version: 1,
+          updatedAt: new Date().toISOString(),
+          connected: false,
+          hostname: 'host-1',
+          machineKey: TEST_MACHINE_KEY,
+        }),
+    }),
+    getSnapshots: () => {
+      throw new TypeError('unused')
+    },
+    purge: () => Promise.resolve(),
+    client: {} as RedisDaemonCellRegistry['client'],
+    maintain: () => Promise.resolve(),
+    reclaimOrphanedSocketLeasesOnStartup: () => Promise.resolve(),
+    close: () => Promise.resolve(),
+  } as unknown as RedisDaemonCellRegistry
+
+  await sweepStalePresence(db, registry)
+
+  assertEquals(events.length, 1)
+  assertEquals(events[0]?.reason, 'sweep_stale')
+  resetServerStatusEventSinkForTests()
+})
+
+test('sweepStalePresence skips servers whose presence is still live', async () => {
+  resetServerStatusEventSinkForTests()
+  const events: ServerStatusEvent[] = []
+  setServerStatusEventSink({
+    writeStatusEvent(event) {
+      events.push(event)
+    },
+  })
+  const { db } = createTrackingDb(
+    { key: baseKey, projection: { hostname: 'host-1' } },
+    {
+      connected: true,
+      statusChangedAt: '2020-01-01T00:00:00.000Z',
+    },
+  )
+
+  const registry = {
+    listOnlineServerIds: () => Promise.resolve([serverId]),
+    getCell: () => ({
+      reconcileStalePresence: () => Promise.resolve(false),
+    }),
+    getSnapshots: () => {
+      throw new TypeError('unused')
+    },
+    purge: () => Promise.resolve(),
+    client: {} as RedisDaemonCellRegistry['client'],
+    maintain: () => Promise.resolve(),
+    reclaimOrphanedSocketLeasesOnStartup: () => Promise.resolve(),
+    close: () => Promise.resolve(),
+  } as unknown as RedisDaemonCellRegistry
+
+  await sweepStalePresence(db, registry)
+
+  assertEquals(events.length, 0)
   resetServerStatusEventSinkForTests()
 })

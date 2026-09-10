@@ -10,6 +10,7 @@ import {
   parseEmailSettingsUpdates,
   parsePayloadBody,
   parseReencryptRequestBody,
+  parseServerMetricsLiveSettingsBody,
   parseSignupEnabledBody,
   publicUrlsApplyWaitToResponse,
   resolvePerServerLimit,
@@ -85,8 +86,16 @@ test('parseReencryptRequestBody defaults and validates cursor/limit', () => {
     ok: false,
     error: 'cursor.afterId must be a non-empty string',
   })
+  assertEquals(parseReencryptRequestBody({ cursor: [] }), {
+    ok: false,
+    error: 'cursor must be an object',
+  })
+  assertEquals(parseReencryptRequestBody({ cursor: null }), {
+    ok: true,
+    cursor: null,
+    limit: REENCRYPT_BATCH_SIZE,
+  })
 })
-
 test('isReencryptStage recognizes configured stages only', () => {
   assertEquals(isReencryptStage('variables'), true)
   assertEquals(isReencryptStage('storage'), true)
@@ -102,6 +111,25 @@ test('parsePayloadBody and parseSignupEnabledBody validate shapes', () => {
   assertEquals(parseSignupEnabledBody({ enabled: 'yes' }), {
     ok: false,
     error: 'expected { enabled: boolean }',
+  })
+  assertEquals(parseSignupEnabledBody([]), {
+    ok: false,
+    error: 'expected { enabled: boolean }',
+  })
+})
+
+test('parseServerMetricsLiveSettingsBody requires an integer maxMinutes', () => {
+  assertEquals(parseServerMetricsLiveSettingsBody({ maxMinutes: 30 }), {
+    ok: true,
+    maxMinutes: 30,
+  })
+  assertEquals(parseServerMetricsLiveSettingsBody([]), {
+    ok: false,
+    error: 'expected { maxMinutes: number }',
+  })
+  assertEquals(parseServerMetricsLiveSettingsBody({ maxMinutes: 1.5 }), {
+    ok: false,
+    error: 'expected { maxMinutes: number }',
   })
 })
 
@@ -119,6 +147,7 @@ test('parseEmailSettingsUpdates keeps string/null entries only', () => {
     parseEmailSettingsUpdates({ SMTP_HOST: 'mail.example.com', SMTP_PORT: 587, BAD: true }),
     { SMTP_HOST: 'mail.example.com' },
   )
+  assertEquals(parseEmailSettingsUpdates({ SMTP_PASS: null }), { SMTP_PASS: null })
 })
 
 test('resolvePerServerLimit falls back to 50', () => {

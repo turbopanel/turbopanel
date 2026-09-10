@@ -1,7 +1,9 @@
 import { assertEquals, assertRejects } from '@std/assert'
 import type { Context } from 'hono'
+import type { DaemonCellRegistry } from '../../daemon/cell/contracts.ts'
 import type { Db } from '../../db.ts'
 import type { RedisCellClient } from '../../daemon/cell/redis/client.ts'
+import { createHyperdriveQueryCache } from '../hyperdrive-query-cache.ts'
 import { createPassthroughQueryCache } from '../passthrough-query-cache.ts'
 import { createRedisQueryCache } from '../redis-query-cache.ts'
 import {
@@ -51,10 +53,17 @@ function thenableRows(rows: unknown[]) {
   }
 }
 
-/**
- * Host-free Db stub: list-row SELECTs (licenseId field) vs presence SELECTs
- * (daemon/connected fields).
- */
+/** Documented cached SELECT #1 column set (see `servers-list.ts` module comment). */
+const CACHED_LIST_SELECT_KEYS = [
+  'createdAt',
+  'id',
+  'licenseId',
+  'machineClass',
+  'name',
+  'options',
+  'organizationId',
+]
+
 function createStubDb(opts: {
   listRows?: ServersListRow[]
   presenceRows?: Array<{
@@ -66,6 +75,8 @@ function createStubDb(opts: {
     connected: boolean
     statusChangedAt: string | null
   }>
+  selectKinds?: string[]
+  cachedSelectKeys?: string[][]
 }): Db {
   const listRows = opts.listRows ?? []
   const presenceRows = opts.presenceRows ?? []
@@ -73,6 +84,12 @@ function createStubDb(opts: {
   return {
     select: (fields: Record<string, unknown>) => {
       const isPresence = 'daemon' in fields || 'connected' in fields
+      opts.selectKinds?.push(isPresence ? 'presence' : 'cached-row')
+      if (!isPresence) {
+        opts.cachedSelectKeys?.push(
+          Object.keys(fields).sort((a, b) => a.localeCompare(b)),
+        )
+      }
       const rows = isPresence ? presenceRows : listRows
       return {
         from: () => ({
@@ -84,6 +101,19 @@ function createStubDb(opts: {
       }
     },
   } as unknown as Db
+}
+
+function cellMustStayAsleep(): DaemonCellRegistry {
+  return {
+    getCell: () => {
+      throw new Error('cached read models must not wake the daemon cell')
+    },
+    listOnlineServerIds: () =>
+      Promise.reject(new Error('cached read models must not list online cells')),
+    getSnapshots: () =>
+      Promise.reject(new Error('cached read models must not read cell snapshots')),
+    purge: () => Promise.reject(new Error('cached read models must not purge cells')),
+  }
 }
 
 test('cachedServersListReadModel rejects when database is missing', async () => {
@@ -401,4 +431,70 @@ test('cachedServersListReadModel never caches a managedMonitor secret in redis',
   const second = await cachedServersListReadModel(ctx, opts)
   assertEquals(second.rows[0]?.options, { timezone: 'UTC' })
   assertEquals(JSON.stringify(second).includes('passwordSealed'), false)
+})
+
+test('cachedServersListReadModel cached SELECT includes machineClass', async () => {
+  const listRows: ServersListRow[] = [{
+    id: 'srv-a',
+    name: 'A',
+    organizationId: 'org-1',
+    licenseId: null,
+    options: null,
+    createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: 'physical',
+  }]
+  const cachedSelectKeys: string[][] = []
+  const db = createStubDb({ listRows, presenceRows: [], cachedSelectKeys })
+  const cache = createPassthroughQueryCache(db)
+
+  const payload = await cachedServersListReadModel(
+    fakeContext({ db, queryCache: cache }),
+    { userId: 'user-1', organizationId: 'org-1', visibleIds: ['srv-a'] },
+  )
+
+  const keys = cachedSelectKeys[0]
+  if (!keys) throw new TypeError()
+  assertEquals(keys, CACHED_LIST_SELECT_KEYS)
+  assertEquals(payload.rows[0]?.machineClass, 'physical')
+})
+
+test('cachedServersListReadModel runs cached SELECT on Hyperdrive db only', async () => {
+  const listRows: ServersListRow[] = [{
+    id: 'srv-a',
+    name: 'A',
+    organizationId: 'org-1',
+    licenseId: null,
+    options: null,
+    createdAt: '2024-01-01T00:00:00.000Z',
+    machineClass: 'virtual',
+  }]
+  const cachedKinds: string[] = []
+  const primaryKinds: string[] = []
+  const cachedDb = createStubDb({ listRows, selectKinds: cachedKinds })
+  const primaryDb = createStubDb({
+    presenceRows: [{
+      id: 'srv-a',
+      daemon: null,
+      metadata: null,
+      hostname: 'a',
+      machineKey: null,
+      connected: false,
+      statusChangedAt: null,
+    }],
+    selectKinds: primaryKinds,
+  })
+  const cache = createHyperdriveQueryCache(cachedDb)
+
+  const payload = await cachedServersListReadModel(
+    fakeContext({
+      db: primaryDb,
+      queryCache: cache,
+      daemonCellRegistry: cellMustStayAsleep(),
+    }),
+    { userId: 'user-1', organizationId: 'org-1', visibleIds: ['srv-a'] },
+  )
+
+  assertEquals(payload.rows, listRows)
+  assertEquals(cachedKinds, ['cached-row'])
+  assertEquals(primaryKinds, ['presence'])
 })

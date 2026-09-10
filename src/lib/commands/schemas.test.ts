@@ -306,21 +306,22 @@ test("parseEnvironmentDeployResult rejects omitted or invalid container roles", 
 test("parseSystemReconcilePayload round-trips and rejects invalid shapes", () => {
   const serviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   const environmentId = "11111111-2222-3333-4444-555555555555";
+  const restartPayload = {
+    environmentId,
+    action: "restart" as const,
+    components: [
+      {
+        component: "hosting-ingress",
+        serviceId,
+        composeServiceName: "traefik",
+        containerName: `${serviceId}-in`,
+        role: "ingress",
+        desired: "present",
+      },
+    ],
+  };
   assertEquals(
-    parseSystemReconcilePayload({
-      environmentId,
-      action: "restart",
-      components: [
-        {
-          component: "hosting-ingress",
-          serviceId,
-          composeServiceName: "traefik",
-          containerName: `${serviceId}-in`,
-          role: "ingress",
-          desired: "present",
-        },
-      ],
-    }),
+    parseSystemReconcilePayload(restartPayload),
     {
       environmentId,
       action: "restart",
@@ -335,6 +336,14 @@ test("parseSystemReconcilePayload round-trips and rejects invalid shapes", () =>
         },
       ],
     },
+  );
+  assertEquals(
+    parseCommandPayload("system.reconcile" as CommandType, restartPayload),
+    parseSystemReconcilePayload(restartPayload),
+  );
+  assertEquals(
+    parseCommandResult("system.reconcile" as CommandType, { summary: "ok" }),
+    parseSystemReconcileResult({ summary: "ok" }),
   );
   // Default action when omitted.
   assertEquals(
@@ -4254,6 +4263,525 @@ test("a cron entry that could reach a unit file structurally is refused", () => 
   }
 });
 
+test("isValidNtpServer covers IPv4 octet rules and IPv6 edge shapes", () => {
+  assertEquals(isValidNtpServer("203.0.113.010"), false);
+  assertEquals(isValidNtpServer("2001:db8:0:0:0:0:0:1"), true);
+  assertEquals(isValidNtpServer("2001:db8:0:0:0:0:1"), false);
+  assertEquals(isValidNtpServer("fe80::1%eth0"), false);
+  assertEquals(isValidNtpServer("2001:db8:::1"), false);
+  assertEquals(isValidNtpServer("2001:db8::1::2"), false);
+  assertEquals(isValidNtpServer("2001:gggg::1"), false);
+  assertEquals(isValidNtpServer("::ffff:203.0.113.10"), true);
+  assertEquals(isValidNtpServer("::203.0.113.10:1"), false);
+  assertEquals(
+    parseNtpSetPayload({
+      servers: ["2001:db8::1", "::ffff:203.0.113.10"],
+    }).servers,
+    ["2001:db8::1", "::ffff:203.0.113.10"],
+  );
+  assertThrows(
+    () => parseNtpSetPayload({ servers: ["203.0.113.010"] }),
+    Error,
+    "Invalid NTP server in servers",
+  );
+});
+
+test("parseEnvironmentDeployResult keeps well-formed releases and drops junk rows", () => {
+  assertEquals(
+    parseEnvironmentDeployResult({
+      projectName: "tp-demo",
+      releases: [
+        {
+          composeServiceName: "web",
+          serviceId: "svc-web",
+          releaseId: "rel-1",
+          commitSha: "abc123",
+          imageTag: "web:abc123",
+          railpackFrontendVersion: "0.1.0",
+          railpackPlanVersion: "0.2.0",
+        },
+        { composeServiceName: "incomplete" },
+        "skip-me",
+      ],
+    }),
+    {
+      projectName: "tp-demo",
+      releases: [{
+        composeServiceName: "web",
+        serviceId: "svc-web",
+        releaseId: "rel-1",
+        commitSha: "abc123",
+        imageTag: "web:abc123",
+        railpackFrontendVersion: "0.1.0",
+        railpackPlanVersion: "0.2.0",
+      }],
+    },
+  );
+  assertEquals(
+    parseEnvironmentDeployResult({
+      projectName: "tp-demo",
+      releases: [{ composeServiceName: "web" }],
+    }),
+    { projectName: "tp-demo" },
+  );
+});
+
+test("parseEnvironmentDeployPayload round-trips storage mounts and replicaCounts", () => {
+  const parsed = parseEnvironmentDeployPayload({
+    ...BASE_ENVIRONMENT_DEPLOY,
+    replicaCounts: { web: 2 },
+    storageMaterial: [{
+      storageId: "st1",
+      locationId: "loc1",
+      kind: "directory",
+      name: "data",
+      provider: "path",
+      serverId: "srv1",
+      sourcePath: "/srv/data",
+      principalId: "p1",
+      managed: true,
+      contentEnvelope: "tpdaemon.v1.server.key.payload",
+      externalName: "ext-vol",
+      mounts: [{
+        destinationPath: "/app/data",
+        serviceId: "svc-1",
+        composeServiceName: "web",
+        subpath: "files",
+        readOnly: true,
+      }],
+    }],
+  });
+  assertEquals(parsed.replicaCounts, { web: 2 });
+  assertEquals(parsed.storageMaterial?.[0]?.provider, "path");
+  assertEquals(parsed.storageMaterial?.[0]?.mounts[0], {
+    destinationPath: "/app/data",
+    serviceId: "svc-1",
+    composeServiceName: "web",
+    subpath: "files",
+    readOnly: true,
+  });
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        replicaCounts: { web: 0 },
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        replicaCounts: "web",
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        storageMaterial: [{
+          storageId: "st1",
+          locationId: "loc1",
+          kind: "blob",
+          name: "data",
+          provider: "path",
+          serverId: "srv1",
+        }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        storageMaterial: [{
+          storageId: "st1",
+          locationId: "loc1",
+          kind: "volume",
+          name: "data",
+          provider: "docker",
+          serverId: "srv1",
+          mounts: [{ destinationPath: 12 }],
+        }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+});
+
+test("sourceMaterial build outputDirectory must be a relative subdirectory", () => {
+  const parsed = parseEnvironmentDeployPayload({
+    ...NATIVE_APP_BASE,
+    sourceMaterial: [{
+      ...GITLAB_SOURCE_ENTRY,
+      build: { kind: "native", outputDirectory: "dist/web" },
+    }],
+  });
+  assertEquals(parsed.sourceMaterial?.[0]?.build.outputDirectory, "dist/web");
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{
+          ...GITLAB_SOURCE_ENTRY,
+          build: { kind: "native", outputDirectory: "../etc" },
+        }],
+      }),
+    Error,
+    "Invalid sourceMaterial build outputDirectory",
+  );
+});
+
+test("parseManagedApplyPayload accepts resources, IPv6 bind, databases, and replication", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    resources: { cpus: 1.5, memoryBytes: 1024, memoryReservationBytes: 512 },
+    exposure: { enabled: false, protocol: "tcp", bindAddress: "2001:db8::1" },
+    databases: [{ name: "appdb", action: "create" }],
+    dropUsers: ["olduser"],
+    credentials: [{
+      ...VALID_MANAGED_APPLY.credentials[0],
+      privileges: ["LOGIN"],
+    }],
+    peers: [{
+      memberId: "00000000-0000-4000-8000-0000000000bb",
+      role: "primary",
+      readEligible: true,
+      address: "203.0.113.10",
+      transport: "datacenter",
+      port: 5432,
+      containerName: "peer-db-1",
+    }],
+    replication: {
+      role: "primary",
+      username: "repl",
+      desiredSlots: ["slot_standby"],
+      peerAddresses: ["203.0.113.20", "2001:db8::20"],
+    },
+  });
+  assertEquals(payload.resources, {
+    cpus: 1.5,
+    memoryBytes: 1024,
+    memoryReservationBytes: 512,
+  });
+  assertEquals(payload.exposure.bindAddress, "2001:db8::1");
+  assertEquals(payload.databases, [{ name: "appdb", action: "create" }]);
+  assertEquals(payload.dropUsers, ["olduser"]);
+  assertEquals(payload.credentials[0]?.privileges, ["LOGIN"]);
+  assertEquals(payload.peers[0]?.containerName, "peer-db-1");
+  assertEquals(payload.replication?.desiredSlots, ["slot_standby"]);
+
+  const standby = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    memberRole: "replica",
+    memberOrdinal: 2,
+    containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-2",
+    replication: {
+      role: "standby",
+      username: "repl",
+      slotName: "slot_1",
+      primary: { host: "db-1", port: 5432, hostaddr: "203.0.113.10" },
+    },
+  });
+  assertEquals(standby.replication?.slotName, "slot_1");
+  assertEquals(standby.replication?.primary?.hostaddr, "203.0.113.10");
+});
+
+test("parseManagedApplyPayload rejects invalid resources, bind, databases, and replication", () => {
+  assertThrows(
+    () => parseManagedApplyPayload({ ...VALID_MANAGED_APPLY, resources: "max" }),
+    Error,
+    "Invalid managed.apply resources",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        resources: { cpus: -1 },
+      }),
+    Error,
+    "Invalid managed.apply resources.cpus",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        resources: { memoryBytes: 1.5 },
+      }),
+    Error,
+    "Invalid managed.apply resources.memoryBytes",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        resources: { memoryReservationBytes: 0 },
+      }),
+    Error,
+    "Invalid managed.apply resources.memoryReservationBytes",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        exposure: { enabled: false, protocol: "tcp", bindAddress: "fe80::1%eth0" },
+      }),
+    Error,
+    "Invalid managed.apply exposure.bindAddress",
+  );
+  assertThrows(
+    () => parseManagedApplyPayload({ ...VALID_MANAGED_APPLY, databases: "appdb" }),
+    TypeError,
+    "Invalid managed.apply databases",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        databases: Array.from({ length: 65 }, (_, i) => ({
+          name: `db${i}`,
+          action: "create",
+        })),
+      }),
+    Error,
+    "Invalid managed.apply databases: too many entries",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        databases: [{ name: "appdb", action: "truncate" }],
+      }),
+    Error,
+    "Invalid managed.apply databases entry",
+  );
+  assertThrows(
+    () => parseManagedApplyPayload({ ...VALID_MANAGED_APPLY, dropUsers: "olduser" }),
+    TypeError,
+    "Invalid managed.apply dropUsers",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        dropUsers: Array.from({ length: 33 }, (_, i) => `user${i}`),
+      }),
+    Error,
+    "Invalid managed.apply dropUsers: too many entries",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        dropUsers: ["bad user"],
+      }),
+    Error,
+    "Invalid managed.apply dropUsers entry",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        credentials: [{
+          ...VALID_MANAGED_APPLY.credentials[0],
+          privileges: "LOGIN",
+        }],
+      }),
+    TypeError,
+    "Invalid managed.apply credentials.privileges",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        credentials: [{
+          ...VALID_MANAGED_APPLY.credentials[0],
+          privileges: [1],
+        }],
+      }),
+    Error,
+    "Invalid managed.apply credentials.privileges",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        peers: [{
+          memberId: "00000000-0000-4000-8000-0000000000bb",
+          role: "primary",
+          readEligible: true,
+          address: "203.0.113.10",
+          transport: "datacenter",
+          port: 5432,
+          containerName: "not a docker name",
+        }],
+      }),
+    Error,
+    "Invalid managed.apply peers entry",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        replication: { role: "primary", username: "repl" },
+      }),
+    Error,
+    "Invalid managed.apply replication: primary requires desiredSlots",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        memberRole: "replica",
+        memberOrdinal: 2,
+        containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-2",
+        replication: { role: "standby", username: "repl" },
+      }),
+    Error,
+    "Invalid managed.apply replication: standby requires slotName and primary",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        replication: {
+          role: "primary",
+          username: "repl",
+          desiredSlots: "slot_standby",
+        },
+      }),
+    TypeError,
+    "Invalid managed.apply replication.desiredSlots",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        replication: {
+          role: "primary",
+          username: "repl",
+          desiredSlots: Array.from({ length: 9 }, (_, i) => `slot_${i}`),
+        },
+      }),
+    Error,
+    "Invalid managed.apply replication.desiredSlots",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        replication: {
+          role: "primary",
+          username: "repl",
+          desiredSlots: ["not a slot"],
+        },
+      }),
+    Error,
+    "Invalid managed.apply replication.desiredSlots",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        replication: {
+          role: "primary",
+          username: "repl",
+          desiredSlots: ["slot_standby"],
+          peerAddresses: "203.0.113.20",
+        },
+      }),
+    TypeError,
+    "Invalid managed.apply replication.peerAddresses",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        replication: {
+          role: "primary",
+          username: "repl",
+          desiredSlots: ["slot_standby"],
+          peerAddresses: ["not an address!"],
+        },
+      }),
+    Error,
+    "Invalid managed.apply replication.peerAddresses",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        memberRole: "replica",
+        memberOrdinal: 2,
+        containerName: "01936b3e-aaaa-bbbb-cccc-123456789abc-2",
+        replication: {
+          role: "standby",
+          username: "repl",
+          slotName: "slot_1",
+          primary: { host: "db-1", port: 5432, hostaddr: "not-an-ip" },
+        },
+      }),
+    Error,
+    "Invalid managed.apply replication.primary.hostaddr",
+  );
+});
+
+test("parseManagedApplyResult keeps optional member, users, and deprecated fields", () => {
+  const memberId = "00000000-0000-4000-8000-0000000000aa";
+  assertEquals(
+    parseManagedApplyResult({
+      host: "203.0.113.10",
+      port: 5432,
+      appliedUsers: ["app"],
+      appliedDatabases: ["appdb"],
+      engineVersion: "18.1",
+      summary: "ready",
+      member: {
+        memberId,
+        role: "primary",
+        status: "ready",
+        replication: {
+          state: "streaming",
+          observedAt: "2020-01-01T00:00:00.000Z",
+        },
+      },
+      memberId,
+      status: "ready",
+    }),
+    {
+      host: "203.0.113.10",
+      port: 5432,
+      appliedUsers: ["app"],
+      appliedDatabases: ["appdb"],
+      engineVersion: "18.1",
+      summary: "ready",
+      member: {
+        memberId,
+        role: "primary",
+        status: "ready",
+        replication: {
+          state: "streaming",
+          observedAt: "2020-01-01T00:00:00.000Z",
+        },
+      },
+      memberId,
+      status: "ready",
+    },
+  );
+  assertEquals(
+    parseManagedApplyResult({
+      host: "203.0.113.10",
+      port: 5432,
+      member: { memberId: "not-a-uuid", role: "primary", status: "ready" },
+    }),
+    { host: "203.0.113.10", port: 5432 },
+  );
+});
+
 test("two cron jobs under one name are refused", () => {
   // They would render one unit and silently lose a job.
   assertThrows(
@@ -4270,5 +4798,1563 @@ test("two cron jobs under one name are refused", () => {
       ),
     Error,
     "Duplicate sites cron job",
+  );
+});
+
+function enabledFabricBase() {
+  return {
+    enabled: true as const,
+    address: "10.250.0.11/32",
+    prefix: "10.192.0.0/16",
+    peers: [{ publicKey: WG_PUBKEY, allowedIPs: ["10.250.0.12/32"] }],
+  };
+}
+
+test("parseFabricReconcilePayload rejects invalid enabled mesh fields", () => {
+  assertThrows(
+    () => parseFabricReconcilePayload(null),
+    TypeError,
+    "Invalid fabric reconcile payload",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ enabled: "yes" }),
+    TypeError,
+    "Invalid fabric enabled",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ ...enabledFabricBase(), address: "not-cidr" }),
+    TypeError,
+    "Invalid fabric address",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ ...enabledFabricBase(), prefix: "nope" }),
+    TypeError,
+    "Invalid fabric prefix",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ ...enabledFabricBase(), peers: "x" }),
+    TypeError,
+    "Invalid fabric peers",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ ...enabledFabricBase(), peers: [null] }),
+    TypeError,
+    "Invalid fabric peer entry",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        peers: [{ publicKey: "short", allowedIPs: ["10.250.0.12/32"] }],
+      }),
+    TypeError,
+    "Invalid fabric peer publicKey",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        peers: [{ publicKey: WG_PUBKEY, allowedIPs: [] }],
+      }),
+    TypeError,
+    "Invalid fabric peer allowedIPs",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        peers: [{ publicKey: WG_PUBKEY, allowedIPs: ["not-an-ip"] }],
+      }),
+    TypeError,
+    "Invalid fabric peer allowedIPs",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        peers: [{
+          publicKey: WG_PUBKEY,
+          allowedIPs: ["10.250.0.12/32"],
+          endpoint: "not-an-endpoint",
+        }],
+      }),
+    TypeError,
+    "Invalid fabric peer endpoint",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        peers: [{
+          publicKey: WG_PUBKEY,
+          allowedIPs: ["10.250.0.12/32"],
+          presharedKeyEnvelope: "plaintext",
+        }],
+      }),
+    TypeError,
+    "Invalid fabric peer presharedKeyEnvelope",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        peers: [{
+          publicKey: WG_PUBKEY,
+          allowedIPs: ["10.250.0.12/32"],
+          keepalive: 0,
+        }],
+      }),
+    TypeError,
+    "Invalid fabric peer keepalive",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        peers: [{
+          publicKey: WG_PUBKEY,
+          allowedIPs: ["10.250.0.12/32"],
+          pathKind: "vpn",
+        }],
+      }),
+    TypeError,
+    "Invalid fabric peer pathKind",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        peers: [{
+          publicKey: WG_PUBKEY,
+          allowedIPs: ["10.250.0.12/32"],
+          viaServerId: "not-a-uuid",
+        }],
+      }),
+    TypeError,
+    "Invalid fabric peer viaServerId",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        fabricId: "not-a-uuid",
+      }),
+    TypeError,
+    "Invalid fabric fabricId",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ ...enabledFabricBase(), listenPort: 0 }),
+    TypeError,
+    "Invalid fabric listenPort",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ ...enabledFabricBase(), mtu: 100 }),
+    TypeError,
+    "Invalid fabric mtu",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ ...enabledFabricBase(), networks: "x" }),
+    TypeError,
+    "Invalid fabric networks",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ ...enabledFabricBase(), networks: [null] }),
+    TypeError,
+    "Invalid fabric network entry",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        networks: [{ name: "bad name", subnet: "10.192.11.0/24" }],
+      }),
+    TypeError,
+    "Invalid fabric network name",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        networks: [{ name: "tpn_ok", subnet: "not-cidr" }],
+      }),
+    TypeError,
+    "Invalid fabric network subnet",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcilePayload({
+        ...enabledFabricBase(),
+        networks: [{ name: "tpn_ok", subnet: "10.192.11.0/24", gateway: "not-ip" }],
+      }),
+    TypeError,
+    "Invalid fabric network gateway",
+  );
+  assertThrows(
+    () => parseFabricReconcilePayload({ ...enabledFabricBase(), gateway: "yes" }),
+    TypeError,
+    "Invalid fabric gateway",
+  );
+});
+
+test("parseFabricReconcileResult rejects invalid observed peers", () => {
+  assertThrows(
+    () => parseFabricReconcileResult(null),
+    TypeError,
+    "Invalid fabric reconcile result",
+  );
+  assertThrows(
+    () => parseFabricReconcileResult({ summary: "" }),
+    TypeError,
+    "Invalid fabric reconcile result summary",
+  );
+  assertThrows(
+    () => parseFabricReconcileResult({ summary: "ok", skipped: "yes" }),
+    TypeError,
+    "Invalid fabric reconcile result skipped",
+  );
+  assertThrows(
+    () => parseFabricReconcileResult({ summary: "ok", publicKey: "short" }),
+    TypeError,
+    "Invalid fabric reconcile result publicKey",
+  );
+  assertThrows(
+    () => parseFabricReconcileResult({ summary: "ok", peers: "x" }),
+    TypeError,
+    "Invalid fabric reconcile result peers",
+  );
+  assertThrows(
+    () => parseFabricReconcileResult({ summary: "ok", peers: [null] }),
+    TypeError,
+    "Invalid fabric reconcile result peer",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcileResult({
+        summary: "ok",
+        peers: [{ publicKey: "short" }],
+      }),
+    TypeError,
+    "Invalid fabric reconcile result peer publicKey",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcileResult({
+        summary: "ok",
+        peers: [{ publicKey: WG_PUBKEY, lastHandshakeAt: "not-iso" }],
+      }),
+    TypeError,
+    "Invalid fabric reconcile result peer lastHandshakeAt",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcileResult({
+        summary: "ok",
+        peers: [{ publicKey: WG_PUBKEY, transferRx: -1 }],
+      }),
+    TypeError,
+    "Invalid fabric reconcile result peer transferRx",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcileResult({
+        summary: "ok",
+        peers: [{ publicKey: WG_PUBKEY, endpoint: "not-an-endpoint" }],
+      }),
+    TypeError,
+    "Invalid fabric reconcile result peer endpoint",
+  );
+  assertThrows(
+    () =>
+      parseFabricReconcileResult({
+        summary: "ok",
+        peers: [{ publicKey: WG_PUBKEY, health: "unknown" }],
+      }),
+    TypeError,
+    "Invalid fabric reconcile result peer health",
+  );
+});
+
+test("parseEnvironmentDeployPayload hosting fields cover php, ports, and rejects", () => {
+  const hostingIngressNetwork = "00000000-0000-4000-8000-0000000000bb";
+  const parsed = parseEnvironmentDeployPayload({
+    ...BASE_ENVIRONMENT_DEPLOY,
+    hostingIngressNetwork,
+    hostings: [{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "web",
+      hostnames: ["app.example.com"],
+      tlsId: "tls-1",
+      protocol: "udp",
+      proxy: { brotli: true, gzip: false, forceHttps: false },
+      web: {
+        env: { A: "1" },
+        php: {
+          version: "8.4",
+          settings: { memory_limit: "128M", drop: 1 },
+          pool: { pm: "dynamic" },
+          extensions: ["intl", 2, "opcache"],
+        },
+      },
+    }],
+    tlsMaterial: [{
+      tlsId: "tls-1",
+      certificatePem: "CERT",
+      privateKeyEnvelope: "enc:key",
+    }],
+    variableMaterial: [{ key: "FOO", valueEnvelope: "enc:val" }],
+    serviceHooks: [{
+      composeServiceName: "web",
+      postDeployCommand: "/bin/true",
+    }],
+  });
+  assertEquals(parsed.hostings[0]?.tlsId, "tls-1");
+  assertEquals(parsed.hostings[0]?.protocol, "udp");
+  assertEquals(parsed.hostings[0]?.proxy?.brotli, true);
+  assertEquals(parsed.hostings[0]?.web?.php?.extensions, ["intl", "opcache"]);
+  assertEquals(parsed.hostings[0]?.web?.php?.settings, { memory_limit: "128M" });
+  assertEquals(parsed.variableMaterial?.[0]?.forRuntime, true);
+  assertEquals(parsed.serviceHooks?.[0]?.postDeployCommand, "/bin/true");
+
+  assertThrows(
+    () => parseEnvironmentDeployPayload({ ...BASE_ENVIRONMENT_DEPLOY, hostings: "x" }),
+    TypeError,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        hostingIngressNetwork,
+        hostings: [null],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        hostingIngressNetwork,
+        hostings: [{ serviceId: "s1", composeServiceName: "web", hostnames: [] }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        hostingIngressNetwork,
+        hostings: [{
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "web",
+          hostnames: [1],
+        }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        hostingIngressNetwork,
+        hostings: [{
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "web",
+          hostnames: ["app.example.com"],
+          protocol: "sctp",
+        }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        hostingIngressNetwork,
+        hostings: [{
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "web",
+          hostnames: ["app.example.com"],
+          ports: [],
+        }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        hostingIngressNetwork,
+        hostings: [{
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "web",
+          hostnames: ["app.example.com"],
+          bindAddress: "",
+        }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        tlsMaterial: [{ tlsId: "tls-1", certificatePem: "CERT" }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        variableMaterial: [{ key: "FOO" }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        serviceHooks: [null],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...BASE_ENVIRONMENT_DEPLOY,
+        serviceHooks: [{ preDeployCommand: "/bin/true" }],
+      }),
+    Error,
+    "Invalid environment.deploy payload",
+  );
+});
+
+test("parseEnvironmentDeployPayload sites accept engines, php, and principal ids", () => {
+  const parsed = parseEnvironmentDeployPayload(
+    deployPayloadWithSite({
+      engine: "nginx",
+      principal: { ...SITE_PRINCIPAL, uid: 1000, gid: 1000 },
+      webEnv: { APP_ENV: "prod", drop: 1 },
+      php: { version: "8.3", extensions: ["gd"] },
+    }),
+  );
+  const sites = parsed.sites;
+  if (!sites) throw new TypeError("expected sites");
+  assertEquals(sites[0]?.engine, "nginx");
+  assertEquals(sites[0]?.principal?.uid, 1000);
+  assertEquals(sites[0]?.webEnv, { APP_ENV: "prod" });
+  assertEquals(sites[0]?.php?.extensions, ["gd"]);
+
+  for (const engine of ["apache", "openlitespeed"]) {
+    const next = parseEnvironmentDeployPayload(
+      deployPayloadWithSite({ engine }),
+    );
+    if (!next.sites) throw new TypeError("expected sites");
+    assertEquals(next.sites[0]?.engine, engine);
+  }
+  assertThrows(
+    () => parseEnvironmentDeployPayload(deployPayloadWithSite({ engine: "iis" })),
+    Error,
+    "Invalid sites entry",
+  );
+  assertThrows(
+    () => parseEnvironmentDeployPayload(deployPayloadWithSite({ listenPort: 80 })),
+    Error,
+    "Invalid sites entry",
+  );
+  assertThrows(
+    () => parseEnvironmentDeployPayload(deployPayloadWithSite({ principal: "x" })),
+    Error,
+    "Invalid sites.principal entry",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload(
+        deployPayloadWithSite({
+          principal: { principalId: "", username: "appuser" },
+        }),
+      ),
+    Error,
+    "Invalid sites.principal entry",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload(
+        deployPayloadWithSite({
+          principal: { ...SITE_PRINCIPAL, uid: -1 },
+        }),
+      ),
+    Error,
+    "Invalid sites.principal entry",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload(
+        deployPayloadWithSite({
+          principal: SITE_PRINCIPAL,
+          cron: "nightly",
+        }),
+      ),
+    Error,
+    "Invalid sites cron",
+  );
+  const tooMany = Array.from({ length: 21 }, (_, index) => ({
+    name: `job${index}`,
+    schedule: "*-*-* 0:0:00",
+    command: ["/bin/true"],
+  }));
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload(
+        deployPayloadWithSite({ principal: SITE_PRINCIPAL, cron: tooMany }),
+      ),
+    Error,
+    "Invalid sites cron",
+  );
+});
+
+test("parseManagedIngressReconcilePayload covers monitor, ports, bind, and cluster flags", () => {
+  const serviceId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const payload = parseManagedIngressReconcilePayload({
+    ...VALID_MANAGED_INGRESS_RECONCILE,
+    bindAddresses: ["203.0.113.10", "203.0.113.10", "::0"],
+    listenerPorts: { postgres: 15432, mysqlFamily: 13306 },
+    monitor: {
+      username: "tp_monitor",
+      password: "tpdaemon.v1.server.key.payload",
+    },
+    identity: {
+      serviceId,
+      composeServiceName: "proxysql",
+      containerName: `${serviceId}-in`,
+    },
+    clusters: [{
+      ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+      autoReadSplit: true,
+      requireTls: true,
+      backends: [
+        VALID_MANAGED_INGRESS_RECONCILE.clusters[0]!.backends[0],
+        {
+          memberId: "00000000-0000-4000-8000-0000000000bb",
+          role: "replica",
+          readEligible: false,
+          address: "203.0.113.21",
+          port: 5432,
+          transport: "local",
+        },
+      ],
+      users: [{
+        ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0]!.users[0],
+        connectionRole: "read-only",
+      }],
+    }],
+  });
+  assertEquals(payload.bindAddresses, ["203.0.113.10", "::0"]);
+  assertEquals(payload.listenerPorts, { postgres: 15432, mysqlFamily: 13306 });
+  assertEquals(payload.monitor?.username, "tp_monitor");
+  assertEquals(payload.clusters[0]?.autoReadSplit, true);
+  assertEquals(payload.clusters[0]?.requireTls, true);
+  assertEquals(payload.clusters[0]?.users[0]?.connectionRole, "read-only");
+
+  assertThrows(
+    () => parseManagedIngressReconcilePayload(null),
+    TypeError,
+    "Invalid managed.ingress.reconcile payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [null],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile cluster",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [{
+          ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+          backends: [null],
+        }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile backend",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [{
+          ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+          users: [null],
+        }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile user",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [{
+          ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+          users: [{
+            ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0]!.users[0],
+            defaultDatabase: "bad-name!",
+          }],
+        }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile user defaultDatabase",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [{
+          ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+          users: [{
+            ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0]!.users[0],
+            connectionRole: "writer",
+          }],
+        }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile user connectionRole",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [{
+          ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+          autoReadSplit: "yes",
+        }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile cluster autoReadSplit",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        clusters: [{
+          ...VALID_MANAGED_INGRESS_RECONCILE.clusters[0],
+          requireTls: "yes",
+        }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile cluster requireTls",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        listenerPorts: { postgres: 15432, mysqlFamily: 15432 },
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile listenerPorts",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        listenerPorts: "x",
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile listenerPorts",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        bindAddresses: "203.0.113.10",
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile bindAddresses",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        bindAddresses: ["not-an-ip"],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile bindAddress",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        monitor: { username: "bad user", password: "tpdaemon.v1.server.key.payload" },
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile monitor credential",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        segments: "x",
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile segments",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        segments: [null],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile segment",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        segments: [{ name: "tpn_ok", subnet: "not-cidr" }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile segment subnet",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        identity: "x",
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile identity",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_MANAGED_INGRESS_RECONCILE,
+        identity: {
+          serviceId,
+          composeServiceName: "not-proxysql",
+          containerName: `${serviceId}-in`,
+        },
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile identity",
+  );
+});
+
+test("parseManagedIngressReconcileResult rejects invalid users, backends, and containers", () => {
+  assertThrows(
+    () => parseManagedIngressReconcileResult(null),
+    TypeError,
+    "Invalid managed.ingress.reconcile result",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcileResult({
+        summary: "ok",
+        appliedUsers: ["bad user"],
+        appliedBackends: [],
+        restarted: false,
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile result",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcileResult({
+        summary: "ok",
+        appliedUsers: [],
+        appliedBackends: ["not-a-uuid"],
+        restarted: false,
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile result",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcileResult({
+        summary: "ok",
+        appliedUsers: [],
+        appliedBackends: [],
+        restarted: false,
+        containers: "x",
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile result containers",
+  );
+  assertThrows(
+    () =>
+      parseManagedIngressReconcileResult({
+        summary: "ok",
+        appliedUsers: [],
+        appliedBackends: [],
+        restarted: false,
+        containers: [{ composeServiceName: "proxysql" }],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile result containers",
+  );
+  assertEquals(
+    parseManagedIngressReconcileResult({
+      summary: "ok",
+      appliedUsers: [],
+      appliedBackends: [],
+      restarted: true,
+      containers: [{
+        composeServiceName: "proxysql",
+        containerId: "cid",
+        containerName: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee-in",
+        status: "running",
+        role: "ingress",
+      }],
+    }).containers?.[0]?.role,
+    "ingress",
+  );
+});
+
+test("parseManagedApplyPayload covers volumes, config files, privileges, and monitor users", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    forceResync: true,
+    ingressSourceAddresses: ["203.0.113.50", 1],
+    monitorUsers: [{
+      username: "tp_monitor",
+      password: "tpdaemon.v1.server.key.payload",
+    }],
+    credentials: [{
+      ...VALID_MANAGED_APPLY.credentials[0],
+      privileges: ["CONNECT", "CREATE"],
+    }],
+  });
+  assertEquals(payload.forceResync, true);
+  assertEquals(payload.ingressSourceAddresses, undefined);
+  assertEquals(payload.monitorUsers?.[0]?.username, "tp_monitor");
+  assertEquals(payload.credentials[0]?.privileges, ["CONNECT", "CREATE"]);
+
+  const withSources = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    ingressSourceAddresses: ["203.0.113.50"],
+  });
+  assertEquals(withSources.ingressSourceAddresses, ["203.0.113.50"]);
+
+  assertThrows(
+    () => parseManagedApplyPayload({ ...VALID_MANAGED_APPLY, volumes: "x" }),
+    TypeError,
+    "Invalid managed.apply volumes",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        volumes: Array.from({ length: 17 }, (_, index) => ({
+          name: `vol${index}`,
+          target: "/data",
+        })),
+      }),
+    Error,
+    "Invalid managed.apply volumes: too many entries",
+  );
+  assertThrows(
+    () => parseManagedApplyPayload({ ...VALID_MANAGED_APPLY, volumes: [null] }),
+    Error,
+    "Invalid managed.apply volumes entry",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        volumes: [{ name: "pgdata", target: "relative" }],
+      }),
+    Error,
+    "Invalid managed.apply volumes entry",
+  );
+  assertThrows(
+    () => parseManagedApplyPayload({ ...VALID_MANAGED_APPLY, configFiles: "x" }),
+    TypeError,
+    "Invalid managed.apply configFiles",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        configFiles: Array.from({ length: 33 }, () => ({
+          path: "postgresql.conf",
+          contents: "x",
+          mode: "0640",
+        })),
+      }),
+    Error,
+    "Invalid managed.apply configFiles: too many entries",
+  );
+  assertThrows(
+    () => parseManagedApplyPayload({ ...VALID_MANAGED_APPLY, configFiles: [null] }),
+    Error,
+    "Invalid managed.apply configFiles entry",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        credentials: [{
+          ...VALID_MANAGED_APPLY.credentials[0],
+          privileges: "CONNECT",
+        }],
+      }),
+    TypeError,
+    "Invalid managed.apply credentials.privileges",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        credentials: [{
+          ...VALID_MANAGED_APPLY.credentials[0],
+          privileges: [1],
+        }],
+      }),
+    Error,
+    "Invalid managed.apply credentials.privileges",
+  );
+  assertThrows(
+    () =>
+      parseManagedApplyPayload({
+        ...VALID_MANAGED_APPLY,
+        credentials: Array.from({ length: 33 }, (_, index) => ({
+          ...VALID_MANAGED_APPLY.credentials[0],
+          username: `user${index}`,
+          principalId: `00000000-0000-4000-8000-0000000000${String(index).padStart(2, "0")}`,
+        })),
+      }),
+    Error,
+    "Invalid managed.apply credentials: too many entries",
+  );
+  assertThrows(
+    () => parseManagedApplyPayload({ ...VALID_MANAGED_APPLY, monitorUsers: "x" }),
+    TypeError,
+    "Invalid managed.apply monitorUsers",
+  );
+});
+
+const NATIVE_APP_ENTRY = {
+  composeServiceName: "web",
+  serviceId: "svc-web",
+  listenPort: 18100,
+  framework: "node" as const,
+};
+
+test("parseEnvironmentDeployPayload covers nativeApp resources, limits, and mode edges", () => {
+  const parsed = parseEnvironmentDeployPayload({
+    ...NATIVE_APP_BASE,
+    nativeAppServices: [{
+      ...NATIVE_APP_ENTRY,
+      appMode: "production",
+      resources: { cpus: 2 },
+      accountLimits: { tasksMax: 64 },
+      nodeVersion: "24",
+    }],
+  });
+  assertEquals(parsed.nativeAppServices, [{
+    composeServiceName: "web",
+    serviceId: "svc-web",
+    listenPort: 18100,
+    framework: "node",
+    appMode: "production",
+    nodeVersion: "24",
+    resources: { cpus: 2 },
+    accountLimits: { tasksMax: 64 },
+  }]);
+
+  const emptyLimits = parseEnvironmentDeployPayload({
+    ...NATIVE_APP_BASE,
+    nativeAppServices: [{
+      ...NATIVE_APP_ENTRY,
+      resources: {},
+      accountLimits: {},
+    }],
+  });
+  assertEquals(emptyLimits.nativeAppServices?.[0]?.resources, undefined);
+  assertEquals(emptyLimits.nativeAppServices?.[0]?.accountLimits, undefined);
+
+  const memoryOnly = parseEnvironmentDeployPayload({
+    ...NATIVE_APP_BASE,
+    nativeAppServices: [{
+      ...NATIVE_APP_ENTRY,
+      resources: { memoryBytes: 268435456 },
+      accountLimits: { cpus: 1, memoryBytes: 536870912 },
+    }],
+  });
+  assertEquals(memoryOnly.nativeAppServices?.[0]?.resources, {
+    memoryBytes: 268435456,
+  });
+  assertEquals(memoryOnly.nativeAppServices?.[0]?.accountLimits, {
+    cpus: 1,
+    memoryBytes: 536870912,
+  });
+
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        nativeAppServices: "web",
+      }),
+    TypeError,
+    "nativeAppServices must be an array",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        nativeAppServices: [null],
+      }),
+    Error,
+    "Invalid nativeAppServices entry",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        nativeAppServices: [{ ...NATIVE_APP_ENTRY, composeServiceName: "" }],
+      }),
+    Error,
+    "Invalid nativeAppServices entry",
+  );
+  for (const listenPort of [80, 65_536, 3000.5]) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...NATIVE_APP_BASE,
+          nativeAppServices: [{ ...NATIVE_APP_ENTRY, listenPort }],
+        }),
+      Error,
+      "Invalid nativeAppServices entry",
+    );
+  }
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        nativeAppServices: [{ ...NATIVE_APP_ENTRY, resources: "x" }],
+      }),
+    Error,
+    "Invalid nativeAppServices resources",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        nativeAppServices: [{ ...NATIVE_APP_ENTRY, accountLimits: "x" }],
+      }),
+    Error,
+    "Invalid nativeAppServices accountLimits",
+  );
+  for (
+    const [field, value] of [
+      ["resources.cpus", { resources: { cpus: 0 } }],
+      ["resources.memoryBytes", { resources: { memoryBytes: -1 } }],
+      ["accountLimits.cpus", { accountLimits: { cpus: Number.NaN } }],
+      ["accountLimits.memoryBytes", {
+        accountLimits: { memoryBytes: Number.POSITIVE_INFINITY },
+      }],
+      ["accountLimits.tasksMax", { accountLimits: { tasksMax: 0 } }],
+    ] as const
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...NATIVE_APP_BASE,
+          nativeAppServices: [{ ...NATIVE_APP_ENTRY, ...value }],
+        }),
+      Error,
+      `Invalid nativeAppServices ${field}`,
+    );
+  }
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        nativeAppServices: [{ ...NATIVE_APP_ENTRY, nodeVersion: "v24.17.0" }],
+      }),
+    Error,
+    "Invalid nativeAppServices nodeVersion",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        nativeAppServices: [{ ...NATIVE_APP_ENTRY, appMode: 1 }],
+      }),
+    Error,
+    "Invalid nativeAppServices appMode",
+  );
+});
+
+test("parseEnvironmentDeployPayload covers sourceMaterial cloneUrl, railpack, and command edges", () => {
+  const railpack = parseEnvironmentDeployPayload({
+    ...NATIVE_APP_BASE,
+    sourceMaterial: [{
+      ...GITLAB_SOURCE_ENTRY,
+      provider: "git",
+      cloneUrl: "git@gitlab.test:acme/app.git",
+      build: {
+        kind: "railpack",
+        installCommand: "pnpm install",
+        env: { NODE_ENV: "production", skip: 1 },
+      },
+    }],
+  });
+  assertEquals(railpack.sourceMaterial?.[0]?.cloneUrl, "git@gitlab.test:acme/app.git");
+  assertEquals(railpack.sourceMaterial?.[0]?.build, {
+    kind: "railpack",
+    installCommand: "pnpm install",
+    env: { NODE_ENV: "production" },
+  });
+
+  const staticBuild = parseEnvironmentDeployPayload({
+    ...NATIVE_APP_BASE,
+    sourceMaterial: [{
+      ...GITLAB_SOURCE_ENTRY,
+      cloneUrl: "ssh://git.example.test/acme/app.git",
+      subdirectory: "apps/web",
+      rollbackToReleaseId: "rel-prev",
+      build: { kind: "static", buildCommand: "x".repeat(1000) },
+    }],
+  });
+  assertEquals(staticBuild.sourceMaterial?.[0]?.cloneUrl, "ssh://git.example.test/acme/app.git");
+  assertEquals(staticBuild.sourceMaterial?.[0]?.subdirectory, "apps/web");
+  assertEquals(staticBuild.sourceMaterial?.[0]?.rollbackToReleaseId, "rel-prev");
+  assertEquals(staticBuild.sourceMaterial?.[0]?.build.kind, "static");
+
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: "web",
+      }),
+    TypeError,
+    "sourceMaterial must be an array",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [null],
+      }),
+    Error,
+    "Invalid sourceMaterial entry",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{ ...GITLAB_SOURCE_ENTRY, sourceId: "" }],
+      }),
+    Error,
+    "Invalid sourceMaterial entry",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{ ...GITLAB_SOURCE_ENTRY, provider: "bitbucket" }],
+      }),
+    Error,
+    "Invalid sourceMaterial entry",
+  );
+  for (
+    const cloneUrl of [
+      "",
+      "https://user:pass@gitlab.test/acme/app.git",
+      "https://oauth2@gitlab.test/acme/app.git",
+      "ssh://git@gitlab.test/acme/app.git",
+      "https://gitlab.test/acme/app.git with space",
+      `https://gitlab.test/${"a".repeat(2048)}.git`,
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...NATIVE_APP_BASE,
+          sourceMaterial: [{ ...GITLAB_SOURCE_ENTRY, cloneUrl }],
+        }),
+      Error,
+      "Invalid sourceMaterial cloneUrl",
+    );
+  }
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{ ...GITLAB_SOURCE_ENTRY, ref: "../main" }],
+      }),
+    Error,
+    "Invalid sourceMaterial ref/commitSha",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{ ...GITLAB_SOURCE_ENTRY, releaseId: "../rel" }],
+      }),
+    Error,
+    "Invalid sourceMaterial releaseId",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{ ...GITLAB_SOURCE_ENTRY, build: "x" }],
+      }),
+    Error,
+    "Invalid sourceMaterial build",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{
+          ...GITLAB_SOURCE_ENTRY,
+          build: { kind: "docker" },
+        }],
+      }),
+    Error,
+    "Invalid sourceMaterial build kind",
+  );
+  for (const bad of ["", 12, "echo\0hi", "x".repeat(1001)]) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...NATIVE_APP_BASE,
+          sourceMaterial: [{
+            ...GITLAB_SOURCE_ENTRY,
+            build: { kind: "native", startCommand: bad },
+          }],
+        }),
+      Error,
+      "Invalid sourceMaterial build startCommand",
+    );
+  }
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{
+          ...GITLAB_SOURCE_ENTRY,
+          build: { kind: "native", installCommand: "" },
+        }],
+      }),
+    Error,
+    "Invalid sourceMaterial build installCommand",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{
+          ...GITLAB_SOURCE_ENTRY,
+          build: { kind: "native", buildCommand: "x".repeat(1001) },
+        }],
+      }),
+    Error,
+    "Invalid sourceMaterial build buildCommand",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{ ...GITLAB_SOURCE_ENTRY, subdirectory: "../x" }],
+      }),
+    Error,
+    "Invalid sourceMaterial subdirectory",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{ ...GITLAB_SOURCE_ENTRY, credential: "" }],
+      }),
+    Error,
+    "Invalid sourceMaterial credential",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{ ...GITLAB_SOURCE_ENTRY, credentialKind: "password" }],
+      }),
+    Error,
+    "Invalid sourceMaterial credentialKind",
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...NATIVE_APP_BASE,
+        sourceMaterial: [{
+          ...GITLAB_SOURCE_ENTRY,
+          rollbackToReleaseId: "../rel",
+        }],
+      }),
+    Error,
+    "Invalid sourceMaterial rollbackToReleaseId",
+  );
+});
+
+const MANAGED_MEMBER_ID = "00000000-0000-4000-8000-0000000000aa";
+const MANAGED_ENV_ID = "00000000-0000-4000-8000-0000000000bb";
+const MANAGED_DEMOTE_ID = "00000000-0000-4000-8000-0000000000cc";
+
+test("parseManagedMemberObservedResult is kept on apply and lifecycle results", () => {
+  const member = {
+    memberId: MANAGED_MEMBER_ID,
+    role: "replica",
+    status: "ready",
+    replication: {
+      state: "stopped",
+      observedAt: "2020-01-01T00:00:00.000Z",
+      lagBytes: 0,
+      lagSeconds: 0,
+    },
+  };
+  assertEquals(
+    parseManagedApplyResult({
+      host: "203.0.113.10",
+      port: 5432,
+      member,
+    }).member,
+    member,
+  );
+  assertEquals(
+    parseManagedLifecycleResult({
+      status: "ready",
+      member,
+    }).member,
+    member,
+  );
+  assertEquals(parseManagedApplyResult(null), { host: "", port: 0 });
+  assertEquals(parseManagedLifecycleResult(null), { status: "" });
+  assertEquals(
+    parseManagedApplyResult({
+      host: "203.0.113.10",
+      port: 5432,
+      member: "x",
+    }).member,
+    undefined,
+  );
+  assertEquals(
+    parseManagedApplyResult({
+      host: "203.0.113.10",
+      port: 5432,
+      member: { memberId: MANAGED_MEMBER_ID, role: "", status: "ready" },
+    }).member,
+    undefined,
+  );
+  assertEquals(
+    parseManagedApplyResult({
+      host: "203.0.113.10",
+      port: 5432,
+      member: { memberId: MANAGED_MEMBER_ID, role: "primary", status: "" },
+    }).member,
+    undefined,
+  );
+});
+
+test("parseManagedLifecyclePayload rejects leftover field throws", () => {
+  assertThrows(
+    () => parseManagedLifecyclePayload(null),
+    Error,
+    "Invalid managed.lifecycle payload",
+  );
+  assertThrows(
+    () => parseManagedLifecyclePayload({ managedId: "", action: "start" }),
+    Error,
+    "Invalid managed.lifecycle payload",
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "restart",
+      memberId: MANAGED_MEMBER_ID,
+      engine: "postgres",
+    }),
+    {
+      managedId: "m1",
+      action: "restart",
+      memberId: MANAGED_MEMBER_ID,
+      engine: "postgres",
+    },
+  );
+  assertThrows(
+    () =>
+      parseManagedLifecyclePayload({
+        managedId: "m1",
+        action: "stop",
+        memberId: "not-a-uuid",
+      }),
+    Error,
+    "Invalid managed.lifecycle payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedLifecyclePayload({
+        managedId: "m1",
+        action: "stop",
+        engine: "sqlite",
+      }),
+    Error,
+    "Invalid managed.lifecycle payload",
+  );
+});
+
+test("parseManagedDestroyPayload rejects leftover field throws", () => {
+  assertThrows(
+    () => parseManagedDestroyPayload(null),
+    Error,
+    "Invalid managed.destroy payload",
+  );
+  assertEquals(
+    parseManagedDestroyPayload({
+      managedId: "m1",
+      removeVolumes: true,
+      deleteMemberAfterDestroy: true,
+      memberId: MANAGED_MEMBER_ID,
+      environmentId: MANAGED_ENV_ID,
+    }),
+    {
+      managedId: "m1",
+      removeVolumes: true,
+      deleteMemberAfterDestroy: true,
+      memberId: MANAGED_MEMBER_ID,
+      environmentId: MANAGED_ENV_ID,
+    },
+  );
+  assertThrows(
+    () =>
+      parseManagedDestroyPayload({
+        managedId: "m1",
+        removeVolumes: true,
+        deleteMemberAfterDestroy: "yes",
+      }),
+    Error,
+    "Invalid managed.destroy payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedDestroyPayload({
+        managedId: "m1",
+        removeVolumes: true,
+        memberId: "not-a-uuid",
+      }),
+    Error,
+    "Invalid managed.destroy payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedDestroyPayload({
+        managedId: "m1",
+        removeVolumes: true,
+        environmentId: "not-a-uuid",
+      }),
+    Error,
+    "Invalid managed.destroy payload",
+  );
+});
+
+test("parseManagedPromotePayload and result reject leftover throws", () => {
+  assertThrows(
+    () => parseManagedPromotePayload(null),
+    Error,
+    "Invalid managed.promote payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedPromotePayload({
+        managedId: "not-a-uuid",
+        memberId: MANAGED_MEMBER_ID,
+      }),
+    Error,
+    "Invalid managed.promote payload",
+  );
+  assertEquals(
+    parseManagedPromotePayload({
+      managedId: MANAGED_MEMBER_ID,
+      memberId: MANAGED_ENV_ID,
+      engine: "mariadb",
+    }),
+    {
+      managedId: MANAGED_MEMBER_ID,
+      memberId: MANAGED_ENV_ID,
+      engine: "mariadb",
+    },
+  );
+  assertThrows(
+    () =>
+      parseManagedPromotePayload({
+        managedId: MANAGED_MEMBER_ID,
+        memberId: MANAGED_ENV_ID,
+        demoteMemberId: "not-a-uuid",
+      }),
+    Error,
+    "Invalid managed.promote payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedPromotePayload({
+        managedId: MANAGED_MEMBER_ID,
+        memberId: MANAGED_ENV_ID,
+        engine: "sqlite",
+      }),
+    Error,
+    "Invalid managed.promote payload",
+  );
+  assertEquals(
+    parseManagedPromoteResult(null),
+    { status: "", role: "", promotedMemberId: "", demoted: false },
+  );
+  assertEquals(
+    parseManagedPromoteResult({
+      status: "ready",
+      role: "primary",
+      promotedMemberId: "not-a-uuid",
+      demoted: false,
+      demotedMemberId: "also-bad",
+      replication: {
+        state: "unknown",
+        observedAt: "2020-01-01T00:00:00.000Z",
+      },
+    }),
+    {
+      status: "ready",
+      role: "primary",
+      promotedMemberId: "",
+      demoted: false,
+      replication: {
+        state: "unknown",
+        observedAt: "2020-01-01T00:00:00.000Z",
+      },
+    },
+  );
+  assertEquals(
+    parseManagedPromoteResult({
+      status: "ready",
+      role: "primary",
+      promotedMemberId: MANAGED_MEMBER_ID,
+      demoted: true,
+      demotedMemberId: MANAGED_DEMOTE_ID,
+    }).demotedMemberId,
+    MANAGED_DEMOTE_ID,
   );
 });

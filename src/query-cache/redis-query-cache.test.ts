@@ -278,6 +278,89 @@ test('host-free stub: clamps ttlSeconds before set', async () => {
   assertEquals(seenPx, 60_000)
 })
 
+test('host-free stub: omitted ttlSeconds uses the default window', async () => {
+  const db = null as unknown as Db
+  let seenPx: number | undefined
+  const client = {
+    get: () => Promise.resolve(null),
+    set: (_key: string, _value: string, pxMs?: number) => {
+      seenPx = pxMs
+      return Promise.resolve()
+    },
+  } as unknown as RedisCellClient
+
+  const cache = createRedisQueryCache({ client, db })
+  await cache.getReadModel({
+    readModel: 'server-detail',
+    key: queryCacheKey('stub', 'default-ttl'),
+    load: async () => ({ id: 'srv-1' }),
+  })
+  assertEquals(seenPx, 60_000)
+})
+
+test('host-free stub: ttlSeconds 1 is one second in milliseconds', async () => {
+  const db = null as unknown as Db
+  let seenPx: number | undefined
+  const client = {
+    get: () => Promise.resolve(null),
+    set: (_key: string, _value: string, pxMs?: number) => {
+      seenPx = pxMs
+      return Promise.resolve()
+    },
+  } as unknown as RedisCellClient
+
+  const cache = createRedisQueryCache({ client, db })
+  await cache.getReadModel({
+    readModel: 'servers-list',
+    key: queryCacheKey('stub', 'min-ttl'),
+    ttlSeconds: 1,
+    load: async () => [],
+  })
+  assertEquals(seenPx, 1_000)
+})
+
+test('host-free stub: empty cached string falls back to loader', async () => {
+  const db = null as unknown as Db
+  let loadCount = 0
+  const client = {
+    get: () => Promise.resolve(''),
+    set: () => Promise.resolve(),
+  } as unknown as RedisCellClient
+
+  const cache = createRedisQueryCache({ client, db })
+  const result = await cache.getReadModel({
+    readModel: 'servers-list',
+    key: queryCacheKey('stub', 'empty-string'),
+    load: async () => {
+      loadCount += 1
+      return [{ recovered: true }]
+    },
+  })
+  assertEquals(result, [{ recovered: true }])
+  assertEquals(loadCount, 1)
+})
+
+test('host-free stub: JSON null hit does not call load', async () => {
+  const db = null as unknown as Db
+  let loadCount = 0
+  const client = {
+    get: () => Promise.resolve('null'),
+    set: () => Promise.resolve(),
+  } as unknown as RedisCellClient
+
+  const cache = createRedisQueryCache({ client, db })
+  const result = await cache.getReadModel({
+    readModel: 'server-detail',
+    key: queryCacheKey('stub', 'json-null'),
+    load: async () => {
+      loadCount += 1
+      return { shouldNotLoad: true }
+    },
+  })
+  assertEquals(result, null)
+  assertEquals(loadCount, 0)
+})
+
 test(
   'cached falls back to loader when cached value is invalid JSON',
   withRedisQueryCache(async ({ client, namespace, db }) => {

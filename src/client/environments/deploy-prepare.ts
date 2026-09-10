@@ -1810,6 +1810,7 @@ function nativeAppServicesForDeploy(
     ),
   );
   return apps.map((app) => {
+    const cron = renderCronForDeploy(app.cron);
     const resources = resourcesByComposeName.get(app.composeServiceName);
     const cpus = resources?.cpus;
     const memoryBytes = resources?.memoryBytes;
@@ -1844,6 +1845,11 @@ function nativeAppServicesForDeploy(
         : { serviceLabels: app.serviceLabels }),
       ...(perApp === undefined ? {} : { resources: perApp }),
       ...(accountLimits === undefined ? {} : { accountLimits }),
+      // A node app always runs as the principal that owns its release tree, so
+      // unlike a site there is no unowned case to refuse here — the daemon
+      // resolves the account from the same binding it builds for the app's own
+      // unit. Translation still happens exactly once, in `renderCronForDeploy`.
+      ...(cron.length === 0 ? {} : { cron }),
     };
   });
 }

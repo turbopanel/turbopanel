@@ -11,7 +11,7 @@ const INSTANCE_REPO_ROOT = (() => {
   return join(here, '..', '..')
 })()
 
-function getUiRepoPath(): string {
+export function getUiRepoPath(): string {
   const override = Deno.env.get('TURBOPANEL_UI_REPO')?.trim()
   if (override) return override
   return join(INSTANCE_REPO_ROOT, '..', 'ui')
@@ -36,36 +36,62 @@ export type UpgradeStatus = {
   dirty: DirtyRepo[]
 }
 
-const TRUNK_BRANCH = Deno.env.get('TURBOPANEL_TRUNK_BRANCH')?.trim() || 'trunk'
-const INSTANCE_SERVICE = Deno.env.get('TURBOPANEL_INSTANCE_SERVICE')?.trim()
-const DEV_USER = Deno.env.get('TURBOPANEL_DEV_USER')?.trim() ?? ''
-/** Managed production installs run git as the dedicated tp service user. */
-const PRODUCTION_GIT_USER = Deno.env.get('TURBOPANEL_USER')?.trim() || 'tp'
-
-let upgrading = false
-
-function usesDirectGit(): boolean {
-  return DEV_USER.length > 0
+export type SystemGitResult = {
+  success: boolean
+  stdout: string
+  stderr: string
 }
 
-/** Run git as the dev user directly, or via sudo -u on managed production hosts. */
-async function git(
+export type SystemGitRunner = (
+  bin: string,
+  args: string[],
+) => Promise<SystemGitResult>
+
+export function resolveGitInvocation(
   repoRoot: string,
   args: string[],
-): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  opts: Readonly<{ direct: boolean; productionGitUser: string }>,
+): { bin: string; args: string[] } {
+  const gitArgs = ['-C', repoRoot, ...args]
+  if (opts.direct) {
+    return { bin: 'git', args: gitArgs }
+  }
+  return {
+    bin: 'sudo',
+    args: ['-u', opts.productionGitUser, 'git', ...gitArgs],
+  }
+}
+
+export function describeUnknownError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function trunkBranch(): string {
+  return Deno.env.get('TURBOPANEL_TRUNK_BRANCH')?.trim() || 'trunk'
+}
+
+function instanceServiceName(): string | undefined {
+  return Deno.env.get('TURBOPANEL_INSTANCE_SERVICE')?.trim() || undefined
+}
+
+function usesDirectGit(): boolean {
+  return (Deno.env.get('TURBOPANEL_DEV_USER')?.trim() ?? '').length > 0
+}
+
+function productionGitUser(): string {
+  return Deno.env.get('TURBOPANEL_USER')?.trim() || 'tp'
+}
+
+export async function defaultSystemGitRunner(
+  bin: string,
+  args: string[],
+): Promise<SystemGitResult> {
   try {
-    const gitArgs = ['-C', repoRoot, ...args]
-    const command = usesDirectGit()
-      ? new Deno.Command('git', {
-        args: gitArgs,
-        stdout: 'piped',
-        stderr: 'piped',
-      })
-      : new Deno.Command('sudo', {
-        args: ['-u', PRODUCTION_GIT_USER, 'git', ...gitArgs],
-        stdout: 'piped',
-        stderr: 'piped',
-      })
+    const command = new Deno.Command(bin, {
+      args,
+      stdout: 'piped',
+      stderr: 'piped',
+    })
     const out = await command.output()
     const decoder = new TextDecoder()
     return {
@@ -74,9 +100,49 @@ async function git(
       stderr: decoder.decode(out.stderr).trim(),
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    return { success: false, stdout: '', stderr: message }
+    return { success: false, stdout: '', stderr: describeUnknownError(err) }
   }
+}
+
+function defaultRestartInstance(service: string): void {
+  new Deno.Command('sudo', {
+    args: ['systemctl', 'restart', service],
+    stdin: 'null',
+    stdout: 'null',
+    stderr: 'null',
+  }).spawn()
+}
+
+let systemGitRunner: SystemGitRunner = defaultSystemGitRunner
+let instanceRestarter: (service: string) => void = defaultRestartInstance
+let upgrading = false
+
+export function setSystemRoutesTestHooks(hooks: {
+  gitRunner?: SystemGitRunner | null
+  restarter?: ((service: string) => void) | null
+} = {}): void {
+  if (hooks.gitRunner !== undefined) {
+    systemGitRunner = hooks.gitRunner ?? defaultSystemGitRunner
+  }
+  if (hooks.restarter !== undefined) {
+    instanceRestarter = hooks.restarter ?? defaultRestartInstance
+  }
+}
+
+export function resetSystemRoutesUpgradeLockForTests(): void {
+  upgrading = false
+}
+
+/** Run git as the dev user directly, or via sudo -u on managed production hosts. */
+async function git(
+  repoRoot: string,
+  args: string[],
+): Promise<SystemGitResult> {
+  const invocation = resolveGitInvocation(repoRoot, args, {
+    direct: usesDirectGit(),
+    productionGitUser: productionGitUser(),
+  })
+  return await systemGitRunner(invocation.bin, invocation.args)
 }
 
 const RUNTIME_DIR_PREFIXES = ['.config/', '.local/', '.cache/'] as const
@@ -134,7 +200,7 @@ async function syncRepoToTrunk(
   repoRoot: string,
   label: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const fetched = await git(repoRoot, ['fetch', 'origin', TRUNK_BRANCH])
+  const fetched = await git(repoRoot, ['fetch', 'origin', trunkBranch()])
   if (!fetched.success) {
     return {
       ok: false,
@@ -142,7 +208,7 @@ async function syncRepoToTrunk(
     }
   }
 
-  const reset = await git(repoRoot, ['reset', '--hard', `origin/${TRUNK_BRANCH}`])
+  const reset = await git(repoRoot, ['reset', '--hard', `origin/${trunkBranch()}`])
   if (!reset.success) {
     return {
       ok: false,
@@ -194,7 +260,8 @@ export function registerSystemRoutes<E extends Env>(
       )
     }
 
-    if (!INSTANCE_SERVICE) {
+    const service = instanceServiceName()
+    if (!service) {
       return c.json(
         {
           ok: false,
@@ -222,17 +289,11 @@ export function registerSystemRoutes<E extends Env>(
 
       // Queue restart without awaiting — awaiting systemctl restart kills this
       // process before the HTTP response reaches Caddy (client sees HTTP 502).
-      new Deno.Command('sudo', {
-        args: ['systemctl', 'restart', INSTANCE_SERVICE],
-        stdin: 'null',
-        stdout: 'null',
-        stderr: 'null',
-      }).spawn()
+      instanceRestarter(service)
 
       return c.json({ ok: true, commit })
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      return c.json({ ok: false, error: message }, 500)
+      return c.json({ ok: false, error: describeUnknownError(err) }, 500)
     } finally {
       upgrading = false
     }
