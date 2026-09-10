@@ -468,26 +468,60 @@ test('POST /system/upgrade maps fetch/reset failures and restarts when sync succ
   })
 })
 
+async function initTempGitCheckout(prefix: string): Promise<string> {
+  const path = await Deno.makeTempDir({ prefix })
+  const init = await new Deno.Command('git', {
+    args: ['-C', path, 'init', '-q', '-b', 'trunk'],
+    env: {
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+      GIT_TERMINAL_PROMPT: '0',
+    },
+    stdout: 'null',
+    stderr: 'piped',
+  }).output()
+  if (!init.success) {
+    await Deno.remove(path, { recursive: true })
+    const stderr = new TextDecoder().decode(init.stderr).trim()
+    throw new Error(`git init failed: ${stderr}`)
+  }
+  return path
+}
+
 test('GET /system/upgrade-status uses the default git runner', async () => {
   const secrets = await deriveSecretsConfig(
     parseSecretsEnv(`1:${TEST_ONLY_TURBOPANEL_SECRET}`, 'deno'),
     'session-signing',
   )
-  await withSystemRouteEnv({ TURBOPANEL_DEV_USER: 'dev' }, async () => {
-    setSystemRoutesTestHooks({ gitRunner: null, restarter: null })
-    const app = new Hono()
-    registerSystemRoutes(app, { secrets, authRequired: false })
-    const status = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade-status`)
-    assertEquals(status.status, 200)
-    const body = await status.json() as {
-      ok: boolean
-      canUpgrade: boolean
-      dirty: unknown[]
-    }
-    assertEquals(body.ok, true)
-    assertEquals(typeof body.canUpgrade, 'boolean')
-    assertEquals(Array.isArray(body.dirty), true)
-  })
+  // Host-free: CI has this checkout but not sibling ui/daemon trees.
+  const created: string[] = []
+  try {
+    const daemonRepo = await initTempGitCheckout('tp-daemon-git-')
+    created.push(daemonRepo)
+    const uiRepo = await initTempGitCheckout('tp-ui-git-')
+    created.push(uiRepo)
+    await withSystemRouteEnv({
+      TURBOPANEL_DEV_USER: 'dev',
+      TURBOPANEL_DAEMON_REPO: daemonRepo,
+      TURBOPANEL_UI_REPO: uiRepo,
+    }, async () => {
+      setSystemRoutesTestHooks({ gitRunner: null, restarter: null })
+      const app = new Hono()
+      registerSystemRoutes(app, { secrets, authRequired: false })
+      const status = await app.request(`${DEVELOPER_API_PREFIX}/system/upgrade-status`)
+      assertEquals(status.status, 200)
+      const body = await status.json() as {
+        ok: boolean
+        canUpgrade: boolean
+        dirty: unknown[]
+      }
+      assertEquals(body.ok, true)
+      assertEquals(typeof body.canUpgrade, 'boolean')
+      assertEquals(Array.isArray(body.dirty), true)
+    })
+  } finally {
+    for (const repo of created) await Deno.remove(repo, { recursive: true })
+  }
 })
 
 test('defaultSystemGitRunner maps a missing binary to success:false', async () => {
