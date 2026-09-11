@@ -190,6 +190,8 @@ The DO caches `#serverId` (and live-socket presence) once in the constructor via
 
 **`DAEMON_INBOUND_ALLOWED`** is defined in `src/daemon/cell/protocol.ts` (not `hub.ts`).
 
+**Hardware-profile picker discovery (`metrics-capabilities-request` / `metrics-capabilities-result`):** same correlated round trip as `addresses-request` / `addresses-result`. Empty request; the daemon answers with `MetricsCapabilities` (sensor candidate pools + live readings, storage probes, classified NICs, process probe). `deriveInboundOutcome` must complete the pending request (`{ capabilities }`) or `GET /servers/:id/metrics/capabilities` times out as HTTP 503. Caps: `MAX_DAEMON_WS_CAPABILITIES_BYTES` (96 KiB) on the capabilities JSON. Not stored; the HTTP response is the only consumer.
+
 **Container log tail (`container-logs-request` / `container-logs-result`):** same correlated round trip as `managed-logs-request` / `managed-logs-result`. Snapshot only — never `--follow` (that would hold the Durable Object awake). Correlation rides the existing `request` row (`deriveInboundOutcome` → `{ logs }`). Output is discarded after the HTTP response; nothing is stored.
 
 **Repository inspect (`repo-read-request` / `repo-read-result`):** same correlated round trip. The daemon answers with file contents + a directory listing; `deriveInboundOutcome` must complete the pending request or the wizard's 30s wait expires as HTTP 502.

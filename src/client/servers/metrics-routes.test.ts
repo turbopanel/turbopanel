@@ -361,6 +361,65 @@ it("GET /servers/:id/metrics/series returns 401 without session", async () => {
   });
 });
 
+it("GET /servers/:id/metrics/capabilities returns 401 without session", async () => {
+  await withMetricsFixtures(async ({ app, serverId }) => {
+    const res = await app.request(
+      `/servers/${serverId}/metrics/capabilities`,
+    );
+    assertEquals(res.status, 401);
+  });
+});
+
+it("GET /servers/:id/metrics/capabilities returns 409 when the daemon is offline", async () => {
+  const registry = createFakeDaemonRegistry(() => ({ status: "done" }));
+  await withMetricsFixtures(async ({ app, serverId, cookie }) => {
+    const res = await app.request(
+      `/servers/${serverId}/metrics/capabilities`,
+      { headers: { cookie } },
+    );
+    assertEquals(res.status, 409);
+    const body = (await res.json()) as { error?: string };
+    assertEquals(body.error, "server_offline");
+    assertEquals(registry.sent.length, 0);
+  }, registry);
+});
+
+it("GET /servers/:id/metrics/capabilities returns the daemon payload on a connected host", async () => {
+  const capabilities = {
+    sensors: { cpuTemperature: [] },
+    storageMounts: {
+      system: null,
+      hosting: { probedPath: "/srv/users", result: null },
+      docker: { probedPath: null, result: null, reason: "docker_absent" },
+      candidates: [],
+    },
+    networkInterfaces: [{ name: "eth0", classification: "uplink" }],
+    process: { probedPath: "/proc" },
+  };
+  const registry = createFakeDaemonRegistry((outbound) => {
+    if (outbound.kind === "metrics-capabilities-request") {
+      return { status: "done", result: { capabilities } };
+    }
+    return { status: "done" };
+  });
+  await withMetricsFixtures(async ({ app, db, serverId, cookie }) => {
+    await markServerConnected(db, serverId);
+    const res = await app.request(
+      `/servers/${serverId}/metrics/capabilities`,
+      { headers: { cookie } },
+    );
+    assertEquals(res.status, 200);
+    const body = (await res.json()) as {
+      ok?: boolean;
+      capabilities?: unknown;
+    };
+    assertEquals(body.ok, true);
+    assertEquals(body.capabilities, capabilities);
+    assertEquals(registry.sent.length, 1);
+    assertEquals(registry.sent[0]?.kind, "metrics-capabilities-request");
+  }, registry);
+});
+
 it("GET /servers/:id/metrics/series returns 403 without read access", async () => {
   if (!dbUrl) return;
 

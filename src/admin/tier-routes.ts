@@ -37,6 +37,7 @@ import {
   type BillingGateway,
   needsAccountTaxDefaults,
   NO_TAX_DEFAULTS,
+  type ProductLadderExpectation,
   type ProductVerification,
   resolveBillingGateway,
 } from "../lib/billing/gateway.ts";
@@ -50,6 +51,7 @@ import {
   updateTierById,
 } from "../lib/db/tier-records.ts";
 import {
+  ladderProductExpectation,
   ladderWithRows,
   parseTierCreateBody,
   parseTierPatchBody,
@@ -82,7 +84,12 @@ function verificationPayload(result: ProductVerification) {
 type VerificationPayload = ReturnType<typeof verificationPayload>;
 
 type VerifyResult =
-  | { ok: true; payload: VerificationPayload | null; priceCents: number | null; currency: string | null }
+  | {
+    ok: true;
+    payload: VerificationPayload | null;
+    priceCents: number | null;
+    currency: string | null;
+  }
   | {
     ok: false;
     body:
@@ -130,15 +137,20 @@ async function readBody(c: Ctx): Promise<Record<string, unknown> | Response> {
 async function verify(
   gateway: BillingGateway,
   providerProductId: string | null,
+  expected: ProductLadderExpectation | null = null,
 ): Promise<VerifyResult> {
-  if (providerProductId === null) return { ok: true, payload: null, priceCents: null, currency: null };
+  if (providerProductId === null) {
+    return { ok: true, payload: null, priceCents: null, currency: null };
+  }
   try {
     const product = await gateway.getProduct(providerProductId);
     // The account's Tax settings default can satisfy a price whose own
     // tax_behavior is "unspecified", so verification needs both — but only
     // such a price is worth a second provider round trip.
-    const taxDefaults = needsAccountTaxDefaults(product) ? await gateway.getTaxDefaults() : NO_TAX_DEFAULTS;
-    const result = gateway.verifyProduct(product, taxDefaults);
+    const taxDefaults = needsAccountTaxDefaults(product)
+      ? await gateway.getTaxDefaults()
+      : NO_TAX_DEFAULTS;
+    const result = gateway.verifyProduct(product, taxDefaults, expected);
     if (!result.ok) {
       return {
         ok: false,
@@ -183,7 +195,10 @@ function isUniqueViolation(err: unknown): boolean {
  * The product binding only moves one way per row kind: the custom row never
  * gains a product, a priced row never loses one. Null when the patch is fine.
  */
-function productPatchError(existing: TierRow, patch: TierPatchFields): string | null {
+function productPatchError(
+  existing: TierRow,
+  patch: TierPatchFields,
+): string | null {
   if (patch.providerProductId === undefined) return null;
   if (existing.isCustom && patch.providerProductId !== null) {
     return `${existing.label} takes no product`;
@@ -205,15 +220,26 @@ async function verifyPatchedProduct(
 ): Promise<VerifyResult | null> {
   if (patch.providerProductId === undefined) return null;
   if (patch.providerProductId === existing.providerProductId) return null;
-  return await verify(openGateway(), patch.providerProductId);
+  return await verify(
+    openGateway(),
+    patch.providerProductId,
+    ladderProductExpectation(existing.label),
+  );
 }
 
 /** Only the fields the patch names, plus the price a fresh verification returned. */
-function tierUpdateFields(patch: TierPatchFields, verified: VerifyResult | null) {
+function tierUpdateFields(
+  patch: TierPatchFields,
+  verified: VerifyResult | null,
+) {
   return {
-    ...(patch.providerProductId !== undefined ? { providerProductId: patch.providerProductId } : {}),
+    ...(patch.providerProductId !== undefined
+      ? { providerProductId: patch.providerProductId }
+      : {}),
     ...(patch.isActive !== undefined ? { isActive: patch.isActive } : {}),
-    ...(verified?.ok ? { priceCents: verified.priceCents, currency: verified.currency } : {}),
+    ...(verified?.ok
+      ? { priceCents: verified.priceCents, currency: verified.currency }
+      : {}),
   };
 }
 
@@ -225,7 +251,8 @@ export function registerAdminTierRoutes(
   const createClient = deps.createClient ??
     ((config: BillingConfig) => createStripeClient(config));
   const resolveGateway = deps.resolveGateway ?? resolveBillingGateway;
-  const gatewayFor = (config: BillingConfig) => resolveGateway(createClient(config));
+  const gatewayFor = (config: BillingConfig) =>
+    resolveGateway(createClient(config));
   const rootOnly = createRootOnlyMiddleware(opts.secrets);
 
   /** Every row with its references, plus the ladder with which labels are still unmapped. */
@@ -267,7 +294,9 @@ export function registerAdminTierRoutes(
       : NO_TAX_DEFAULTS;
     const rows = await listAllTiers(resolved.db);
     const tierByProduct = new Map(
-      rows.flatMap((row) => row.providerProductId ? [[row.providerProductId, row.id] as const] : []),
+      rows.flatMap((row) =>
+        row.providerProductId ? [[row.providerProductId, row.id] as const] : []
+      ),
     );
     return c.json({
       provider: gateway.id,
@@ -289,12 +318,21 @@ export function registerAdminTierRoutes(
     const resolved = resolve(c);
     if (resolved instanceof Response) return resolved;
     const gateway = gatewayFor(resolved.config);
-    const rows = (await listAllTiers(resolved.db)).filter((row) => row.providerProductId !== null);
+    const rows = (await listAllTiers(resolved.db)).filter((row) =>
+      row.providerProductId !== null
+    );
     const results = [];
     for (const row of rows) {
-      const verified = await verify(gateway, row.providerProductId);
+      const verified = await verify(
+        gateway,
+        row.providerProductId,
+        ladderProductExpectation(row.label),
+      );
       if (verified.ok) {
-        await updateTierById(resolved.db, row.id, { priceCents: verified.priceCents, currency: verified.currency });
+        await updateTierById(resolved.db, row.id, {
+          priceCents: verified.priceCents,
+          currency: verified.currency,
+        });
         results.push({ id: row.id, label: row.label, ...verified.payload! });
       } else {
         results.push({
@@ -316,16 +354,25 @@ export function registerAdminTierRoutes(
     if (body instanceof Response) return body;
 
     const fields = parseTierCreateBody(body);
-    if ("error" in fields) return c.json({ error: "tier_invalid", message: fields.error }, 400);
+    if ("error" in fields) {
+      return c.json({ error: "tier_invalid", message: fields.error }, 400);
+    }
 
     // Cheap duplicate check before spending a provider call. The unique
     // index is still the authority — two concurrent creates would race past this.
     const clash = await getTierByLabel(resolved.db, fields.label);
     if (clash) {
-      return c.json({ error: "tier_exists", message: `${fields.label} already has a row` }, 409);
+      return c.json({
+        error: "tier_exists",
+        message: `${fields.label} already has a row`,
+      }, 409);
     }
 
-    const verified = await verify(gatewayFor(resolved.config), fields.providerProductId);
+    const verified = await verify(
+      gatewayFor(resolved.config),
+      fields.providerProductId,
+      ladderProductExpectation(fields.label),
+    );
     if (!verified.ok) return c.json(verified.body, 400);
 
     let row: TierRow;
@@ -363,26 +410,44 @@ export function registerAdminTierRoutes(
     const body = await readBody(c);
     if (body instanceof Response) return body;
     const patch = parseTierPatchBody(body);
-    if ("error" in patch) return c.json({ error: "tier_invalid", message: patch.error }, 400);
+    if ("error" in patch) {
+      return c.json({ error: "tier_invalid", message: patch.error }, 400);
+    }
     const productError = productPatchError(existing, patch);
-    if (productError !== null) return c.json({ error: "tier_invalid", message: productError }, 400);
+    if (productError !== null) {
+      return c.json({ error: "tier_invalid", message: productError }, 400);
+    }
 
-    const verified = await verifyPatchedProduct(() => gatewayFor(resolved.config), existing, patch);
+    const verified = await verifyPatchedProduct(
+      () => gatewayFor(resolved.config),
+      existing,
+      patch,
+    );
     if (verified && !verified.ok) return c.json(verified.body, 400);
 
     let updated: TierRow | null;
     try {
-      updated = await updateTierById(resolved.db, id, tierUpdateFields(patch, verified));
+      updated = await updateTierById(
+        resolved.db,
+        id,
+        tierUpdateFields(patch, verified),
+      );
     } catch (err) {
       if (isUniqueViolation(err)) {
-        return c.json({ error: "tier_exists", message: "another tier already bills against that product" }, 409);
+        return c.json({
+          error: "tier_exists",
+          message: "another tier already bills against that product",
+        }, 409);
       }
       throw err;
     }
     if (!updated) return c.json({ error: "Tier not found" }, 404);
 
     return c.json({
-      tier: serializeAdminTier(updated, await countTierReferences(resolved.db, id)),
+      tier: serializeAdminTier(
+        updated,
+        await countTierReferences(resolved.db, id),
+      ),
       verification: verified?.ok ? verified.payload : null,
     });
   });
@@ -397,7 +462,10 @@ export function registerAdminTierRoutes(
     const updated = await updateTierById(resolved.db, id, { isActive: false });
     if (!updated) return c.json({ error: "Tier not found" }, 404);
     return c.json({
-      tier: serializeAdminTier(updated, await countTierReferences(resolved.db, id)),
+      tier: serializeAdminTier(
+        updated,
+        await countTierReferences(resolved.db, id),
+      ),
     });
   });
 
@@ -413,12 +481,22 @@ export function registerAdminTierRoutes(
         message: "a custom tier has no provider product to verify",
       }, 400);
     }
-    const verified = await verify(gatewayFor(resolved.config), row.providerProductId);
+    const verified = await verify(
+      gatewayFor(resolved.config),
+      row.providerProductId,
+      ladderProductExpectation(row.label),
+    );
     if (!verified.ok) return c.json(verified.body, 400);
-    const updated = await updateTierById(resolved.db, id, { priceCents: verified.priceCents, currency: verified.currency });
+    const updated = await updateTierById(resolved.db, id, {
+      priceCents: verified.priceCents,
+      currency: verified.currency,
+    });
     return c.json({
       verification: verified.payload,
-      tier: serializeAdminTier(updated ?? row, await countTierReferences(resolved.db, id)),
+      tier: serializeAdminTier(
+        updated ?? row,
+        await countTierReferences(resolved.db, id),
+      ),
     });
   });
 }

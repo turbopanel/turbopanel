@@ -59,6 +59,7 @@ test('metricsPaths documents the client query surface under the client API prefi
   assertEquals(
     Object.keys(metricsPaths).sort((a, b) => a.localeCompare(b)),
     [
+      '/api/client/v1/servers/{id}/metrics/capabilities',
       '/api/client/v1/servers/{id}/metrics/connection',
       '/api/client/v1/servers/{id}/metrics/hardware-profile',
       '/api/client/v1/servers/{id}/metrics/series',
@@ -263,6 +264,15 @@ test('ServerHardwareProfile response schema includes the read-only cpuModel fiel
   assertExists(schema.properties?.cpuModel)
   assertExists(schema.properties?.cpuTdpWattsOverride)
   assertExists(schema.properties?.cpuTjMaxCelsiusOverride)
+})
+
+test('capabilities GET documents 200/401/403/409/503', () => {
+  const get = (
+    metricsPaths['/api/client/v1/servers/{id}/metrics/capabilities'] as {
+      get: { responses: Record<string, unknown> }
+    }
+  ).get
+  assertEquals(Object.keys(get.responses).sort(), ['200', '401', '403', '409', '503'])
 })
 
 test('hardware-profile PUT documents 200/400/401/403/404/503 and the update/response schemas', () => {

@@ -422,6 +422,7 @@ Endpoints (`src/client/servers/metrics-routes.ts`):
 | `GET`  | `/api/client/v1/servers/:id/metrics/summary`    | host summary + `cpuLimits`/`temperatureUnit` envelope                               |
 | `GET`  | `/api/client/v1/servers/:id/metrics/connection` | status-event history (uptime/downtime)                                              |
 | `GET`  | `/api/client/v1/servers/:id/metrics/events`     | metrics-event history; `available: false` (never 503) when unsupported by the store |
+| `GET`  | `/api/client/v1/servers/:id/metrics/capabilities` | live daemon round trip for the hardware-profile picker (409 `server_offline` when disconnected) |
 | `GET`  | `/api/client/v1/servers/metrics/latest`         | one fleet snapshot per org server — never N per-server chart calls                  |
 
 Never authorize by bare UUID possession — session middleware + resource read

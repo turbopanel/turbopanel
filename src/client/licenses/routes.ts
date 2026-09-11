@@ -14,6 +14,7 @@ import {
   listLicenses,
   listServersBoundToLicenses,
 } from "../authn/license.ts";
+import { isCustomerBillingOperational } from "../../lib/billing/config.ts";
 import {
   type BillingQuantityLock,
   endQuantityMutation,
@@ -115,7 +116,9 @@ async function prepareLicenseMint(
   db: Db,
   organizationId: string,
 ): Promise<LicenseMintPrep> {
-  if (!c.get("billingConfig")) return { ok: true, lease: null };
+  if (!isCustomerBillingOperational(c.get("billingConfig"))) {
+    return { ok: true, lease: null };
+  }
   const lease = await tryBeginQuantityMutation(db, organizationId);
   if (!lease) {
     return {
@@ -143,7 +146,9 @@ async function rejectIfNoLicenseAvailable(
   await syncSelfHostedGrant(db, organizationId, { allowGrow: false });
   const view = await loadBillingOrgView(db, organizationId, Date.now());
   const summary = summarizeLicenses(view);
-  return summary.available > 0 ? null : c.json(noLicenseAvailableBody(summary), 409);
+  return summary.available > 0
+    ? null
+    : c.json(noLicenseAvailableBody(summary), 409);
 }
 
 async function releaseMintLease(
@@ -278,7 +283,7 @@ export function registerLicenseRoutes(
         c,
         db,
         organizationId,
-        Boolean(c.get("billingConfig")),
+        isCustomerBillingOperational(c.get("billingConfig")),
       );
       if (unavailable) return unavailable;
 

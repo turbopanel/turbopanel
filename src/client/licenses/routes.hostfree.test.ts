@@ -77,7 +77,7 @@ const S4 = "33333333-3333-4333-8333-333333333332";
 const NOW = "2026-09-07T12:00:00.000Z";
 const CONFIG: BillingConfig = {
   secretKey: "sk_test_x",
-  webhookSigningSecret: null,
+  webhookSigningSecret: "whsec_x",
   apiVersion: "2025-08-27.basil",
 };
 

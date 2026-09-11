@@ -3,9 +3,19 @@
  * serializers. No provider call, no Postgres.
  */
 
-import type { ProductVerification, ProviderProduct } from "../lib/billing/gateway.ts";
+import type {
+  ProductLadderExpectation,
+  ProductVerification,
+  ProviderProduct,
+} from "../lib/billing/gateway.ts";
 import type { TierReferenceCounts, TierRow } from "../lib/db/tier-records.ts";
-import { isTierLabel, LADDER, ladderEntry, type LadderEntry, type TierLabel } from "../lib/tiers/ladder.ts";
+import {
+  isTierLabel,
+  LADDER,
+  type LadderEntry,
+  ladderEntry,
+  type TierLabel,
+} from "../lib/tiers/ladder.ts";
 
 export type TierCreateFields = Readonly<{
   label: TierLabel;
@@ -36,18 +46,32 @@ function optionalProductId(
 export function parseTierCreateBody(
   body: Record<string, unknown>,
 ): TierCreateFields | { error: string } {
-  const rawLabel = typeof body.label === "string" ? body.label.trim().toUpperCase() : null;
+  const rawLabel = typeof body.label === "string"
+    ? body.label.trim().toUpperCase()
+    : null;
   if (!rawLabel || !isTierLabel(rawLabel)) {
-    return { error: `label must be one of ${LADDER.map((entry) => entry.label).join(", ")}` };
+    return {
+      error: `label must be one of ${
+        LADDER.map((entry) => entry.label).join(", ")
+      }`,
+    };
   }
   const entry = ladderEntry(rawLabel)!;
   const productId = optionalProductId(body.providerProductId);
   if (!productId.ok) return { error: "providerProductId must be a string" };
   if (entry.isCustom) {
-    if (productId.value) return { error: `${entry.label} is negotiated per customer and takes no product` };
+    if (productId.value) {
+      return {
+        error: `${entry.label} is negotiated per customer and takes no product`,
+      };
+    }
     return { label: entry.label, providerProductId: null };
   }
-  if (!productId.value) return { error: `${entry.label} needs the provider product it bills against` };
+  if (!productId.value) {
+    return {
+      error: `${entry.label} needs the provider product it bills against`,
+    };
+  }
   return { label: entry.label, providerProductId: productId.value };
 }
 
@@ -60,12 +84,16 @@ export function parseTierPatchBody(
   if (!productId.ok) return { error: "providerProductId must be a string" };
   if (productId.value !== undefined) out.providerProductId = productId.value;
   if (body.isActive !== undefined) {
-    if (typeof body.isActive !== "boolean") return { error: "isActive must be a boolean" };
+    if (typeof body.isActive !== "boolean") {
+      return { error: "isActive must be a boolean" };
+    }
     out.isActive = body.isActive;
   }
   const known = new Set(["providerProductId", "isActive"]);
   const unknown = Object.keys(body).filter((key) => !known.has(key));
-  if (unknown.length > 0) return { error: `unknown field(s): ${unknown.join(", ")}` };
+  if (unknown.length > 0) {
+    return { error: `unknown field(s): ${unknown.join(", ")}` };
+  }
   return out;
 }
 
@@ -86,7 +114,10 @@ export function serializeLadderEntry(entry: LadderEntry) {
   };
 }
 
-export function serializeAdminTier(row: TierRow, references: TierReferenceCounts) {
+export function serializeAdminTier(
+  row: TierRow,
+  references: TierReferenceCounts,
+) {
   const entry = ladderEntry(row.label);
   return {
     id: row.id,
@@ -105,7 +136,11 @@ export function serializeAdminTier(row: TierRow, references: TierReferenceCounts
   };
 }
 
-export function serializeProduct(product: ProviderProduct, verification: ProductVerification, tierId: string | null) {
+export function serializeProduct(
+  product: ProviderProduct,
+  verification: ProductVerification,
+  tierId: string | null,
+) {
   return {
     id: product.id,
     name: product.name,
@@ -137,4 +172,17 @@ export function ladderWithRows(rows: readonly TierRow[]) {
     ...serializeLadderEntry(entry),
     tierId: byLabel.get(entry.label)?.id ?? null,
   }));
+}
+
+/**
+ * What a priced ladder label must match on the provider product. SX (and
+ * any custom rung) has no product and no list price.
+ */
+export function ladderProductExpectation(
+  label: string,
+): ProductLadderExpectation | null {
+  if (!isTierLabel(label)) return null;
+  const entry = ladderEntry(label);
+  if (!entry || entry.isCustom || entry.listPriceCents === null) return null;
+  return { label: entry.label, listPriceCents: entry.listPriceCents };
 }

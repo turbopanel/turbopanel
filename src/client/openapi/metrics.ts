@@ -531,6 +531,20 @@ export const metricsSchemas = {
       },
     },
   },
+  MetricsCapabilitiesResponse: {
+    type: 'object',
+    required: ['ok', 'capabilities'],
+    properties: {
+      ok: { type: 'boolean', const: true },
+      capabilities: {
+        type: 'object',
+        description:
+          'Live daemon discovery payload for the hardware-profile picker: sensor candidate pools with current readings, storage probes, NIC classification, and a /proc process-count probe. Not a topology snapshot.',
+        required: ['sensors', 'storageMounts', 'networkInterfaces', 'process'],
+        additionalProperties: true,
+      },
+    },
+  },
 }
 
 const serverIdParam = {
@@ -706,6 +720,42 @@ export const metricsPaths: Record<string, unknown> = {
           },
         },
         ...metricsQueryErrorResponses,
+      },
+    },
+  },
+  '/api/client/v1/servers/{id}/metrics/capabilities': {
+    get: {
+      tags: ['Servers'],
+      summary: 'Discover live hardware-profile picker candidates for a visible server',
+      description:
+        'Correlated daemon round trip. Returns sensor candidate pools with live readings, hosting/Docker storage probes, classified NICs, and a process-count probe. Fired only when the hardware-profile panel is expanded — never polled. A disconnected daemon returns 409 server_offline.',
+      security: [{ cookieAuth: [] }],
+      parameters: [serverIdParam],
+      responses: {
+        '200': {
+          description: 'Live capability discovery payload',
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/MetricsCapabilitiesResponse' },
+            },
+          },
+        },
+        '401': {
+          description: 'Unauthorized',
+          content: { 'application/json': { schema: clientErrorJson } },
+        },
+        '403': {
+          description: 'Forbidden',
+          content: { 'application/json': { schema: clientErrorJson } },
+        },
+        '409': {
+          description: 'Server daemon is offline',
+          content: { 'application/json': { schema: clientErrorJson } },
+        },
+        '503': {
+          description: 'Daemon cell registry unavailable or the round trip timed out',
+          content: { 'application/json': { schema: clientErrorJson } },
+        },
       },
     },
   },

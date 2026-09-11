@@ -478,6 +478,7 @@ test('a valid delivery answers 200 immediately, without awaiting the projection'
       'insert:subscription',
       'delete:seat',
       'insert:seat',
+      'delete:setting',
       'insert:setting',
       'delete:setting',
       'delete:setting',

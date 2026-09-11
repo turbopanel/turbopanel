@@ -26,6 +26,7 @@ import { TAG_NAME_IN_USE_ERROR } from "../display-name-uniqueness.ts";
 import { ORG_ID_HEADER } from "../org-context.ts";
 import { registerClientRoutes } from "../routes.ts";
 import { registerBillingRoutes } from "../billing/routes.ts";
+import type { BillingConfig } from "../../lib/billing/config.ts";
 import { registerTagRoutes } from "./routes.ts";
 
 /**
@@ -593,7 +594,9 @@ test("registerClientRoutes mounts /billing on Workers only: self-hosted has no b
     return app;
   };
 
-  const deno = await build("deno").request(`${CLIENT_API_PREFIX}/billing/catalog`);
+  const deno = await build("deno").request(
+    `${CLIENT_API_PREFIX}/billing/catalog`,
+  );
   assertEquals(deno.status, 404);
 
   const workersBare = await build("workers").request(
@@ -605,4 +608,51 @@ test("registerClientRoutes mounts /billing on Workers only: self-hosted has no b
     `${CLIENT_API_PREFIX}/billing/catalog`,
   );
   assertEquals(workers.status, 401);
+});
+
+test("GET /status reports billingEnabled only when both Stripe secrets are set", async () => {
+  const secretsConfig = parseTestSecretsConfig("deno");
+  const secrets = await deriveSecretsConfig(secretsConfig, "session-signing");
+  const build = (config: BillingConfig | undefined) => {
+    const app = new Hono<AppEnv>();
+    app.use("*", (c, next) => {
+      if (config) c.set("billingConfig", config);
+      return next();
+    });
+    registerClientRoutes(app, {
+      secrets,
+      runtime: "workers",
+      signupEnvOverride: undefined,
+    });
+    return app;
+  };
+
+  const none = await build(undefined).request(`${CLIENT_API_PREFIX}/status`);
+  assertEquals(none.status, 200);
+  assertEquals(
+    (await none.json() as { billingEnabled: boolean }).billingEnabled,
+    false,
+  );
+
+  const keyOnly = await build({
+    secretKey: "sk_test_x",
+    webhookSigningSecret: null,
+    apiVersion: "2025-08-27.basil",
+  }).request(`${CLIENT_API_PREFIX}/status`);
+  assertEquals(keyOnly.status, 200);
+  assertEquals(
+    (await keyOnly.json() as { billingEnabled: boolean }).billingEnabled,
+    false,
+  );
+
+  const both = await build({
+    secretKey: "sk_test_x",
+    webhookSigningSecret: "whsec_x",
+    apiVersion: "2025-08-27.basil",
+  }).request(`${CLIENT_API_PREFIX}/status`);
+  assertEquals(both.status, 200);
+  assertEquals(
+    (await both.json() as { billingEnabled: boolean }).billingEnabled,
+    true,
+  );
 });

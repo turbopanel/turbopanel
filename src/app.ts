@@ -1,34 +1,37 @@
-import { Hono } from 'hono'
-import type { SessionData } from './client/authn/session-store.ts'
-import type { AuthRateLimiter } from './client/authn/auth-rate-limit.ts'
-import type { DerivedSecretsConfig, SecretsConfig } from './client/authn/secrets.ts'
-import { registerClientRoutes, type ClientRouteOpts } from './client/routes.ts'
-import { createBrowserWriteProtectionMiddleware } from './browser-write-protection.ts'
-import { registerCorsMiddleware } from './cors.ts'
-import type { DaemonCellRegistry } from './daemon/cell/contracts.ts'
-import type { ServerMetricsStore } from './daemon/metrics/types.ts'
-import type { ExecutionLogStore } from './lib/execution-logs/types.ts'
-import type { Db } from './db.ts'
-import type { SignupEnvOverride } from './client/authn/install-state.ts'
-import type { CommandQueue } from './lib/commands/queue.ts'
-import type { EmailQueue } from './lib/email/types.ts'
-import type { QueryCache } from './query-cache/contracts.ts'
-import type { BillingConfig } from './lib/billing/config.ts'
-import { HEALTH_PATH } from './surfaces.ts'
-import { healthPayload } from './build-info.ts'
+import { Hono } from "hono";
+import type { SessionData } from "./client/authn/session-store.ts";
+import type { AuthRateLimiter } from "./client/authn/auth-rate-limit.ts";
+import type {
+  DerivedSecretsConfig,
+  SecretsConfig,
+} from "./client/authn/secrets.ts";
+import { type ClientRouteOpts, registerClientRoutes } from "./client/routes.ts";
+import { createBrowserWriteProtectionMiddleware } from "./browser-write-protection.ts";
+import { registerCorsMiddleware } from "./cors.ts";
+import type { DaemonCellRegistry } from "./daemon/cell/contracts.ts";
+import type { ServerMetricsStore } from "./daemon/metrics/types.ts";
+import type { ExecutionLogStore } from "./lib/execution-logs/types.ts";
+import type { Db } from "./db.ts";
+import type { SignupEnvOverride } from "./client/authn/install-state.ts";
+import type { CommandQueue } from "./lib/commands/queue.ts";
+import type { EmailQueue } from "./lib/email/types.ts";
+import type { QueryCache } from "./query-cache/contracts.ts";
+import type { BillingConfig } from "./lib/billing/config.ts";
+import { HEALTH_PATH } from "./surfaces.ts";
+import { healthPayload } from "./build-info.ts";
 
 export type AppEnv = {
   Variables: {
-    db?: Db
-    emailQueue?: EmailQueue
-    commandQueue?: CommandQueue
-    emailFrom?: string
-    baseUrl?: string
-    session?: SessionData
+    db?: Db;
+    emailQueue?: EmailQueue;
+    commandQueue?: CommandQueue;
+    emailFrom?: string;
+    baseUrl?: string;
+    session?: SessionData;
     /** Hyperdrive or TURBOPANEL_DATABASE_URL for database status routes (Workers). */
-    postgresConnectionString?: string
-    daemonCellRegistry?: DaemonCellRegistry
-    queryCache?: QueryCache
+    postgresConnectionString?: string;
+    daemonCellRegistry?: DaemonCellRegistry;
+    queryCache?: QueryCache;
     /**
      * Host server-metrics store for `POST /api/daemon/v1/metrics` and every
      * v5 query route. Set by `createApp` from the `serverMetricsStore`
@@ -39,53 +42,54 @@ export type AppEnv = {
      * binding is unconfigured). Stays unset when no storage backend is
      * configured for the runtime.
      */
-    serverMetricsStore?: ServerMetricsStore
+    serverMetricsStore?: ServerMetricsStore;
     /**
      * Command execution-log (transcript) store. Stays unset when no storage
      * backend is configured for the runtime — reads then report "no transcript".
      */
-    executionLogStore?: ExecutionLogStore
+    executionLogStore?: ExecutionLogStore;
     /**
      * Runtime serving the request. Used by session-cookie TLS resolution to
      * decide whether `X-Forwarded-Proto` is trustworthy (Deno Caddy-over-Unix
      * trusted proxy) or must be ignored (Workers — URL-derived only). Set by
      * `createApp`; a missing value is treated as the secure URL-derived path.
      */
-    runtime?: 'deno' | 'workers'
+    runtime?: "deno" | "workers";
     /** Platform env bindings for settings resolution (Workers per-request; Deno process env). */
-    platformEnv?: Record<string, string | undefined>
+    platformEnv?: Record<string, string | undefined>;
     /** AES-GCM data encryption keys (client routes encrypt only). */
-    dataEncryptionSecrets?: DerivedSecretsConfig
+    dataEncryptionSecrets?: DerivedSecretsConfig;
     /** Root secret config for per-daemon recipient sealing. */
-    secretsConfig?: SecretsConfig
+    secretsConfig?: SecretsConfig;
     /**
      * Durable, globally-shared auth throttle. Injected per-runtime by the
      * entrypoints (`workers.ts` / `deno.ts`). Absent in unit tests, where auth
      * routes fall back to the process-local shared limiter.
      */
-    authRateLimiter?: AuthRateLimiter
+    authRateLimiter?: AuthRateLimiter;
     /**
-     * Stripe configuration. Its **presence is `billingEnabled`** — there is
-     * no separate boolean to drift. Set per request by `workers.ts` from
+     * Stripe configuration. Customer billing (`billingEnabled`) requires both
+     * the API key and the webhook signing secret — see
+     * `isCustomerBillingOperational`. Set per request by `workers.ts` from
      * `resolveBillingConfig(env)`. Never set on the Deno runtime: billing is
      * hosted-only and self-hosted mounts no billing surface at all.
      */
-    billingConfig?: BillingConfig
-  }
-}
+    billingConfig?: BillingConfig;
+  };
+};
 
-function bindContextValue<K extends keyof AppEnv['Variables']>(
+function bindContextValue<K extends keyof AppEnv["Variables"]>(
   app: Hono<AppEnv>,
   key: K,
-  value: AppEnv['Variables'][K] | undefined,
+  value: AppEnv["Variables"][K] | undefined,
 ): void {
   if (value === undefined) {
-    return
+    return;
   }
-  app.use('*', (c, next) => {
-    c.set(key, value)
-    return next()
-  })
+  app.use("*", (c, next) => {
+    c.set(key, value);
+    return next();
+  });
 }
 
 export function createApp({
@@ -111,85 +115,85 @@ export function createApp({
   registerBilling,
   getClientOpenApiSpec,
 }: {
-  db?: Db
-  emailQueue?: EmailQueue
-  commandQueue?: CommandQueue
-  emailFrom?: string
-  baseUrl?: string
-  secrets?: DerivedSecretsConfig
-  runtime?: 'deno' | 'workers'
-  corsOrigins?: string
-  signupEnvOverride: SignupEnvOverride | undefined
-  daemonCellRegistry?: DaemonCellRegistry
-  queryCache?: QueryCache
+  db?: Db;
+  emailQueue?: EmailQueue;
+  commandQueue?: CommandQueue;
+  emailFrom?: string;
+  baseUrl?: string;
+  secrets?: DerivedSecretsConfig;
+  runtime?: "deno" | "workers";
+  corsOrigins?: string;
+  signupEnvOverride: SignupEnvOverride | undefined;
+  daemonCellRegistry?: DaemonCellRegistry;
+  queryCache?: QueryCache;
   /** Host server-metrics store — see `AppEnv.Variables.serverMetricsStore`. */
-  serverMetricsStore?: ServerMetricsStore
-  executionLogStore?: ExecutionLogStore
-  dataEncryptionSecrets?: DerivedSecretsConfig
-  secretsConfig?: SecretsConfig
+  serverMetricsStore?: ServerMetricsStore;
+  executionLogStore?: ExecutionLogStore;
+  dataEncryptionSecrets?: DerivedSecretsConfig;
+  secretsConfig?: SecretsConfig;
   /**
    * Durable auth throttle. When set, registered as app-level middleware
    * **before** client routes so Deno Redis (and tests) see it on auth
    * handlers. Workers still wraps per-request in `workers.ts` and may leave
    * this unset on `createApp()`.
    */
-  authRateLimiter?: AuthRateLimiter
+  authRateLimiter?: AuthRateLimiter;
   /** HMAC keyring for email OTP verifiers — forwarded to client auth routes. */
-  otpVerifierSecrets?: DerivedSecretsConfig
+  otpVerifierSecrets?: DerivedSecretsConfig;
   /**
    * Process / binding env for `/api/health` revision and settings.
    * Registered before the health route so Deno does not observe `unknown`
    * when `TURBOPANEL_REVISION` is injected after `createApp()`.
    */
-  platformEnv?: Record<string, string | undefined>
-  getPlatformEnv?: () => Record<string, string | undefined>
+  platformEnv?: Record<string, string | undefined>;
+  getPlatformEnv?: () => Record<string, string | undefined>;
   /**
    * Hosted (Workers) billing surface. Passed from `src/workers.ts` so
    * this factory never statically imports Stripe.
    */
-  registerBilling?: NonNullable<ClientRouteOpts['registerBilling']>
-  getClientOpenApiSpec?: NonNullable<ClientRouteOpts['getOpenApiSpec']>
+  registerBilling?: NonNullable<ClientRouteOpts["registerBilling"]>;
+  getClientOpenApiSpec?: NonNullable<ClientRouteOpts["getOpenApiSpec"]>;
 }): Hono<AppEnv> {
-  const app = new Hono<AppEnv>()
-  registerCorsMiddleware(app, corsOrigins)
+  const app = new Hono<AppEnv>();
+  registerCorsMiddleware(app, corsOrigins);
   // Publish the runtime before write protection and routes so session-cookie
   // TLS resolution and same-origin browser checks know whether the Deno
   // trusted-proxy path (honors X-Forwarded-Proto + Host) or the Workers
   // URL-derived path applies.
-  const resolvedRuntime = runtime ?? 'workers'
-  app.use('*', (c, next) => {
-    c.set('runtime', resolvedRuntime)
-    return next()
-  })
+  const resolvedRuntime = runtime ?? "workers";
+  app.use("*", (c, next) => {
+    c.set("runtime", resolvedRuntime);
+    return next();
+  });
   // Reject cross-origin credentialed writes on client/admin/install before any
   // cookie-authenticated route runs. Daemon JWT routes are outside these
   // prefixes and stay excluded. Mounted here so Deno/Workers registrations of
   // admin + install on the same app instance are covered. Passes the resolved
   // runtime so Deno proxy-style requests compare against the browser origin
   // (not the internal Unix-socket URL).
-  app.use('*', createBrowserWriteProtectionMiddleware(resolvedRuntime))
-  bindContextValue(app, 'db', db)
-  bindContextValue(app, 'daemonCellRegistry', daemonCellRegistry)
-  bindContextValue(app, 'queryCache', queryCache)
-  bindContextValue(app, 'serverMetricsStore', serverMetricsStore)
-  bindContextValue(app, 'executionLogStore', executionLogStore)
-  bindContextValue(app, 'emailQueue', emailQueue)
-  bindContextValue(app, 'commandQueue', commandQueue)
-  bindContextValue(app, 'emailFrom', emailFrom)
-  bindContextValue(app, 'baseUrl', baseUrl)
-  bindContextValue(app, 'dataEncryptionSecrets', dataEncryptionSecrets)
-  bindContextValue(app, 'secretsConfig', secretsConfig)
+  app.use("*", createBrowserWriteProtectionMiddleware(resolvedRuntime));
+  bindContextValue(app, "db", db);
+  bindContextValue(app, "daemonCellRegistry", daemonCellRegistry);
+  bindContextValue(app, "queryCache", queryCache);
+  bindContextValue(app, "serverMetricsStore", serverMetricsStore);
+  bindContextValue(app, "executionLogStore", executionLogStore);
+  bindContextValue(app, "emailQueue", emailQueue);
+  bindContextValue(app, "commandQueue", commandQueue);
+  bindContextValue(app, "emailFrom", emailFrom);
+  bindContextValue(app, "baseUrl", baseUrl);
+  bindContextValue(app, "dataEncryptionSecrets", dataEncryptionSecrets);
+  bindContextValue(app, "secretsConfig", secretsConfig);
   // Auth limiter must be set before registerClientRoutes — Deno previously
   // injected it too late (after client auth was already mounted).
-  bindContextValue(app, 'authRateLimiter', authRateLimiter)
+  bindContextValue(app, "authRateLimiter", authRateLimiter);
   if (getPlatformEnv || platformEnv) {
-    app.use('*', (c, next) => {
-      c.set('platformEnv', getPlatformEnv ? getPlatformEnv() : platformEnv)
-      return next()
-    })
+    app.use("*", (c, next) => {
+      c.set("platformEnv", getPlatformEnv ? getPlatformEnv() : platformEnv);
+      return next();
+    });
   }
-  app.get('/', (c) => c.text('TurboPanel'))
-  app.get(HEALTH_PATH, (c) => c.json(healthPayload(c.get('platformEnv'))))
+  app.get("/", (c) => c.text("TurboPanel"));
+  app.get(HEALTH_PATH, (c) => c.json(healthPayload(c.get("platformEnv"))));
   if (secrets) {
     registerClientRoutes(app, {
       secrets,
@@ -200,7 +204,7 @@ export function createApp({
       baseUrl,
       ...(registerBilling ? { registerBilling } : {}),
       ...(getClientOpenApiSpec ? { getOpenApiSpec: getClientOpenApiSpec } : {}),
-    })
+    });
   }
-  return app
+  return app;
 }

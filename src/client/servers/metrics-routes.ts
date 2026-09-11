@@ -114,6 +114,7 @@ export const FLEET_USAGE_LOOKBACK_MS = 10 * 60_000;
 
 /** Correlated round-trip budget for live lease start/stop (cheap daemon work). */
 const METRICS_LIVE_TIMEOUT_MS = 5_000;
+const METRICS_CAPABILITIES_TIMEOUT_MS = 15_000;
 
 async function authorizeServerRead(
   c: Parameters<typeof assertCanReadOr403>[0],
@@ -1175,6 +1176,107 @@ export function registerServerMetricsRoutes(
         requestId,
         serverId,
         kind: "metrics-live-stop",
+        resultStatus: "error",
+        error: message,
+      });
+      return c.json({ error: message }, 503);
+    }
+  });
+
+  /**
+   * Live capability discovery for the hardware-profile picker: sensor
+   * candidate pools with current readings, storage probes, NIC
+   * classification, and a `/proc` process-count probe. A correlated daemon
+   * round trip — never polled, never served from topology/history.
+   */
+  router.get("/servers/:id/metrics/capabilities", async (c) => {
+    const serverId = c.req.param("id");
+    const denied = await authorizeServerRead(c, serverId);
+    if (denied) return denied;
+
+    const db = getDb(c);
+    if (!db) return c.json({ error: "Database unavailable" }, 503);
+
+    const registry = getDaemonCellRegistry(c);
+    if (!registry) {
+      return c.json({ error: "Daemon cell registry unavailable" }, 503);
+    }
+    const records = await loadServerStatusRecords(db, registry, [serverId]);
+    if (!records[0]?.connected) {
+      return c.json({ error: "server_offline" }, 409);
+    }
+
+    const requestId = generateRequestId();
+    const envelope: DaemonOutboundEnvelope = {
+      kind: "metrics-capabilities-request",
+      deliveryId: generateDeliveryId(),
+      requestId,
+      at: new Date().toISOString(),
+    };
+    cellTrace("request-start", {
+      requestId,
+      serverId,
+      kind: "metrics-capabilities-request",
+    });
+
+    try {
+      const record = await registry
+        .getCell(serverId)
+        .createRequestAndWait(envelope, METRICS_CAPABILITIES_TIMEOUT_MS);
+      if (record.status === "expired") {
+        cellTrace("request-result", {
+          requestId,
+          serverId,
+          kind: "metrics-capabilities-request",
+          pendingStatus: record.status,
+          resultStatus: "timeout",
+        });
+        return c.json({ error: "timeout waiting for capabilities" }, 503);
+      }
+      if (record.status === "failed") {
+        const error = record.error ?? "failed to collect capabilities";
+        cellTrace("request-result", {
+          requestId,
+          serverId,
+          kind: "metrics-capabilities-request",
+          pendingStatus: record.status,
+          resultStatus: "failed",
+          error,
+        });
+        return c.json({ error }, 500);
+      }
+      const result = record.result;
+      const capabilities =
+        result && typeof result === "object" && !Array.isArray(result)
+          ? (result as { capabilities?: unknown }).capabilities
+          : undefined;
+      if (
+        !capabilities || typeof capabilities !== "object" ||
+        Array.isArray(capabilities)
+      ) {
+        cellTrace("request-result", {
+          requestId,
+          serverId,
+          kind: "metrics-capabilities-request",
+          pendingStatus: record.status,
+          resultStatus: "invalid",
+        });
+        return c.json({ error: "invalid capabilities payload" }, 500);
+      }
+      cellTrace("request-result", {
+        requestId,
+        serverId,
+        kind: "metrics-capabilities-request",
+        pendingStatus: record.status,
+        resultStatus: "done",
+      });
+      return c.json({ ok: true, capabilities });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      cellTrace("request-result", {
+        requestId,
+        serverId,
+        kind: "metrics-capabilities-request",
         resultStatus: "error",
         error: message,
       });

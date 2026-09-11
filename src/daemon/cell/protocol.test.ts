@@ -10,6 +10,7 @@ import {
   type DaemonMessage,
   generateDeliveryId,
   generateRequestId,
+  MAX_DAEMON_WS_CAPABILITIES_BYTES,
   MAX_DAEMON_WS_DEFAULT_BRANCH_CHARS,
   MAX_DAEMON_WS_ERROR_CHARS,
   MAX_DAEMON_WS_FABRIC_PATH_ENTRIES,
@@ -344,6 +345,18 @@ it("outboundEnvelopeToWireMessage maps outbound kinds", () => {
     outboundEnvelopeToWireMessage({ ...base, kind: "addresses-request" }),
     {
       type: "addresses-request",
+      id: "req-1",
+      at: base.at,
+    },
+  );
+
+  assertEquals(
+    outboundEnvelopeToWireMessage({
+      ...base,
+      kind: "metrics-capabilities-request",
+    }),
+    {
+      type: "metrics-capabilities-request",
       id: "req-1",
       at: base.at,
     },
@@ -1370,12 +1383,14 @@ it("metrics live/sensor result kinds are on the inbound allowlist", () => {
   const allowed = DAEMON_INBOUND_ALLOWED as ReadonlySet<string>;
   assertEquals(allowed.has("metrics-live-start-result"), true);
   assertEquals(allowed.has("metrics-live-stop-result"), true);
+  assertEquals(allowed.has("metrics-capabilities-result"), true);
   assertEquals(allowed.has("topology-overrides-update-result"), true);
   assertEquals(allowed.has("capability-plan-update-result"), true);
   assertEquals(allowed.has("capability-plan-clear-result"), true);
   // Requests remain outbound-only.
   assertEquals(allowed.has("metrics-live-start"), false);
   assertEquals(allowed.has("metrics-live-stop"), false);
+  assertEquals(allowed.has("metrics-capabilities-request"), false);
   assertEquals(allowed.has("topology-overrides-update"), false);
   assertEquals(allowed.has("capability-plan-update"), false);
   assertEquals(allowed.has("capability-plan-clear"), false);
@@ -1574,6 +1589,23 @@ it("wire mappings round-trip metrics live/sensor kinds", () => {
   );
   assertEquals(
     wireMessageToInboundEnvelope({
+      type: "metrics-capabilities-result",
+      id: "req-m",
+      ok: true,
+      capabilities: { sensors: {} },
+      at: VALID_AT,
+    }),
+    {
+      kind: "metrics-capabilities-result",
+      requestId: "req-m",
+      at: VALID_AT,
+      ok: true,
+      capabilities: { sensors: {} },
+      error: undefined,
+    },
+  );
+  assertEquals(
+    wireMessageToInboundEnvelope({
       type: "topology-overrides-update-result",
       id: "req-m",
       ok: true,
@@ -1627,6 +1659,55 @@ it("validateDaemonInboundEnvelope accepts a metrics-live-start-result", () => {
     ok: true,
   });
   assertEquals(okResult.ok, true);
+});
+
+it("validateDaemonInboundFrame validates metrics-capabilities-result", () => {
+  const ok = validateDaemonInboundFrame(
+    JSON.stringify({
+      type: "metrics-capabilities-result",
+      id: "req-1",
+      ok: true,
+      capabilities: { sensors: { cpuTemperature: [] } },
+      at: VALID_AT,
+    }),
+  );
+  assertEquals(ok.ok, true);
+
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: "metrics-capabilities-result",
+        id: "req-1",
+        ok: true,
+        at: VALID_AT,
+      }),
+    ).ok,
+    false,
+  );
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: "metrics-capabilities-result",
+        id: "req-1",
+        ok: false,
+        error: "collect failed",
+        at: VALID_AT,
+      }),
+    ).ok,
+    true,
+  );
+  assertEquals(
+    validateDaemonInboundFrame(
+      JSON.stringify({
+        type: "metrics-capabilities-result",
+        id: "req-1",
+        ok: true,
+        capabilities: { pad: "x".repeat(MAX_DAEMON_WS_CAPABILITIES_BYTES + 1) },
+        at: VALID_AT,
+      }),
+    ).ok,
+    false,
+  );
 });
 
 it("validateDaemonInboundFrame accepts a topology-report", () => {

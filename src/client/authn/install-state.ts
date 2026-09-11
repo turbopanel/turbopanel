@@ -495,9 +495,9 @@ export async function getInstallStatus(
 }
 
 /**
- * Whether this instance holds a Stripe key. Presence-only — the key itself is
- * never exposed. The console hides the billing area wholesale when false, so
- * self-hosted needs no second probe.
+ * Whether customer billing is operational (both Stripe secrets). Presence-only
+ * — the keys themselves are never exposed. The console hides the billing area
+ * wholesale when false, so self-hosted needs no second probe.
  */
 type BillingPresence = {
   billingEnabled: boolean;
@@ -526,7 +526,7 @@ export async function getClientPublicStatus(
   runtime: "deno" | "workers",
   envOverride?: SignupEnvOverride,
   platformEnv: Record<string, string | undefined> = {},
-  /** `c.get('billingConfig') !== undefined` at the route; false in tests that omit it. */
+  /** `isCustomerBillingOperational(c.get('billingConfig'))` at the route; false in tests that omit it. */
   billingEnabled = false,
 ): Promise<ClientPublicStatus | null> {
   if (runtime === "workers") {
@@ -563,7 +563,9 @@ export function validateOrganizationName(name: string): string | null {
   const normalized = normalizeDisplayName(name);
   const length = displayNameCodePointLength(normalized);
   if (length < 1 || length > DISPLAY_NAME_MAX_LENGTH) {
-    return `Organization name must be 1–${String(DISPLAY_NAME_MAX_LENGTH)} characters`;
+    return `Organization name must be 1–${
+      String(DISPLAY_NAME_MAX_LENGTH)
+    } characters`;
   }
   if (!isValidDisplayName(normalized)) {
     return "Organization name cannot contain control characters";

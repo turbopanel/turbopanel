@@ -86,6 +86,10 @@ export function deriveInboundOutcome(
         ok: inbound.ok,
         error: inbound.error,
       });
+    case "metrics-capabilities-result":
+      return inboundOutcomeFromOk(inbound.ok, inbound.error, {
+        capabilities: inbound.capabilities,
+      });
     default:
       return null;
   }

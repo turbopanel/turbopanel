@@ -209,6 +209,34 @@ test("deriveInboundOutcome maps ok-result kinds", () => {
   }
 });
 
+test("deriveInboundOutcome maps metrics-capabilities-result", () => {
+  const capabilities = { sensors: { cpuTemperature: [] } };
+  assertEquals(
+    deriveInboundOutcome({
+      kind: "metrics-capabilities-result",
+      requestId: REQUEST_ID,
+      at: AT,
+      ok: true,
+      capabilities,
+    }),
+    { status: "done", result: { capabilities } },
+  );
+  assertEquals(
+    deriveInboundOutcome({
+      kind: "metrics-capabilities-result",
+      requestId: REQUEST_ID,
+      at: AT,
+      ok: false,
+      error: "collect failed",
+    }),
+    {
+      status: "failed",
+      result: { capabilities: undefined },
+      error: "collect failed",
+    },
+  );
+});
+
 test("deriveInboundOutcome returns null for command-ack", () => {
   assertEquals(
     deriveInboundOutcome({

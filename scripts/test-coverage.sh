@@ -258,6 +258,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/webhook/billing/stripe.hostfree.test.ts \
   src/webhook/billing/stripe-projection.hostfree.test.ts \
   src/client/billing/mutations.hostfree.test.ts \
+  src/lib/billing/pending-checkout.hostfree.test.ts \
   src/lib/billing/seat-increase.hostfree.test.ts \
   src/client/storage/serialize.test.ts \
   src/client/storage/routes-helpers.test.ts \

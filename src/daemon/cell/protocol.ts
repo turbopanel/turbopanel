@@ -218,6 +218,15 @@ export type DaemonMessage =
     error?: string;
     at: string;
   }
+  | { type: "metrics-capabilities-request"; id: string; at: string }
+  | {
+    type: "metrics-capabilities-result";
+    id: string;
+    ok: boolean;
+    capabilities?: Record<string, unknown>;
+    error?: string;
+    at: string;
+  }
   | {
     type: "topology-overrides-update";
     id: string;
@@ -387,6 +396,7 @@ export const DAEMON_INBOUND_ALLOWED = new Set(
     "container-logs-result",
     "metrics-live-start-result",
     "metrics-live-stop-result",
+    "metrics-capabilities-result",
     "topology-overrides-update-result",
     "capability-plan-update-result",
     "capability-plan-clear-result",
@@ -415,6 +425,9 @@ export const MAX_DAEMON_WS_ERROR_CHARS = 4 * 1024;
 
 /** Max characters for `managed-logs-result` / `container-logs-result.logs`. */
 export const MAX_DAEMON_WS_LOGS_CHARS = 200 * 1024;
+
+/** Max UTF-8 bytes of `metrics-capabilities-result.capabilities` JSON. */
+export const MAX_DAEMON_WS_CAPABILITIES_BYTES = 96 * 1024;
 
 /**
  * Max UTF-8 bytes across every file in one `repo-read-result`.
@@ -750,6 +763,26 @@ function validateOkResultFields(
   return null;
 }
 
+function validateCapabilitiesResultFields(
+  record: Record<string, unknown>,
+): string | null {
+  const base = validateOkResultFields(record);
+  if (base) return base;
+  const errorIssue = validateOptionalError(record.error);
+  if (errorIssue) return errorIssue;
+  if (record.capabilities === undefined) {
+    return record.ok ? "missing capabilities" : null;
+  }
+  if (!isRecord(record.capabilities)) return "invalid capabilities";
+  if (
+    utf8ByteLength(JSON.stringify(record.capabilities)) >
+      MAX_DAEMON_WS_CAPABILITIES_BYTES
+  ) {
+    return "capabilities exceed max size";
+  }
+  return null;
+}
+
 function validateCommandAckFields(
   record: Record<string, unknown>,
 ): string | null {
@@ -845,6 +878,8 @@ function validateInboundMessageFields(
     case "capability-plan-update-result":
     case "capability-plan-clear-result":
       return validateOkResultFields(record);
+    case "metrics-capabilities-result":
+      return validateCapabilitiesResultFields(record);
     case "command-ack":
       return validateCommandAckFields(record);
     case "command-outcome":
@@ -910,6 +945,20 @@ function validateCommandAckEnvelope(
   return null;
 }
 
+function validateCapabilitiesEnvelope(
+  inbound: Extract<DaemonInboundEnvelope, { kind: "metrics-capabilities-result" }>,
+): string | null {
+  if (inbound.capabilities !== undefined) {
+    if (
+      utf8ByteLength(JSON.stringify(inbound.capabilities)) >
+        MAX_DAEMON_WS_CAPABILITIES_BYTES
+    ) {
+      return "capabilities exceed max size";
+    }
+  }
+  return validateOptionalError(inbound.error);
+}
+
 function validateInboundEnvelopeKind(
   inbound: DaemonInboundEnvelope,
 ): string | null {
@@ -934,7 +983,10 @@ function validateInboundEnvelopeKind(
     case "metrics-live-stop-result":
     case "topology-overrides-update-result":
     case "capability-plan-update-result":
+    case "capability-plan-clear-result":
       return validateOptionalError(inbound.error);
+    case "metrics-capabilities-result":
+      return validateCapabilitiesEnvelope(inbound);
     case "command-ack":
       return validateCommandAckEnvelope(inbound);
     case "addresses-result":
@@ -1039,6 +1091,7 @@ export type DaemonOutboundEnvelope =
     expiresAt: string;
   })
   | (OutboundEnvelopeBase & { kind: "metrics-live-stop"; leaseId: string })
+  | (OutboundEnvelopeBase & { kind: "metrics-capabilities-request" })
   | (OutboundEnvelopeBase & {
     kind: "topology-overrides-update";
     overrides: TopologyOverridesUpdatePayload;
@@ -1149,6 +1202,14 @@ export type DaemonInboundEnvelope =
     requestId: string;
     at: string;
     ok: boolean;
+    error?: string;
+  }
+  | {
+    kind: "metrics-capabilities-result";
+    requestId: string;
+    at: string;
+    ok: boolean;
+    capabilities?: Record<string, unknown>;
     error?: string;
   }
   | {
@@ -1305,6 +1366,15 @@ export function wireMessageToInboundEnvelope(
         ok: msg.ok,
         error: msg.error,
       };
+    case "metrics-capabilities-result":
+      return {
+        kind: "metrics-capabilities-result",
+        requestId: msg.id,
+        at: msg.at,
+        ok: msg.ok,
+        capabilities: msg.capabilities,
+        error: msg.error,
+      };
     case "topology-overrides-update-result":
       return {
         kind: "topology-overrides-update-result",
@@ -1436,6 +1506,12 @@ export function outboundEnvelopeToWireMessage(
   switch (env.kind) {
     case "addresses-request":
       return { type: "addresses-request", id: env.requestId, at: env.at };
+    case "metrics-capabilities-request":
+      return {
+        type: "metrics-capabilities-request",
+        id: env.requestId,
+        at: env.at,
+      };
     case "managed-logs-request":
       return {
         type: "managed-logs-request",
