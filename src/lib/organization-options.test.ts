@@ -188,3 +188,28 @@ test('parseOrganizationOptions leaves metricsCapabilityPlan unset when absent', 
   const options = parseOrganizationOptions({})
   assertEquals(options.metricsCapabilityPlan, undefined)
 })
+
+test('parseOrganizationOptions reads a valid docker addressing block', () => {
+  const options = parseOrganizationOptions({
+    docker: {
+      addressPools: [{ base: '10.200.0.0/16', size: 24 }],
+      defaultBridgeCidr: '172.17.0.1/16',
+    },
+  })
+  assertEquals(options.docker, {
+    addressPools: [{ base: '10.200.0.0/16', size: 24 }],
+    defaultBridgeCidr: '172.17.0.1/16',
+  })
+})
+
+test('parseOrganizationOptions omits docker when absent, empty or fully invalid', () => {
+  assertEquals(parseOrganizationOptions({}).docker, undefined)
+  assertEquals(parseOrganizationOptions({ docker: {} }).docker, undefined)
+  assertEquals(parseOrganizationOptions({ docker: 'pools' }).docker, undefined)
+  assertEquals(
+    parseOrganizationOptions({
+      docker: { addressPools: [{ base: 'bad', size: 24 }], defaultBridgeCidr: 'bad' },
+    }).docker,
+    undefined,
+  )
+})

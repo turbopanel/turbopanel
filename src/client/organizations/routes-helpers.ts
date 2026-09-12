@@ -29,6 +29,13 @@ import {
   type ManagedSslMode,
   resolveManagedSslMode,
 } from "../../lib/managed/ssl.ts";
+import {
+  type DockerAddressingRejection,
+  DOCKER_ADDRESS_POOLS_MAX,
+  isValidDefaultBridgeCidr,
+  type OrganizationDockerNetworking,
+  validateDockerAddressPools,
+} from "../../lib/docker-address-pools.ts";
 
 /** Matches {@link NEW_ORGANIZATION_NAME} in authn/install-state.ts. */
 const NEW_ORGANIZATION_DISPLAY_NAME = "New Organization";
@@ -182,6 +189,103 @@ export function managedDefaultsPutResponse(
   return {
     ok: true as const,
     ...managedDefaultsGetResponse(defaults),
+  };
+}
+
+const DOCKER_ADDRESSING_MESSAGE: Record<DockerAddressingRejection, string> = {
+  address_pools_invalid: "Invalid addressPools",
+  address_pools_too_many:
+    `addressPools may hold at most ${DOCKER_ADDRESS_POOLS_MAX} entries`,
+  address_pool_base_invalid: "Invalid addressPools base",
+  address_pool_size_invalid:
+    "Invalid addressPools size (integer between the base prefix and /30)",
+  address_pools_overlap: "addressPools entries overlap each other",
+  default_bridge_cidr_invalid:
+    "Invalid defaultBridgeCidr (host address with prefix, e.g. 172.17.0.1/16)",
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parse a `PUT /organizations/:id/docker-networking` body. The whole `docker`
+ * object is replaced — `addressPools` is a list, so replace-all is the only
+ * sane semantics. `null` on a key (or an empty list) clears it; when nothing
+ * is left the stored key is removed (`value: null`). Invalid input is
+ * rejected, never dropped: a silently ignored pool would report success while
+ * dockerd keeps its built-in ranges.
+ */
+export function parseDockerNetworkingPatch(
+  body: unknown,
+):
+  | { ok: true; value: OrganizationDockerNetworking | null }
+  | OrganizationRouteValidationError {
+  if (!isRecord(body)) return { ok: false, error: "Invalid request", status: 400 };
+  if (!("addressPools" in body) && !("defaultBridgeCidr" in body)) {
+    return { ok: false, error: "Invalid request", status: 400 };
+  }
+  const value: OrganizationDockerNetworking = {};
+  const pools = parseDockerAddressPoolsField(body.addressPools);
+  if (!pools.ok) return pools;
+  if (pools.value) value.addressPools = pools.value;
+  const bridge = parseDefaultBridgeCidrField(body.defaultBridgeCidr);
+  if (!bridge.ok) return bridge;
+  if (bridge.value) value.defaultBridgeCidr = bridge.value;
+  return { ok: true, value: Object.keys(value).length > 0 ? value : null };
+}
+
+/** `addressPools` field: absent/`null`/empty list → `null` (cleared). */
+function parseDockerAddressPoolsField(
+  raw: unknown,
+):
+  | { ok: true; value: OrganizationDockerNetworking["addressPools"] | null }
+  | OrganizationRouteValidationError {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  const pools = validateDockerAddressPools(raw);
+  if (!pools.ok) {
+    const suffix = pools.index === undefined ? "" : ` (entry ${pools.index})`;
+    return {
+      ok: false,
+      error: `${DOCKER_ADDRESSING_MESSAGE[pools.reason]}${suffix}`,
+      status: 400,
+    };
+  }
+  return { ok: true, value: pools.pools.length > 0 ? pools.pools : null };
+}
+
+/** `defaultBridgeCidr` field: absent/`null` → `null` (cleared). */
+function parseDefaultBridgeCidrField(
+  raw: unknown,
+): { ok: true; value: string | null } | OrganizationRouteValidationError {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  if (!isValidDefaultBridgeCidr(raw)) {
+    return {
+      ok: false,
+      error: DOCKER_ADDRESSING_MESSAGE.default_bridge_cidr_invalid,
+      status: 400,
+    };
+  }
+  return { ok: true, value: raw.trim() };
+}
+
+export function dockerNetworkingGetResponse(
+  docker: OrganizationDockerNetworking,
+) {
+  return {
+    /** Configured dockerd `default-address-pools`; empty = Docker built-ins. */
+    addressPools: (docker.addressPools ?? []).map((pool) => ({ ...pool })),
+    /** Configured dockerd `bip`; `null` = Docker's built-in bridge. */
+    defaultBridgeCidr: docker.defaultBridgeCidr ?? null,
+  };
+}
+
+export function dockerNetworkingPutResponse(
+  docker: OrganizationDockerNetworking,
+) {
+  return {
+    ok: true as const,
+    ...dockerNetworkingGetResponse(docker),
   };
 }
 

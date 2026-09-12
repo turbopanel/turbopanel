@@ -1,5 +1,10 @@
 import { HOSTNAME_MAX_LENGTH, isValidHostname } from "./hostname.ts";
-import { isValidCidr, isValidIpAddress } from "../ip-address.ts";
+import {
+  addressInCidr,
+  cidrContains,
+  isValidCidr,
+  isValidIpAddress,
+} from "../ip-address.ts";
 import { ALLOWED_PRINCIPAL_SHELLS } from "../principal-options.ts";
 import { isCanonicalSshPublicKey } from "../ssh-public-key.ts";
 import {
@@ -1454,6 +1459,21 @@ export type EnvironmentDeployFabricNetwork = {
   gateway?: string;
 };
 
+/**
+ * Addressing for one operator-registered external Docker network
+ * (`network(kind='docker')` row). `name` matches an entry of
+ * `dockerExternalNetworks`; every other key is optional and is only applied
+ * when the daemon *creates* the network — Docker cannot re-range an existing
+ * one.
+ */
+export type EnvironmentDeployDockerNetwork = {
+  name: string;
+  subnet?: string;
+  ipRange?: string;
+  gateway?: string;
+  mtu?: number;
+};
+
 export type EnvironmentDeployCommandPayload = {
   environmentId: string;
   projectId: string;
@@ -1518,6 +1538,14 @@ export type EnvironmentDeployCommandPayload = {
   hostingIngressNetwork?: string;
   /** External Docker networks referenced in compose — ensured on the host before compose up. */
   dockerExternalNetworks?: string[];
+  /**
+   * Additive sibling of `dockerExternalNetworks`: the addressing the daemon
+   * hands `docker network create` for the networks that carry any. Names
+   * only ever reference `dockerExternalNetworks` entries (an unknown name is
+   * dropped at parse time); a name with no entry here is created bare, so an
+   * older daemon that ignores this field keeps deploying exactly as before.
+   */
+  dockerNetworkAddressing?: EnvironmentDeployDockerNetwork[];
   /**
    * Routed TurboFabric Docker bridges (`tpn_*`) this host participates in for
    * this environment's spanning networks. The daemon self-ensures these before
@@ -2878,6 +2906,79 @@ function parseDeployDockerExternalNetworks(
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }
 
+function parseDeployDockerNetworkAddressingEntry(
+  value: unknown,
+): EnvironmentDeployDockerNetwork {
+  if (!isRecord(value)) {
+    throw new TypeError("dockerNetworkAddressing must be an array of objects");
+  }
+  const name = value.name;
+  if (!isString(name) || !DOCKER_EXTERNAL_NETWORK_NAME_RE.test(name.trim())) {
+    throw new Error("Invalid dockerNetworkAddressing name");
+  }
+  const entry: EnvironmentDeployDockerNetwork = { name: name.trim() };
+  if (value.subnet !== undefined) {
+    if (!isString(value.subnet) || !isValidCidr(value.subnet.trim())) {
+      throw new Error("Invalid dockerNetworkAddressing subnet");
+    }
+    entry.subnet = value.subnet.trim();
+  }
+  if (value.ipRange !== undefined) {
+    if (
+      !isString(value.ipRange) || !isValidCidr(value.ipRange.trim()) ||
+      !entry.subnet || !cidrContains(entry.subnet, value.ipRange.trim())
+    ) {
+      throw new Error("Invalid dockerNetworkAddressing ipRange");
+    }
+    entry.ipRange = value.ipRange.trim();
+  }
+  if (value.gateway !== undefined) {
+    if (
+      !isString(value.gateway) || !isValidIpAddress(value.gateway) ||
+      !entry.subnet || !addressInCidr(value.gateway, entry.subnet)
+    ) {
+      throw new Error("Invalid dockerNetworkAddressing gateway");
+    }
+    entry.gateway = value.gateway;
+  }
+  if (value.mtu !== undefined) {
+    if (
+      typeof value.mtu !== "number" ||
+      !Number.isInteger(value.mtu) ||
+      value.mtu < FABRIC_MTU_MIN ||
+      value.mtu > FABRIC_MTU_MAX
+    ) {
+      throw new Error("Invalid dockerNetworkAddressing mtu");
+    }
+    entry.mtu = value.mtu;
+  }
+  return entry;
+}
+
+/**
+ * Same normalization as {@link parseDeployDockerExternalNetworks}: deduped by
+ * name (first entry wins) and sorted with `localeCompare`. An entry naming a
+ * network that is not in `dockerExternalNetworks` is dropped rather than
+ * rejected — addressing without a network to apply it to is inert.
+ */
+function parseDeployDockerNetworkAddressing(
+  value: unknown,
+  externalNetworks: readonly string[] | undefined,
+): EnvironmentDeployDockerNetwork[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("dockerNetworkAddressing must be an array");
+  }
+  const known = new Set(externalNetworks ?? []);
+  const byName = new Map<string, EnvironmentDeployDockerNetwork>();
+  for (const raw of value) {
+    const entry = parseDeployDockerNetworkAddressingEntry(raw);
+    if (!known.has(entry.name) || byName.has(entry.name)) continue;
+    byName.set(entry.name, entry);
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function parseDeployFabricNetworkEntry(
   value: unknown,
 ): EnvironmentDeployFabricNetwork {
@@ -3256,6 +3357,9 @@ export function parseEnvironmentDeployPayload(
   );
   const hostings = parseDeployHostings(value.hostings);
   const hostingIngress = parseDeployHostingIngress(value.hostingIngress);
+  const dockerExternalNetworks = parseDeployDockerExternalNetworks(
+    value.dockerExternalNetworks,
+  );
   return {
     ...strings,
     composeFiles: parseDeployComposeFiles(value.composeFiles),
@@ -3273,8 +3377,10 @@ export function parseEnvironmentDeployPayload(
         hostings.length,
         hostingIngress,
       ),
-      dockerExternalNetworks: parseDeployDockerExternalNetworks(
-        value.dockerExternalNetworks,
+      dockerExternalNetworks,
+      dockerNetworkAddressing: parseDeployDockerNetworkAddressing(
+        value.dockerNetworkAddressing,
+        dockerExternalNetworks,
       ),
       fabricNetworks: parseDeployFabricNetworks(value.fabricNetworks),
       managedNetworkServices,

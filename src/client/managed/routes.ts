@@ -885,6 +885,12 @@ async function resolveReplicaPlacement(
  * Resolves whether an existing replica may be converted to `failover`.
  * Returns `false` (not a Response) when the transport disqualifies it so the
  * caller can surface the class-conversion error instead.
+ *
+ * Resolver errors (`private_path_unavailable`, `private_family_mismatch`,
+ * `failover_requires_trusted_datacenter`) are surfaced as their own 422 via
+ * `privateEndpointErrorResponse` — never collapsed into
+ * `failover_replica_requires_datacenter_transport`, because the operator
+ * needs the specific reason (e.g. "mark the shared datacenter trusted").
  */
 async function resolveFailoverConversionPlacement(
   c: Context<AppEnv>,

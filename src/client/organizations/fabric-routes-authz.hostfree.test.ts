@@ -239,7 +239,14 @@ async function buildFabricEnableApp(opts: {
   enableEmptyOrg?: boolean;
   /** Persist a real org server so enable inserts a relay row. */
   enableWithServers?: boolean;
-}): Promise<{ app: Hono<AppEnv>; cookie: string }> {
+  /** Org server ids to report (default: one, `serverId`). */
+  serverIds?: readonly string[];
+}): Promise<{
+  app: Hono<AppEnv>;
+  cookie: string;
+  fabrics: Array<{ id: string; organizationId: string; cidr: string; options: unknown }>;
+  relays: Array<Record<string, unknown>>;
+}> {
   const secretsConfig = parseTestSecretsConfig("deno");
   const secrets = await deriveSecretsConfig(secretsConfig, "session-signing");
   const token = crypto.randomUUID();
@@ -262,6 +269,11 @@ async function buildFabricEnableApp(opts: {
       insert: (table: unknown) => unknown;
     }
   ).insert.bind(authDb);
+  const origUpdate = (
+    authDb as unknown as {
+      update: (table: unknown) => unknown;
+    }
+  ).update.bind(authDb);
 
   const persistFabric = opts.enableEmptyOrg || opts.enableWithServers;
   const fabrics: Array<{
@@ -302,7 +314,10 @@ async function buildFabricEnableApp(opts: {
           return { where: () => thenableRows(relays) };
         }
         if (opts.enableWithServers && table === server) {
-          return { where: () => thenableRows([{ id: serverId }]) };
+          return {
+            where: () =>
+              thenableRows((opts.serverIds ?? [serverId]).map((id) => ({ id }))),
+          };
         }
         if (
           persistFabric &&
@@ -356,6 +371,43 @@ async function buildFabricEnableApp(opts: {
       }
       return origInsert(table);
     },
+    update: (table: unknown) => {
+      if (persistFabric && table === fabric) {
+        return {
+          set: (patch: Record<string, unknown>) => ({
+            where: () => ({
+              returning: () => {
+                for (const row of fabrics) {
+                  if ("options" in patch) row.options = patch.options;
+                }
+                return Promise.resolve(
+                  fabrics.map((row) => ({
+                    id: row.id,
+                    organizationId: row.organizationId,
+                    cidr: row.cidr,
+                    options: row.options,
+                  })),
+                );
+              },
+            }),
+          }),
+        };
+      }
+      return origUpdate(table);
+    },
+    // Snapshot + restore the in-memory fabric/relay stores so a throw inside
+    // `enableOrganizationFabric` rolls back exactly as Postgres would.
+    transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+      const fabricSnapshot = fabrics.map((row) => ({ ...row }));
+      const relaySnapshot = relays.map((row) => ({ ...row }));
+      try {
+        return await fn(db);
+      } catch (err) {
+        fabrics.splice(0, fabrics.length, ...fabricSnapshot);
+        relays.splice(0, relays.length, ...relaySnapshot);
+        throw err;
+      }
+    },
   }) as unknown as Db;
 
   const signed = await buildSignedCookie(token, secrets);
@@ -372,7 +424,7 @@ async function buildFabricEnableApp(opts: {
     runtime: "deno",
     signupEnvOverride: undefined,
   });
-  return { app, cookie };
+  return { app, cookie, fabrics, relays };
 }
 
 test("PUT /fabric enabled:true returns 409 when host CIDR pool is exhausted", async () => {
@@ -412,6 +464,83 @@ test("PUT /fabric enabled:true returns settings for an org with no servers", asy
   assertEquals(body.fabric.mtu, 1420);
   assertEquals(typeof body.fabric.id, "string");
   assertEquals(body.relays, []);
+});
+
+const secondServerId = "33333333-3333-4333-8333-333333333333";
+
+test("PUT /fabric enabled:true carves every relay prefix from a custom containerPool", async () => {
+  const { app, cookie, fabrics, relays } = await buildFabricEnableApp({
+    enableWithServers: true,
+    serverIds: [serverId, secondServerId],
+  });
+  const res = await app.request(`/organizations/${orgId}/fabric`, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      Cookie: cookie,
+    },
+    body: JSON.stringify({ enabled: true, containerPool: "10.64.0.0/15" }),
+  });
+  assertEquals(res.status, 200);
+  const body = await res.json() as {
+    enabled: boolean;
+    fabric: { containerPool: string };
+    relays: Array<{ serverId: string; prefix: string }>;
+  };
+  assertEquals(body.enabled, true);
+  assertEquals(body.fabric.containerPool, "10.64.0.0/15");
+  assertEquals(fabrics.length, 1);
+  assertEquals(
+    relays.map((row) => row.prefix).sort(),
+    ["10.64.0.0/16", "10.65.0.0/16"],
+  );
+});
+
+test("PUT /fabric enabled:true returns 409 for a containerPool too small for the org's servers and leaves no fabric row", async () => {
+  // Two servers need two relay /16s; a /16 pool fits exactly one, and the
+  // refused enable must not persist the fabric row it started with.
+  const { app, cookie, fabrics, relays } = await buildFabricEnableApp({
+    enableWithServers: true,
+    serverIds: [serverId, secondServerId],
+  });
+  const res = await app.request(`/organizations/${orgId}/fabric`, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      Cookie: cookie,
+    },
+    body: JSON.stringify({ enabled: true, containerPool: "10.64.0.0/16" }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), { error: "fabric_prefix_pool_exhausted" });
+  assertEquals(fabrics, []);
+  assertEquals(relays, []);
+
+  const get = await app.request(`/organizations/${orgId}/fabric`, {
+    headers: { Cookie: cookie },
+  });
+  assertEquals(await get.json(), { enabled: false, relays: [] });
+});
+
+test("PUT /fabric enabled:true refuses a containerPool the auto-picked host range lands in without enabling", async () => {
+  const { app, cookie, fabrics } = await buildFabricEnableApp({
+    enableWithServers: true,
+  });
+  const res = await app.request(`/organizations/${orgId}/fabric`, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      Cookie: cookie,
+    },
+    body: JSON.stringify({ enabled: true, containerPool: "10.250.0.0/16" }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_fabric",
+    cidr: "10.250.0.0/16",
+    conflictingCidr: "10.250.0.0/16",
+  });
+  assertEquals(fabrics, []);
 });
 
 test("GET /fabric returns 404 when the organization row is missing", async () => {
@@ -985,4 +1114,57 @@ test("PUT /fabric enabled:true inserts a relay for an org server", async () => {
   assertEquals(body.fabric.cidr, "10.250.0.0/16");
   assertEquals(body.relays.length, 1);
   assertEquals(body.relays[0]?.serverId, serverId);
+});
+
+test("PUT /fabric containerPool: 409 fabric_container_pool_in_use when a relay prefix falls outside, 200 otherwise", async () => {
+  const { app, cookie } = await buildFabricEnableApp({
+    enableWithServers: true,
+  });
+  const put = (body: Record<string, unknown>) =>
+    app.request(`/organizations/${orgId}/fabric`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify(body),
+    });
+
+  // First enable allocates the relay's /16 out of the default pool.
+  const enabled = await put({ enabled: true });
+  assertEquals(enabled.status, 200);
+  const enabledBody = await enabled.json() as {
+    fabric: { containerPool: string };
+    relays: Array<{ prefix: string }>;
+  };
+  assertEquals(enabledBody.fabric.containerPool, "10.192.0.0/12");
+  assertEquals(enabledBody.relays[0]?.prefix, "10.192.0.0/16");
+
+  // A pool that would orphan that prefix is refused — nothing renumbers.
+  const orphaning = await put({ enabled: true, containerPool: "10.64.0.0/10" });
+  assertEquals(orphaning.status, 409);
+  assertEquals(await orphaning.json(), {
+    error: "fabric_container_pool_in_use",
+    containerPool: "10.64.0.0/10",
+    prefix: "10.192.0.0/16",
+    serverId,
+  });
+
+  // A pool overlapping the tp0 host range is a registry collision.
+  const hostHit = await put({ enabled: true, containerPool: "10.250.0.0/16" });
+  assertEquals(hostHit.status, 409);
+  assertEquals((await hostHit.json() as { error: string }).error, "cidr_overlaps_fabric");
+
+  // Narrowing around the allocated prefix is fine and lands in fabric.options.
+  const narrowed = await put({ enabled: true, containerPool: "10.192.0.0/13" });
+  assertEquals(narrowed.status, 200);
+  const narrowedBody = await narrowed.json() as {
+    fabric: { containerPool: string; allowRelay: boolean };
+  };
+  assertEquals(narrowedBody.fabric.containerPool, "10.192.0.0/13");
+  assertEquals(narrowedBody.fabric.allowRelay, false);
+
+  const badBody = await put({ enabled: true, containerPool: "10.192.0.0/20" });
+  assertEquals(badBody.status, 400);
+  assertEquals(await badBody.json(), { error: "Invalid containerPool" });
 });

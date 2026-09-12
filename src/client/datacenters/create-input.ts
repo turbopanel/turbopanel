@@ -1,5 +1,9 @@
 import { buildSeededDatacenterMetadata } from '../../lib/datacenter-metadata.ts'
-import type { parseDatacenterOptions } from '../../lib/datacenter-options.ts'
+import {
+  type DatacenterPolicy,
+  type parseDatacenterOptions,
+  resolveDatacenterPolicy,
+} from '../../lib/datacenter-options.ts'
 import { suggestDatacenterDisplayNameFromGeo } from '../../lib/datacenter-name-suggestions.ts'
 import { parseServerGeo } from '../../lib/geo/server-geo.ts'
 import {
@@ -220,6 +224,20 @@ export function attachPrivateCidrs<T extends { id: string }>(
   return rows.map((row) => ({
     ...row,
     privateCidrs: cidrsByDc.get(row.id) ?? [],
+  }))
+}
+
+/**
+ * Surface the effective routing policy (`priority`, `trusted`) beside the raw
+ * `options` so clients never re-derive the defaults. Storage-only for now — the
+ * ladder does not read these yet.
+ */
+export function attachEffectivePolicy<T extends { options: unknown }>(
+  rows: readonly T[],
+): Array<T & DatacenterPolicy> {
+  return rows.map((row) => ({
+    ...row,
+    ...resolveDatacenterPolicy(row.options),
   }))
 }
 

@@ -3,6 +3,7 @@ import {
   addressInCidr,
   alignedNetworkCidr,
   bigIntToIp,
+  cidrContains,
   cidrHostRange,
   cidrsOverlap,
   cidrVersion,
@@ -73,6 +74,60 @@ test("cidrsOverlap detects intersecting same-family ranges", () => {
   assertEquals(cidrsOverlap("203.0.113.0/24", "2001:db8::/32"), false);
   assertEquals(cidrsOverlap("2001:db8::/32", "2001:db8::/48"), true);
   assertEquals(cidrsOverlap("not-a-cidr", "203.0.113.0/24"), false);
+});
+
+test("cidrsOverlap handles IPv6 ranges with BigInt precision", () => {
+  assertEquals(cidrsOverlap("2001:db8::/32", "2001:db8::/32"), true);
+  assertEquals(cidrsOverlap("2001:db8::/64", "2001:db8:0:1::/64"), false);
+  assertEquals(cidrsOverlap("2001:db8::/63", "2001:db8:0:1::/64"), true);
+  assertEquals(cidrsOverlap("2001:db8::/32", "2001:db9::/32"), false);
+  // Host-form input is network-aligned before comparison.
+  assertEquals(cidrsOverlap("2001:db8::abcd/64", "2001:db8::/64"), true);
+  // Beyond Number.MAX_SAFE_INTEGER: high bits differ only in hextet 0.
+  assertEquals(cidrsOverlap("fd00::/8", "fe00::/8"), false);
+  assertEquals(cidrsOverlap("fc00::/7", "fd12:3456::/32"), true);
+  assertEquals(cidrsOverlap("::/0", "2001:db8::1/128"), true);
+  assertEquals(cidrsOverlap("2001:db8::/128", "2001:db8::/128"), true);
+  assertEquals(cidrsOverlap("2001:db8::/128", "2001:db8::1/128"), false);
+});
+
+test("cidrsOverlap never matches across address families", () => {
+  assertEquals(cidrsOverlap("2001:db8::/32", "203.0.113.0/24"), false);
+  assertEquals(cidrsOverlap("::/0", "0.0.0.0/0"), false);
+  assertEquals(cidrsOverlap("::ffff:0:0/96", "0.0.0.0/0"), false);
+  assertEquals(cidrsOverlap("10.0.0.0/8", "::/0"), false);
+});
+
+test("cidrContains accepts equal or narrower same-family children", () => {
+  assertEquals(cidrContains("203.0.113.0/24", "203.0.113.0/24"), true);
+  assertEquals(cidrContains("203.0.113.0/24", "203.0.113.128/25"), true);
+  assertEquals(cidrContains("203.0.113.0/24", "203.0.113.77/32"), true);
+  assertEquals(cidrContains("203.0.113.0/25", "203.0.113.0/24"), false);
+  assertEquals(cidrContains("203.0.113.0/24", "198.51.100.0/24"), false);
+  assertEquals(cidrContains("0.0.0.0/0", "203.0.113.0/24"), true);
+  // Host-form parent is aligned first.
+  assertEquals(cidrContains("203.0.113.9/24", "203.0.113.0/26"), true);
+});
+
+test("cidrContains handles IPv6 with BigInt precision", () => {
+  assertEquals(cidrContains("2001:db8::/32", "2001:db8::/32"), true);
+  assertEquals(cidrContains("2001:db8::/32", "2001:db8:1234::/48"), true);
+  assertEquals(cidrContains("2001:db8::/32", "2001:db8::1/128"), true);
+  assertEquals(cidrContains("2001:db8::/48", "2001:db8::/32"), false);
+  assertEquals(cidrContains("2001:db8::/32", "2001:db9::/48"), false);
+  assertEquals(cidrContains("fc00::/7", "fd12:3456:789a::/48"), true);
+  assertEquals(cidrContains("fd00::/8", "fc00::/8"), false);
+  assertEquals(cidrContains("::/0", "2001:db8::/32"), true);
+  assertEquals(cidrContains("2001:db8::/128", "2001:db8::1/128"), false);
+});
+
+test("cidrContains rejects cross-family pairs and garbage", () => {
+  assertEquals(cidrContains("::/0", "203.0.113.0/24"), false);
+  assertEquals(cidrContains("0.0.0.0/0", "2001:db8::/32"), false);
+  assertEquals(cidrContains("::ffff:0:0/96", "203.0.113.0/24"), false);
+  assertEquals(cidrContains("not-a-cidr", "203.0.113.0/24"), false);
+  assertEquals(cidrContains("203.0.113.0/24", "203.0.113.0"), false);
+  assertEquals(cidrContains("2001:db8::/129", "2001:db8::/128"), false);
 });
 
 test("deriveIpVersion matches parseIpVersion", () => {

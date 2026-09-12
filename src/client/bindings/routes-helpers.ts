@@ -50,7 +50,10 @@ export function bindingMaterializeHttpPayload(
   if (
     materializeResult.kind === 'binding_endpoint_unavailable' ||
     materializeResult.kind === 'datacenter_ip_required' ||
-    materializeResult.kind === 'private_path_unavailable'
+    materializeResult.kind === 'private_path_unavailable' ||
+    // Bindings resolve with `client-backend`, which never raises this; listed
+    // so the mapping over `PrivateEndpointError` stays total.
+    materializeResult.kind === 'failover_requires_trusted_datacenter'
   ) {
     return { status: 422, body: { error: BINDING_ENDPOINT_UNAVAILABLE_ERROR } }
   }

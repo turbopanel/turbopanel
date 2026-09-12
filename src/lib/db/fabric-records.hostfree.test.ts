@@ -115,6 +115,7 @@ type NetworkRow = {
   environmentId: string;
   kind: string;
   name: string;
+  cidr?: string | null;
   options: Record<string, unknown>;
 };
 type SegmentRow = {
@@ -358,6 +359,45 @@ test("ensureFabricRelays inserts relays for org servers that lack one", async ()
   assertEquals(db.relayInserts, 2);
 });
 
+test("ensureFabricRelays never carves a relay prefix out of a reserved range or site subnet", async () => {
+  const db = createFabricDb({
+    servers: [
+      { id: "srv-a", organizationId: "org-1" },
+      { id: "srv-b", organizationId: "org-1" },
+    ],
+    networks: [
+      {
+        id: "net-reserved",
+        organizationId: "org-1",
+        environmentId: "",
+        kind: "reserved",
+        name: "Corp VPN — Chicago branch",
+        cidr: "10.192.0.0/16",
+        options: {},
+      },
+      {
+        id: "net-site",
+        organizationId: "org-1",
+        environmentId: "",
+        kind: "datacenter",
+        name: "lan",
+        cidr: "10.193.40.0/24",
+        options: {},
+      },
+    ],
+  });
+
+  const relays = await ensureFabricRelays(db, {
+    fabric: FABRIC,
+    organizationId: "org-1",
+  });
+
+  assertEquals(relays.map((row) => row.prefix), [
+    "10.194.0.0/16",
+    "10.195.0.0/16",
+  ]);
+});
+
 test("ensureFabricRelays skips servers that already have relays", async () => {
   const db = createFabricDb({
     servers: [
@@ -545,6 +585,79 @@ test("materializeSpanningNetworks creates compose networks and per-server segmen
   );
   assertEquals(db.segments[0]?.cidr.startsWith("10.192."), true);
   assertEquals(db.segments[1]?.cidr.startsWith("10.193."), true);
+});
+
+test("materializeSpanningNetworks never carves a segment out of a reserved range", async () => {
+  const db = createFabricDb({
+    servers: [
+      { id: "srv-a", organizationId: "org-1" },
+      { id: "srv-b", organizationId: "org-1" },
+    ],
+    relays: [
+      {
+        id: "relay-a",
+        fabricId: "fab-1",
+        serverId: "srv-a",
+        address: "10.250.0.1",
+        role: "member",
+        keepalive: null,
+        endpointAddress: null,
+        publicKey: null,
+        prefix: "10.192.0.0/16",
+        advertisedCidrs: [],
+        metadata: {},
+      },
+      {
+        id: "relay-b",
+        fabricId: "fab-1",
+        serverId: "srv-b",
+        address: "10.250.0.2",
+        role: "member",
+        keepalive: null,
+        endpointAddress: null,
+        publicKey: null,
+        prefix: "10.193.0.0/16",
+        advertisedCidrs: [],
+        metadata: {},
+      },
+    ],
+    networks: [{
+      id: "net-reserved",
+      organizationId: "org-1",
+      environmentId: "",
+      kind: "reserved",
+      name: "legacy-lab",
+      cidr: "10.192.0.0/23",
+      options: {},
+    }],
+  });
+
+  await materializeSpanningNetworks(db, {
+    organizationId: "org-1",
+    environmentId: "env-1",
+    fabric: FABRIC,
+    document: composeDoc({
+      services: {
+        web: { image: "nginx", networks: ["frontend"] },
+        api: { image: "api", networks: ["frontend"] },
+      },
+      networks: { frontend: { driver: "overlay" } },
+    }),
+    slots: [
+      { serviceId: "svc-web", serverId: "srv-a" },
+      { serviceId: "svc-api", serverId: "srv-b" },
+    ],
+    serviceRows: [
+      { id: "svc-web", composeServiceName: "web" },
+      { id: "svc-api", composeServiceName: "api" },
+    ],
+  });
+
+  const byServer = new Map(db.segments.map((row) => [row.serverId, row.cidr]));
+  // srv-a's first two /24s sit inside the reserved /23 → lowest free is .2.0/24.
+  assertEquals(byServer.get("srv-a"), "10.192.2.0/24");
+  // srv-b's prefix is untouched by the exclusion.
+  assertEquals(byServer.get("srv-b"), "10.193.0.0/24");
 });
 
 test("materializeSpanningNetworks ignores a shared network not declared overlay", async () => {

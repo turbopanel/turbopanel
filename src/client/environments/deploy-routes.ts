@@ -23,6 +23,7 @@ import type { DerivedSecretsConfig } from "../authn/secrets.ts";
 import type { CommandEnvelope } from "../../lib/commands/envelope.ts";
 import type {
   EnvironmentDeployComposeFile,
+  EnvironmentDeployDockerNetwork,
   EnvironmentDeployFabricNetwork,
   EnvironmentDeployHosting,
   EnvironmentDeployIngressService,
@@ -513,6 +514,7 @@ type DeployCommandCreateParams = DeployActor & {
   principalMaterial: EnvironmentDeployPrincipalMaterial[];
   serviceHooks: EnvironmentDeployServiceHook[];
   dockerExternalNetworks: string[];
+  dockerNetworkAddressing: EnvironmentDeployDockerNetwork[];
   fabricNetworks: EnvironmentDeployFabricNetwork[];
   managedNetworkServices: string[];
   /** Set only when `managedNetworkServices` is non-empty (see prepare). */
@@ -627,6 +629,7 @@ async function createDeployCommand(
         principalMaterial: params.principalMaterial,
         serviceHooks: params.serviceHooks,
         dockerExternalNetworks: params.dockerExternalNetworks,
+        dockerNetworkAddressing: params.dockerNetworkAddressing,
         fabricNetworks: params.fabricNetworks,
         managedNetworkServices: params.managedNetworkServices,
         managedNetwork: params.managedNetwork,
@@ -759,6 +762,7 @@ function createParamsForPreparedServer(
     principalMaterial: row.prepared.principalMaterial,
     serviceHooks: row.prepared.hooks,
     dockerExternalNetworks: row.prepared.dockerExternalNetworks,
+    dockerNetworkAddressing: row.prepared.dockerNetworkAddressing,
     fabricNetworks: row.prepared.fabricNetworks,
     managedNetworkServices: row.prepared.managedNetworkServices,
     ...(row.prepared.managedNetwork === undefined

@@ -47,7 +47,7 @@ function emptyCaches(): FabricReconcileSnapshot["caches"] {
     publicAddressByServer: new Map(),
     reportedByServer: new Map(),
     datacenterMembershipsByServer: new Map(),
-    addressPreferenceByDatacenter: new Map(),
+    policyByDatacenter: new Map(),
     natEndpointByPair: new Map(),
     failedPathKindsByPair: new Map(),
   };
@@ -555,7 +555,7 @@ test("loadFabricReconcileSnapshot batches relays PSK envelopes segments and cach
     "203.0.113.99",
   );
   assertEquals(snapshot.caches.datacenterMembershipsByServer.size, 0);
-  assertEquals(snapshot.caches.addressPreferenceByDatacenter.size, 0);
+  assertEquals(snapshot.caches.policyByDatacenter.size, 0);
   assertEquals(
     snapshot.caches.reportedByServer.get("srv-1")?.map((ip) => ip.address),
     ["198.51.100.1"],
@@ -898,7 +898,7 @@ test("buildFabricReconcilePayloadFromSnapshot hash reflects peer pathKind", asyn
     address: "203.0.113.11",
     family: 4,
   }]);
-  lanCaches.addressPreferenceByDatacenter.set("dc-a", "ipv4");
+  lanCaches.policyByDatacenter.set("dc-a", { addressPreference: "ipv4", priority: 100, trusted: true });
   lanCaches.publicAddressByServer.set("srv-2", "198.51.100.11");
   const publicCaches = emptyCaches();
   publicCaches.publicAddressByServer.set("srv-2", "203.0.113.11");
@@ -924,6 +924,71 @@ test("buildFabricReconcilePayloadFromSnapshot hash reflects peer pathKind", asyn
   assertEquals(lanBuilt.payload.peers[0]?.endpoint, "203.0.113.11:51830");
   assertEquals(publicBuilt.payload.peers[0]?.endpoint, "203.0.113.11:51830");
   assertNotEquals(lanBuilt.desiredHash, publicBuilt.desiredHash);
+});
+
+test("buildFabricReconcilePayloadFromSnapshot never dials an untrusted shared datacenter LAN", async () => {
+  const selfRelay = relayRecord({
+    id: "r1",
+    serverId: "srv-1",
+    address: "10.250.0.1",
+    endpointAddress: "203.0.113.10",
+    publicKey: WG_KEY_A,
+    prefix: "10.192.0.0/16",
+  });
+  const other = relayRecord({
+    id: "r2",
+    serverId: "srv-2",
+    address: "10.250.0.2",
+    publicKey: WG_KEY_B,
+    prefix: "10.193.0.0/16",
+  });
+  const caches = emptyCaches();
+  caches.datacenterMembershipsByServer.set("srv-1", [
+    membershipPin("srv-1", "dc-untrusted", "10.0.0.1"),
+    membershipPin("srv-1", "dc-slow", "10.7.0.1"),
+  ]);
+  caches.datacenterMembershipsByServer.set("srv-2", [
+    membershipPin("srv-2", "dc-untrusted", "10.0.0.2"),
+    membershipPin("srv-2", "dc-slow", "10.7.0.2"),
+  ]);
+  caches.policyByDatacenter.set("dc-untrusted", {
+    addressPreference: "ipv4",
+    priority: 0,
+    trusted: false,
+  });
+  caches.policyByDatacenter.set("dc-slow", {
+    addressPreference: "ipv4",
+    priority: 500,
+    trusted: true,
+  });
+  caches.publicAddressByServer.set("srv-2", "198.51.100.11");
+  const snapshot = {
+    fabric: FABRIC,
+    relays: [selfRelay, other],
+    sealedPresharedKeyByRelayId: new Map([["r1", null], ["r2", null]]),
+    segmentsByServer: new Map([["srv-1", []], ["srv-2", []]]),
+    derivedAdvertisedCidrsByRelayId: new Map(),
+    policy: { allowRelay: false },
+    caches,
+  };
+  const built = await buildFabricReconcilePayloadFromSnapshot(snapshot, {
+    serverId: "srv-1",
+  });
+  if (!built?.payload.enabled) throw new TypeError("expected enabled payload");
+  // The trusted (lower-ranked) datacenter still wins over the untrusted one.
+  assertEquals(built.payload.peers[0]?.endpoint, "10.7.0.2:51830");
+  assertEquals(built.payload.peers[0]?.pathKind, "direct_lan");
+
+  // Untrusted-only: LAN is skipped entirely and the peer is dialed publicly.
+  caches.datacenterMembershipsByServer.set("srv-1", [
+    membershipPin("srv-1", "dc-untrusted", "10.0.0.1"),
+  ]);
+  const publicOnly = await buildFabricReconcilePayloadFromSnapshot(snapshot, {
+    serverId: "srv-1",
+  });
+  if (!publicOnly?.payload.enabled) throw new TypeError("expected enabled payload");
+  assertEquals(publicOnly.payload.peers[0]?.endpoint, "198.51.100.11:51830");
+  assertEquals(publicOnly.payload.peers[0]?.pathKind, "direct_public");
 });
 
 test("buildFabricReconcilePayloadFromSnapshot omits a reported private IPv4 as a public path", async () => {
@@ -1272,8 +1337,8 @@ test("buildFabricReconcilePayloadFromSnapshot routes a destination through one g
   caches.datacenterMembershipsByServer.set("srv-2", [
     membershipPin("srv-2", "dc-dst", "10.0.1.1"),
   ]);
-  caches.addressPreferenceByDatacenter.set("dc-src", "ipv4");
-  caches.addressPreferenceByDatacenter.set("dc-dst", "ipv4");
+  caches.policyByDatacenter.set("dc-src", { addressPreference: "ipv4", priority: 100, trusted: true });
+  caches.policyByDatacenter.set("dc-dst", { addressPreference: "ipv4", priority: 100, trusted: true });
   caches.publicAddressByServer.set("srv-gw", "203.0.113.20");
   const built = await buildFabricReconcilePayloadFromSnapshot({
     fabric: FABRIC,
@@ -1362,8 +1427,8 @@ test("buildFabricReconcilePayloadFromSnapshot hash changes when the next hop cha
   caches.datacenterMembershipsByServer.set("srv-2", [
     membershipPin("srv-2", "dc-dst", "10.0.1.1"),
   ]);
-  caches.addressPreferenceByDatacenter.set("dc-src", "ipv4");
-  caches.addressPreferenceByDatacenter.set("dc-dst", "ipv4");
+  caches.policyByDatacenter.set("dc-src", { addressPreference: "ipv4", priority: 100, trusted: true });
+  caches.policyByDatacenter.set("dc-dst", { addressPreference: "ipv4", priority: 100, trusted: true });
   caches.publicAddressByServer.set("srv-gw-a", "203.0.113.20");
   caches.publicAddressByServer.set("srv-gw-z", "203.0.113.21");
   const snapshotBase = {

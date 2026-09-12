@@ -20,6 +20,10 @@ import {
   type MetricsCapabilityPlanOverride,
   parseMetricsCapabilityPlanOverride,
 } from "../daemon/metrics/capability-plan.ts";
+import {
+  type OrganizationDockerNetworking,
+  parseOrganizationDockerNetworking,
+} from "./docker-address-pools.ts";
 
 /** Platform fallback when `defaultEnvironmentName` is unset. */
 export const DEFAULT_ENVIRONMENT_NAME = "Production";
@@ -90,6 +94,13 @@ export type OrganizationOptions = {
    * top of a license-tier base when one is bound.
    */
   metricsCapabilityPlan?: MetricsCapabilityPlanOverride;
+  /**
+   * Org-wide Docker host addressing (`default-address-pools` / `bip`) every
+   * enrolled host merges into `/etc/docker/daemon.json`. See
+   * `docker-address-pools.ts`. Pool bases and the default bridge network also
+   * join the org CIDR registry (`dockerHostCidrs`).
+   */
+  docker?: OrganizationDockerNetworking;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -188,6 +199,17 @@ function assignMetricsCapabilityPlan(
   }
 }
 
+function assignDocker(
+  options: OrganizationOptions,
+  value: Record<string, unknown>,
+): void {
+  if (!("docker" in value)) return;
+  const docker = parseOrganizationDockerNetworking(value.docker);
+  if (Object.keys(docker).length > 0) {
+    options.docker = docker;
+  }
+}
+
 /** Parse organization.options jsonb (missing/invalid keys → omitted). */
 export function parseOrganizationOptions(value: unknown): OrganizationOptions {
   if (!isRecord(value)) return {};
@@ -224,6 +246,7 @@ export function parseOrganizationOptions(value: unknown): OrganizationOptions {
     options.temperatureUnit = value.temperatureUnit as TemperatureUnit;
   }
   assignMetricsCapabilityPlan(options, value);
+  assignDocker(options, value);
   return options;
 }
 

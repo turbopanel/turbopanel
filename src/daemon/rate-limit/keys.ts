@@ -14,6 +14,7 @@ export type DaemonRestRateLimitRoute =
   | "commands-lease"
   | "secrets-decrypt"
   | "secrets-rehydrate"
+  | "host-docker-networking"
   | "commands-log";
 
 /** Sentinel id for anonymous enrollment-challenge REST limiting (no serverId). */

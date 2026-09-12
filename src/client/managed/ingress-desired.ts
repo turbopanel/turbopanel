@@ -944,7 +944,13 @@ export async function enqueueManagedIngressReconcile(
   return { ok: true, commandId: record.id, serverId: params.serverId };
 }
 
-async function recomputeMemberTransportsAfterPromote(
+/**
+ * Re-resolve and persist `replica.replication_transport` for every member
+ * relative to the current primary. Runs after a promote and after a
+ * datacenter routing-policy change (`priority` / `trusted`), so stored
+ * transports always reflect the live ladder.
+ */
+async function recomputeManagedMemberTransports(
   db: Db,
   managedId: string,
 ): Promise<void> {
@@ -1021,6 +1027,8 @@ async function rematerializeManagedBindings(
  * Ordered promote-pipeline tail: recompute member transports relative to the
  * new primary, re-materialize binding-owned HOST/PORT/URL variables, then
  * enqueue `managed.ingress.reconcile` on every member and consuming server.
+ * Also the re-convergence step `PATCH /datacenters/:id` runs when a
+ * datacenter's `priority` / `trusted` policy changes.
  *
  * Non-goals: no automatic failover (promote stays operator-triggered), no
  * ProxySQL→ProxySQL chaining, no DNS / floating-IP primary discovery.
@@ -1037,7 +1045,7 @@ export async function fanOutManagedIngressReconcile(
     extraServerIds?: readonly string[];
   }>,
 ): Promise<void> {
-  await recomputeMemberTransportsAfterPromote(db, params.managedId);
+  await recomputeManagedMemberTransports(db, params.managedId);
   await rematerializeManagedBindings(
     db,
     params.managedId,

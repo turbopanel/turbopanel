@@ -7,6 +7,10 @@ import { assertCanOr403, listVisible } from '../authz/index.ts'
 import { resolveEntityOrganizationId } from '../authz/create-access-grant.ts'
 import { getDb, type Db } from '../../db.ts'
 import { network } from '../../lib/db/schema.ts'
+import {
+  assertCidrAvailable,
+  cidrWriteIntentForKind,
+} from '../../lib/net/cidr-collisions.ts'
 import { canAccessOrganization } from '../org-context.ts'
 import {
   assertCanCreateOr403,
@@ -20,6 +24,7 @@ import {
   assertDatacenterCidr,
   assertNetworkKindScope,
   buildNetworkCreateValues,
+  cidrCollisionResponse,
   type NetworkCreateFields,
 } from './network-scope.ts'
 import {
@@ -30,6 +35,7 @@ import {
   parseOptionalCidrField,
   parseOptionalNameField,
   parseUuidQueryParam,
+  reconcileDockerNetworkAddressing,
   rejectImmutableNetworkScopePatch,
   resolveKindQueryFilter,
   UUID_RE,
@@ -39,6 +45,7 @@ export {
   assertDatacenterCidr,
   assertNetworkKindScope,
   buildNetworkCreateValues,
+  cidrCollisionResponse,
 } from './network-scope.ts'
 
 const NETWORK_SELECT = {
@@ -152,6 +159,25 @@ async function parseNetworkCreateFields(
 
   const optionsResult = parseCreateNetworkOptions(c, body, kind)
   if (optionsResult instanceof Response) return optionsResult
+
+  if (kind === 'docker') {
+    // `cidr` and `options.subnet` are two views of one range — accept either
+    // and write both, refuse a pair that disagrees.
+    const reconciled = reconcileDockerNetworkAddressing(c, {
+      cidr,
+      options: optionsResult ?? {},
+    })
+    if (reconciled instanceof Response) return reconciled
+    return {
+      kind,
+      datacenterId,
+      serverId,
+      name,
+      cidr: reconciled.cidr,
+      metadata: metadataResult,
+      options: reconciled.options,
+    }
+  }
 
   return {
     kind,
@@ -296,6 +322,19 @@ export function registerNetworkRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts)
     const fields = await parseNetworkCreateFields(c, db, organizationId, body)
     if (fields instanceof Response) return fields
 
+    // Every CIDR write goes through the one collision authority — a site
+    // subnet, a reserved range or a docker registration must not overlap the
+    // fabric, a reserved hole, another registration or another site subnet.
+    if (fields.cidr !== null) {
+      const collision = await assertCidrAvailable(db, {
+        organizationId,
+        cidr: fields.cidr,
+        intent: cidrWriteIntentForKind(fields.kind),
+        datacenterId: fields.datacenterId ?? null,
+      })
+      if (collision) return cidrCollisionResponse(c, collision)
+    }
+
     const [inserted] = await db
       .insert(network)
       .values(buildNetworkCreateValues({ organizationId, ...fields }))
@@ -328,7 +367,12 @@ export function registerNetworkRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts)
     if (denied) return denied
 
     const [existing] = await db
-      .select({ kind: network.kind })
+      .select({
+        kind: network.kind,
+        datacenterId: network.datacenterId,
+        cidr: network.cidr,
+        options: network.options,
+      })
       .from(network)
       .where(eq(network.id, id))
       .limit(1)
@@ -336,6 +380,7 @@ export function registerNetworkRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts)
 
     // Platform-allocated org-wide managed-engine network — the registry row is
     // read-only to operators, so refuse before reading any patch body.
+    // (`reserved` rows are operator data: rename and re-range are allowed.)
     if (existing.kind === 'managed') {
       return c.json({ error: 'managed_network_immutable' }, 400)
     }
@@ -346,8 +391,26 @@ export function registerNetworkRoutes(router: Hono<AppEnv>, opts: AuthRouteOpts)
     const scopePatchDenied = rejectImmutableNetworkScopePatch(c, body)
     if (scopePatchDenied) return scopePatchDenied
 
-    const patchFields = parseNetworkPatchFields(c, body, existing.kind)
+    // Docker rows reconcile `cidr` against the stored `options.subnet` (and
+    // vice versa), so the patch parser needs the row as it stands.
+    const patchFields = parseNetworkPatchFields(c, body, existing.kind, {
+      cidr: existing.cidr ?? null,
+      options: existing.options,
+    })
     if (patchFields instanceof Response) return patchFields
+
+    // Re-ranging goes through the same authority as create; the row itself is
+    // excluded so an unchanged or narrowed CIDR never collides with itself.
+    if (typeof patchFields.cidr === 'string') {
+      const collision = await assertCidrAvailable(db, {
+        organizationId,
+        cidr: patchFields.cidr,
+        intent: cidrWriteIntentForKind(existing.kind),
+        datacenterId: existing.datacenterId ?? null,
+        excludeNetworkId: id,
+      })
+      if (collision) return cidrCollisionResponse(c, collision)
+    }
 
     await db.update(network).set(patchFields).where(eq(network.id, id))
 

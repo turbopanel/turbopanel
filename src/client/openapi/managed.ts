@@ -649,6 +649,9 @@ export const managedSchemas = {
   DatacenterRequiredError: errorSchema('datacenter_required'),
   DatacenterCidrRequiredError: errorSchema('datacenter_cidr_required'),
   PrivatePathUnavailableError: errorSchema('private_path_unavailable'),
+  FailoverRequiresTrustedDatacenterError: errorSchema(
+    'failover_requires_trusted_datacenter',
+  ),
   ManagedBackupUnsupportedError: errorSchema('managed_backup_unsupported'),
   BackupNotFoundError: errorSchema('backup_not_found'),
   ManagedReplicaNotStreamingError: errorSchema('managed_replica_not_streaming'),
@@ -1194,7 +1197,7 @@ export const managedPaths = {
         },
         422: {
           description:
-            'failover_replica_requires_datacenter_transport / datacenter_required / datacenter_cidr_required / private_path_unavailable',
+            'failover_replica_requires_datacenter_transport / datacenter_required / datacenter_cidr_required / private_path_unavailable / failover_requires_trusted_datacenter',
           content: {
             'application/json': {
               schema: {
@@ -1203,6 +1206,10 @@ export const managedPaths = {
                   { $ref: '#/components/schemas/DatacenterRequiredError' },
                   { $ref: '#/components/schemas/DatacenterCidrRequiredError' },
                   { $ref: '#/components/schemas/PrivatePathUnavailableError' },
+                  {
+                    $ref:
+                      '#/components/schemas/FailoverRequiresTrustedDatacenterError',
+                  },
                 ],
               },
             },
@@ -1245,7 +1252,7 @@ export const managedPaths = {
         },
         422: {
           description:
-            'failover_replica_requires_datacenter_transport / datacenter_required / datacenter_cidr_required / private_path_unavailable',
+            'failover_replica_requires_datacenter_transport / datacenter_required / datacenter_cidr_required / private_path_unavailable / failover_requires_trusted_datacenter',
           content: {
             'application/json': {
               schema: {
@@ -1254,6 +1261,10 @@ export const managedPaths = {
                   { $ref: '#/components/schemas/DatacenterRequiredError' },
                   { $ref: '#/components/schemas/DatacenterCidrRequiredError' },
                   { $ref: '#/components/schemas/PrivatePathUnavailableError' },
+                  {
+                    $ref:
+                      '#/components/schemas/FailoverRequiresTrustedDatacenterError',
+                  },
                 ],
               },
             },

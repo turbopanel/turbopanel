@@ -1209,14 +1209,21 @@ export class DuckDbParquetServerMetricsStore implements ServerMetricsStore {
     this.#clearFlushTimer()
     if (this.#pendingRows.length === 0) return
 
-    const handle = await this.#ensureOpen()
-    if (this.#pendingRows.length === 0) return
-
-    const batch = this.#pendingRows.splice(0)
-    this.#flushPromise = this.#insertBatch(handle.connection, batch, opts.rethrow).finally(() => {
+    // Publish the in-flight promise *before* `#ensureOpen` so a concurrent
+    // query `flushWrites()` waits for this insert instead of observing an
+    // empty pending buffer and reading the DB mid-open.
+    const run = this.#flushPendingBody(opts)
+    this.#flushPromise = run.finally(() => {
       this.#flushPromise = null
     })
     await this.#flushPromise
+  }
+
+  async #flushPendingBody(opts: { rethrow: boolean }): Promise<void> {
+    const handle = await this.#ensureOpen()
+    if (this.#pendingRows.length === 0) return
+    const batch = this.#pendingRows.splice(0)
+    await this.#insertBatch(handle.connection, batch, opts.rethrow)
   }
 
   /** One transaction per flushed batch — every row a single `writeSample` produced lands (or rolls back) together. */

@@ -5,6 +5,7 @@ import {
   parseIpVersion,
 } from "../../lib/ip-address.ts";
 import { parseJsonbObject } from "../shared.ts";
+import { parseIpPinMetadata } from "../../lib/net/repin.ts";
 
 export const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -145,10 +146,20 @@ export function assertDatacenterMembershipNetwork(
   return null;
 }
 
+/**
+ * `stale` / `staleSince` / `staleReason` are derived from the
+ * `ip.metadata.stale` marker the automatic repin pass writes when a
+ * membership pin's address stopped being reported and no unambiguous
+ * replacement existed (`src/lib/net/repin.ts`).
+ */
 export function serializeIpRow(row: IpRow) {
+  const stale = parseIpPinMetadata(row.metadata).stale;
   return {
     ...row,
     version: parseIpVersion(row.address),
+    stale: stale !== undefined,
+    staleSince: stale?.since ?? null,
+    staleReason: stale?.reason ?? null,
   };
 }
 

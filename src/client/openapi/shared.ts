@@ -64,6 +64,8 @@ export type ResourceCrudConfig = {
   createBodyRequired?: boolean
   parentQuery?: { name: string; description: string }
   tag?: string
+  /** Extra top-level properties on the `GET /{id}` response beside the row. */
+  detailExtraProperties?: Record<string, unknown>
 }
 
 function defaultResourceTag(plural: string): string {
@@ -80,6 +82,7 @@ export function buildResourceCrudPaths(config: ResourceCrudConfig): Record<strin
     required: [config.singular],
     properties: {
       [config.singular]: { $ref: `#/components/schemas/${config.rowSchema}` },
+      ...config.detailExtraProperties,
     },
   }
 

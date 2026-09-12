@@ -108,7 +108,7 @@ import {
   parseServiceOptions,
   resolveServiceInstances,
 } from "../../lib/service-options.ts";
-import { validateRegisteredExternalDockerNetworks } from "./validate-docker-external-networks.ts";
+import { resolveRegisteredExternalDockerNetworks } from "./validate-docker-external-networks.ts";
 import { ensureOrganizationManagedNetwork } from "../../lib/db/fabric-records.ts";
 import type { DesiredSlotInput } from "../../lib/db/slot-records.ts";
 import {
@@ -132,6 +132,7 @@ import {
 import { registerComposeMounts } from "./register-compose-mounts.ts";
 import type {
   EnvironmentDeployComposeFile,
+  EnvironmentDeployDockerNetwork,
   EnvironmentDeployFabricNetwork,
   EnvironmentDeployHosting,
   EnvironmentDeployIngressService,
@@ -582,6 +583,7 @@ async function emptyPreparedCompose(
     nativeAppServices: [],
     sourceMaterial: [],
     dockerExternalNetworks: [],
+    dockerNetworkAddressing: [],
     fabricNetworks: [],
     managedNetworkServices: [],
     containers: [],
@@ -2139,7 +2141,10 @@ async function resolveBindingMaterializationOutcome(
   const isSoftBindingError =
     bindResult.kind === "binding_endpoint_unavailable" ||
     bindResult.kind === "datacenter_ip_required" ||
-    bindResult.kind === "private_path_unavailable";
+    bindResult.kind === "private_path_unavailable" ||
+    // `client-backend` never raises this; listed so the mapping over
+    // `PrivateEndpointError` stays total.
+    bindResult.kind === "failover_requires_trusted_datacenter";
 
   const error: DeployPrepareError = { kind: "binding_endpoint_unavailable" };
   if (isSoftBindingError) {
@@ -2245,22 +2250,35 @@ async function prepareLocalSourceMaterial(
   return sitesOnScheduledServer(forMode, args.localServiceNames);
 }
 
-async function externalNetworkPrepareError(
+/**
+ * Registration check for the compose document's external Docker networks,
+ * plus the addressing the registered rows declare (one query serves both).
+ * The error is soft — `absorbSoftPrepareError` decides whether a preview
+ * records it as a warning or a deploy refuses.
+ */
+async function resolveExternalNetworks(
   db: Db,
   organizationId: string,
   serverId: string,
   dockerExternalNetworks: string[],
-): Promise<SoftDeployPrepareError | null> {
-  const unregistered = await validateRegisteredExternalDockerNetworks(
+): Promise<{
+  error: SoftDeployPrepareError | null;
+  addressing: EnvironmentDeployDockerNetwork[];
+}> {
+  const resolved = await resolveRegisteredExternalDockerNetworks(
     db,
     organizationId,
     serverId,
     dockerExternalNetworks,
   );
-  if (!unregistered) return null;
   return {
-    kind: "docker_external_network_unregistered",
-    names: unregistered,
+    error: resolved.missing
+      ? {
+        kind: "docker_external_network_unregistered",
+        names: resolved.missing,
+      }
+      : null,
+    addressing: resolved.addressing,
   };
 }
 
@@ -2423,6 +2441,7 @@ async function toPreparedDeployResult(
     nativeAppServices: PreparedNativeAppService[];
     sourceMaterial: EnvironmentDeploySource[];
     dockerExternalNetworks: string[];
+    dockerNetworkAddressing?: readonly EnvironmentDeployDockerNetwork[];
     fabricNetworks?: readonly EnvironmentDeployFabricNetwork[];
     managedNetworkServices: string[];
     managedNetwork?: string;
@@ -2463,6 +2482,9 @@ async function toPreparedDeployResult(
     nativeAppServices: parts.nativeAppServices,
     sourceMaterial: parts.sourceMaterial,
     dockerExternalNetworks: parts.dockerExternalNetworks,
+    dockerNetworkAddressing: parts.dockerNetworkAddressing
+      ? [...parts.dockerNetworkAddressing]
+      : [],
     fabricNetworks: parts.fabricNetworks ? [...parts.fabricNetworks] : [],
     managedNetworkServices: parts.managedNetworkServices,
     ...(parts.managedNetwork === undefined
@@ -3095,15 +3117,16 @@ export async function prepareDeployCompose(
   const dockerExternalNetworks = collectComposeExternalDockerNetworkNames(
     split.composeYaml,
   );
+  const externalNetworks = await resolveExternalNetworks(
+    db,
+    params.organizationId,
+    params.serverId,
+    dockerExternalNetworks,
+  );
   const networkErr = absorbSoftPrepareError(
     mode,
     warnings,
-    await externalNetworkPrepareError(
-      db,
-      params.organizationId,
-      params.serverId,
-      dockerExternalNetworks,
-    ),
+    externalNetworks.error,
   );
   if (networkErr) return networkErr;
 
@@ -3185,6 +3208,7 @@ export async function prepareDeployCompose(
     nativeAppServices: localNativeApps,
     sourceMaterial: localSourceMaterial,
     dockerExternalNetworks,
+    dockerNetworkAddressing: externalNetworks.addressing,
     fabricNetworks: fabricNetworksFromSchedule(params.schedule),
     managedNetworkServices,
     ...(managedNetwork === undefined ? {} : { managedNetwork }),

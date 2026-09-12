@@ -112,6 +112,8 @@ test('touchServerMetadata writes hostname and metadata deltas', async () => {
   const db = {
     select: () => ({
       from: () => ({
+        // Repin pass (ips changed) loads pins via a `network` join — none here.
+        leftJoin: () => ({ where: () => queryResult([]) }),
         where: () =>
           queryResult([{
             metadata: null,
@@ -289,4 +291,98 @@ test('getServerLicenseBinding returns null licenseId when unbound', async () => 
     organizationId: '00000000-0000-4000-8000-000000000099',
   })
   assertEquals(selectCount >= 2, true)
+})
+
+/**
+ * Fake `Db` for the repin hook: the server-row select answers every plain
+ * `select().from().where()`; the repin pass is detected by its `leftJoin`
+ * (`loadDatacenterMembershipPinDetailsForServers`), which returns no pins so
+ * nothing else is written.
+ */
+function createRepinProbeDb(
+  serverRow: Record<string, unknown>,
+): { db: Db; repinLoads: () => number; updates: () => number } {
+  let repinLoads = 0
+  let updates = 0
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: () => queryResult([serverRow]),
+        leftJoin: () => ({
+          where: () => {
+            repinLoads += 1
+            return queryResult([])
+          },
+        }),
+      }),
+    }),
+    update: () => ({
+      set: () => {
+        updates += 1
+        return { where: () => Promise.resolve(undefined) }
+      },
+    }),
+  } as unknown as Db
+  return { db, repinLoads: () => repinLoads, updates: () => updates }
+}
+
+const REPIN_SERVER_ROW = {
+  hostname: 'host-1',
+  machineKey: HEX64,
+  osId: null,
+  osFamily: null,
+  osVersion: null,
+  osCodename: null,
+  osPrettyName: null,
+  osArchitecture: null,
+  timezone: null,
+  isTimeSyncEnabled: null,
+  ntpServers: null,
+  ntpLastSyncedAt: null,
+}
+
+test('touchServerMetadata runs the repin hook once when resources.ips changed', async () => {
+  const probe = createRepinProbeDb({
+    ...REPIN_SERVER_ROW,
+    metadata: {
+      resources: {
+        ips: [{ address: '10.0.0.1', version: 4, scope: 'private' }],
+      },
+    },
+  })
+  await touchServerMetadata(probe.db, SERVER_ID, {
+    resources: {
+      ips: [{ address: '10.0.0.2', version: 4, scope: 'private' }],
+    },
+  })
+  assertEquals(probe.updates(), 1)
+  assertEquals(probe.repinLoads(), 1)
+})
+
+test('touchServerMetadata skips the repin hook when ips are unchanged', async () => {
+  const ips = [{ address: '10.0.0.1', version: 4 as const, scope: 'private' as const }]
+  const probe = createRepinProbeDb({
+    ...REPIN_SERVER_ROW,
+    metadata: { resources: { ips } },
+  })
+  await touchServerMetadata(probe.db, SERVER_ID, {
+    resources: { ips },
+    hostname: 'host-2',
+  })
+  assertEquals(probe.updates(), 1)
+  assertEquals(probe.repinLoads(), 0)
+})
+
+test('touchServerMetadata skips the repin hook on a CPU / docker-only delta', async () => {
+  const ips = [{ address: '10.0.0.1', version: 4 as const, scope: 'private' as const }]
+  const probe = createRepinProbeDb({
+    ...REPIN_SERVER_ROW,
+    metadata: { resources: { ips } },
+  })
+  await touchServerMetadata(probe.db, SERVER_ID, {
+    resources: { cpus: [{ cores: { total: 8 } }] },
+    docker: { version: '27.0.0' },
+  })
+  assertEquals(probe.updates(), 1)
+  assertEquals(probe.repinLoads(), 0)
 })

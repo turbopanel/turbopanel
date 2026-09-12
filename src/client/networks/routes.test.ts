@@ -12,6 +12,7 @@ import { createSession } from '../authn/session-store.ts'
 import { deriveSecretsConfig } from '../authn/secrets.ts'
 import {
   datacenter,
+  fabric,
   grant,
   network,
   organization,
@@ -97,6 +98,7 @@ async function withNetworkFixtures(
   try {
     await fn({ db, app, secrets, userId, organizationId })
   } finally {
+    await db.delete(fabric).where(eq(fabric.organizationId, organizationId))
     await db.delete(network).where(eq(network.organizationId, organizationId))
     await db.delete(server).where(eq(server.organizationId, organizationId))
     await db.delete(datacenter).where(eq(datacenter.organizationId, organizationId))
@@ -1020,5 +1022,472 @@ test('DELETE /networks/:id refuses a managed network', async () => {
       .where(eq(network.id, managedNet!.id))
       .limit(1)
     assertEquals(still?.id, managedNet!.id)
+  })
+})
+
+function jsonHeaders(cookie: string, organizationId: string) {
+  return {
+    cookie,
+    [ORG_ID_HEADER]: organizationId,
+    'content-type': 'application/json',
+  }
+}
+
+test('POST /networks creates a reserved range, lists it by kind and keeps it org-only', async () => {
+  await withNetworkFixtures(async ({ db, app, secrets, userId, organizationId }) => {
+    const cookie = await sessionCookie(db, secrets, userId)
+    const headers = jsonHeaders(cookie, organizationId)
+
+    const created = await app.request('/networks', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        organizationId,
+        kind: 'reserved',
+        cidr: '10.100.0.0/16',
+        name: 'Corp VPN - Chicago branch',
+      }),
+    })
+    assertEquals(created.status, 200)
+    const { id } = await created.json() as { ok: true; id: string }
+
+    const [row] = await db
+      .select({
+        kind: network.kind,
+        cidr: network.cidr,
+        name: network.name,
+        datacenterId: network.datacenterId,
+        serverId: network.serverId,
+      })
+      .from(network)
+      .where(eq(network.id, id))
+      .limit(1)
+    assertEquals(row, {
+      kind: 'reserved',
+      cidr: '10.100.0.0/16',
+      name: 'Corp VPN - Chicago branch',
+      datacenterId: null,
+      serverId: null,
+    })
+
+    const listed = await app.request('/networks?kind=reserved', { headers })
+    assertEquals(listed.status, 200)
+    const { networks } = await listed.json() as { networks: { id: string; kind: string }[] }
+    assertEquals(networks.map((n) => [n.id, n.kind]), [[id, 'reserved']])
+
+    // A reserved range exists because of its CIDR.
+    const noCidr = await app.request('/networks', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ organizationId, kind: 'reserved', name: 'No range' }),
+    })
+    assertEquals(noCidr.status, 400)
+    assertEquals(await noCidr.json(), { error: 'network_cidr_required' })
+
+    // … and is never scoped to a datacenter or a host.
+    const now = new Date().toISOString()
+    const [dc] = await db
+      .insert(datacenter)
+      .values({ organizationId, name: 'Reserved DC', createdAt: now, updatedAt: now })
+      .returning({ id: datacenter.id })
+    const [srv] = await db
+      .insert(server)
+      .values({ organizationId, name: 'Reserved Host', createdAt: now, updatedAt: now })
+      .returning({ id: server.id })
+    for (const scope of [{ datacenterId: dc!.id }, { serverId: srv!.id }]) {
+      const scoped = await app.request('/networks', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          organizationId,
+          kind: 'reserved',
+          cidr: '10.101.0.0/16',
+          ...scope,
+        }),
+      })
+      assertEquals(scoped.status, 400)
+      assertEquals(await scoped.json(), { error: 'network_single_scope_conflict' })
+    }
+  })
+})
+
+test('POST /networks routes every CIDR write through the collision authority', async () => {
+  await withNetworkFixtures(async ({ db, app, secrets, userId, organizationId }) => {
+    const cookie = await sessionCookie(db, secrets, userId)
+    const headers = jsonHeaders(cookie, organizationId)
+    const now = new Date().toISOString()
+    const [dc] = await db
+      .insert(datacenter)
+      .values({ organizationId, name: 'Collision DC', createdAt: now, updatedAt: now })
+      .returning({ id: datacenter.id })
+    const [otherDc] = await db
+      .insert(datacenter)
+      .values({ organizationId, name: 'Other DC', createdAt: now, updatedAt: now })
+      .returning({ id: datacenter.id })
+    await db.insert(fabric).values({
+      organizationId,
+      cidr: '10.250.0.0/16',
+      options: { containerPool: '10.192.0.0/12' },
+    })
+    const [reserved] = await db
+      .insert(network)
+      .values({
+        organizationId,
+        kind: 'reserved',
+        cidr: '10.100.0.0/16',
+        name: 'Corp VPN',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: network.id })
+    const [bridge] = await db
+      .insert(network)
+      .values({
+        organizationId,
+        kind: 'docker',
+        cidr: '172.18.0.0/16',
+        options: { dockerNetworkName: 'bridge-shared' },
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: network.id })
+    const [otherSite] = await db
+      .insert(network)
+      .values({
+        organizationId,
+        datacenterId: otherDc!.id,
+        kind: 'datacenter',
+        cidr: '10.20.0.0/24',
+        name: 'other-lan',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: network.id })
+
+    const post = (body: Record<string, unknown>) =>
+      app.request('/networks', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ organizationId, ...body }),
+      })
+
+    const fabricHit = await post({ kind: 'datacenter', datacenterId: dc!.id, cidr: '10.250.9.0/24' })
+    assertEquals(fabricHit.status, 409)
+    assertEquals(await fabricHit.json(), {
+      error: 'cidr_overlaps_fabric',
+      cidr: '10.250.9.0/24',
+      conflictingCidr: '10.250.0.0/16',
+    })
+
+    const poolHit = await post({ kind: 'reserved', cidr: '10.200.0.0/16' })
+    assertEquals(poolHit.status, 409)
+    assertEquals(await poolHit.json(), {
+      error: 'cidr_overlaps_fabric_pool',
+      cidr: '10.200.0.0/16',
+      conflictingCidr: '10.192.0.0/12',
+    })
+
+    const reservedHit = await post({ kind: 'datacenter', datacenterId: dc!.id, cidr: '10.100.7.0/24' })
+    assertEquals(reservedHit.status, 409)
+    assertEquals(await reservedHit.json(), {
+      error: 'cidr_overlaps_reserved',
+      cidr: '10.100.7.0/24',
+      conflictingCidr: '10.100.0.0/16',
+      networkId: reserved!.id,
+    })
+
+    const dockerHit = await post({ kind: 'reserved', cidr: '172.18.0.0/20' })
+    assertEquals(dockerHit.status, 409)
+    assertEquals(await dockerHit.json(), {
+      error: 'cidr_overlaps_docker_network',
+      cidr: '172.18.0.0/20',
+      conflictingCidr: '172.18.0.0/16',
+      networkId: bridge!.id,
+    })
+
+    const siteHit = await post({ kind: 'datacenter', datacenterId: dc!.id, cidr: '10.20.0.128/25' })
+    assertEquals(siteHit.status, 409)
+    assertEquals(await siteHit.json(), {
+      error: 'subnet_overlaps',
+      cidr: '10.20.0.128/25',
+      conflictingCidr: '10.20.0.0/24',
+      networkId: otherSite!.id,
+      datacenterId: otherDc!.id,
+    })
+
+    // A docker registration with a CIDR is checked the same way.
+    const dockerVsReserved = await post({
+      kind: 'docker',
+      cidr: '10.100.200.0/24',
+      options: { dockerNetworkName: 'bridge-two' },
+    })
+    assertEquals(dockerVsReserved.status, 409)
+    assertEquals((await dockerVsReserved.json() as { error: string }).error, 'cidr_overlaps_reserved')
+
+    // A free range still lands.
+    const free = await post({ kind: 'datacenter', datacenterId: dc!.id, cidr: '10.30.0.0/24' })
+    assertEquals(free.status, 200)
+  })
+})
+
+test('PATCH /networks/:id re-ranges a reserved row and excludes itself from the collision check', async () => {
+  await withNetworkFixtures(async ({ db, app, secrets, userId, organizationId }) => {
+    const cookie = await sessionCookie(db, secrets, userId)
+    const headers = jsonHeaders(cookie, organizationId)
+    const now = new Date().toISOString()
+    const [reserved] = await db
+      .insert(network)
+      .values({
+        organizationId,
+        kind: 'reserved',
+        cidr: '10.100.0.0/16',
+        name: 'Before',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: network.id })
+    const [otherReserved] = await db
+      .insert(network)
+      .values({
+        organizationId,
+        kind: 'reserved',
+        cidr: '10.120.0.0/16',
+        name: 'Transit',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: network.id })
+
+    const patch = (body: Record<string, unknown>) =>
+      app.request(`/networks/${reserved!.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify(body),
+      })
+
+    // Rename + re-submit the same CIDR: the row never collides with itself.
+    const same = await patch({ name: 'After', cidr: '10.100.0.0/16' })
+    assertEquals(same.status, 200)
+    assertEquals(await same.json(), { ok: true })
+
+    // Narrowing is fine for the same reason.
+    const narrowed = await patch({ cidr: '10.100.8.0/24' })
+    assertEquals(narrowed.status, 200)
+
+    const [row] = await db
+      .select({ name: network.name, cidr: network.cidr })
+      .from(network)
+      .where(eq(network.id, reserved!.id))
+      .limit(1)
+    assertEquals(row, { name: 'After', cidr: '10.100.8.0/24' })
+
+    // Another row is still a hard fail …
+    const collide = await patch({ cidr: '10.120.4.0/24' })
+    assertEquals(collide.status, 409)
+    assertEquals(await collide.json(), {
+      error: 'cidr_overlaps_reserved',
+      cidr: '10.120.4.0/24',
+      conflictingCidr: '10.120.0.0/16',
+      networkId: otherReserved!.id,
+    })
+
+    // … and a reserved range cannot lose its CIDR.
+    const cleared = await patch({ cidr: null })
+    assertEquals(cleared.status, 400)
+    assertEquals(await cleared.json(), { error: 'network_cidr_required' })
+  })
+})
+
+test('POST /networks kind=docker keeps cidr and options.subnet in agreement', async () => {
+  await withNetworkFixtures(async ({ db, app, secrets, userId, organizationId }) => {
+    const cookie = await sessionCookie(db, secrets, userId)
+    const headers = jsonHeaders(cookie, organizationId)
+    const post = (body: Record<string, unknown>) =>
+      app.request('/networks', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ organizationId, kind: 'docker', ...body }),
+      })
+    const stored = async (id: string) => {
+      const [row] = await db
+        .select({ cidr: network.cidr, options: network.options })
+        .from(network)
+        .where(eq(network.id, id))
+        .limit(1)
+      return row
+    }
+
+    // options.subnet alone → cidr derived.
+    const fromSubnet = await post({
+      options: {
+        dockerNetworkName: 'edge-a',
+        subnet: '10.77.0.0/16',
+        ipRange: '10.77.8.0/24',
+        gateway: '10.77.0.1',
+        mtu: 1450,
+      },
+    })
+    assertEquals(fromSubnet.status, 200)
+    const a = await fromSubnet.json() as { id: string }
+    assertEquals(await stored(a.id), {
+      cidr: '10.77.0.0/16',
+      options: {
+        dockerNetworkName: 'edge-a',
+        subnet: '10.77.0.0/16',
+        ipRange: '10.77.8.0/24',
+        gateway: '10.77.0.1',
+        mtu: 1450,
+      },
+    })
+
+    // cidr alone → options.subnet derived.
+    const fromCidr = await post({ cidr: '10.78.0.0/16', options: { dockerNetworkName: 'edge-b' } })
+    assertEquals(fromCidr.status, 200)
+    const b = await fromCidr.json() as { id: string }
+    assertEquals(await stored(b.id), {
+      cidr: '10.78.0.0/16',
+      options: { dockerNetworkName: 'edge-b', subnet: '10.78.0.0/16' },
+    })
+
+    // Top-level cidr anchors ipRange / gateway without an explicit
+    // options.subnet — the derived subnet is what they are validated against.
+    const cidrAnchored = await post({
+      cidr: '10.83.0.0/16',
+      options: { dockerNetworkName: 'edge-f', ipRange: '10.83.8.0/24', gateway: '10.83.0.1' },
+    })
+    assertEquals(cidrAnchored.status, 200)
+    const f = await cidrAnchored.json() as { id: string }
+    assertEquals(await stored(f.id), {
+      cidr: '10.83.0.0/16',
+      options: {
+        dockerNetworkName: 'edge-f',
+        subnet: '10.83.0.0/16',
+        ipRange: '10.83.8.0/24',
+        gateway: '10.83.0.1',
+      },
+    })
+    const outsideCidr = await post({
+      cidr: '10.84.0.0/16',
+      options: { dockerNetworkName: 'edge-g', gateway: '10.85.0.1' },
+    })
+    assertEquals(outsideCidr.status, 400)
+    assertEquals(await outsideCidr.json(), { error: 'docker_network_gateway_invalid' })
+
+    // A disagreeing pair is refused.
+    const mismatch = await post({
+      cidr: '10.79.0.0/16',
+      options: { dockerNetworkName: 'edge-c', subnet: '10.80.0.0/16' },
+    })
+    assertEquals(mismatch.status, 400)
+    assertEquals(await mismatch.json(), { error: 'docker_network_subnet_mismatch' })
+
+    // Addressing validation reports the offending key.
+    const badRange = await post({
+      options: { dockerNetworkName: 'edge-d', subnet: '10.81.0.0/16', ipRange: '10.82.0.0/24' },
+    })
+    assertEquals(badRange.status, 400)
+    assertEquals(await badRange.json(), { error: 'docker_network_ip_range_invalid' })
+
+    // The derived cidr still runs the collision authority.
+    const collide = await post({
+      options: { dockerNetworkName: 'edge-e', subnet: '10.77.8.0/24' },
+    })
+    assertEquals(collide.status, 409)
+    assertEquals((await collide.json() as { error: string }).error, 'cidr_overlaps_docker_network')
+  })
+})
+
+test('PATCH /networks/:id kind=docker reconciles cidr and options.subnet against the stored row', async () => {
+  await withNetworkFixtures(async ({ db, app, secrets, userId, organizationId }) => {
+    const cookie = await sessionCookie(db, secrets, userId)
+    const headers = jsonHeaders(cookie, organizationId)
+    const now = new Date().toISOString()
+    const [row] = await db
+      .insert(network)
+      .values({
+        organizationId,
+        kind: 'docker',
+        cidr: '10.77.0.0/16',
+        options: {
+          dockerNetworkName: 'edge',
+          subnet: '10.77.0.0/16',
+          ipRange: '10.77.8.0/24',
+          gateway: '10.77.0.1',
+        },
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: network.id })
+    const id = row!.id
+    const patch = (body: Record<string, unknown>) =>
+      app.request(`/networks/${id}`, { method: 'PATCH', headers, body: JSON.stringify(body) })
+    const stored = async () => {
+      const [current] = await db
+        .select({ cidr: network.cidr, options: network.options })
+        .from(network)
+        .where(eq(network.id, id))
+        .limit(1)
+      return current
+    }
+
+    // Re-stating the row's own range never collides with itself.
+    const same = await patch({ cidr: '10.77.0.0/16' })
+    assertEquals(same.status, 200)
+
+    // Clearing the range while ipRange/gateway remain is refused.
+    const dangling = await patch({ cidr: null })
+    assertEquals(dangling.status, 400)
+    assertEquals(await dangling.json(), { error: 'docker_network_subnet_required' })
+
+    // A cidr-only re-range keeps the stored name, re-derives options.subnet,
+    // and refuses to carry a now-stale ipRange.
+    const stale = await patch({ cidr: '10.90.0.0/16' })
+    assertEquals(stale.status, 400)
+    assertEquals(await stale.json(), { error: 'docker_network_ip_range_invalid' })
+
+    // An options-only patch may re-state ipRange / gateway against the stored
+    // cidr without carrying options.subnet — the stored range anchors them.
+    const relyOnStored = await patch({
+      options: { dockerNetworkName: 'edge', ipRange: '10.77.16.0/24', gateway: '10.77.0.2' },
+    })
+    assertEquals(relyOnStored.status, 200)
+    assertEquals(await stored(), {
+      cidr: '10.77.0.0/16',
+      options: {
+        dockerNetworkName: 'edge',
+        subnet: '10.77.0.0/16',
+        ipRange: '10.77.16.0/24',
+        gateway: '10.77.0.2',
+      },
+    })
+    const outsideStored = await patch({
+      options: { dockerNetworkName: 'edge', gateway: '10.78.0.1' },
+    })
+    assertEquals(outsideStored.status, 400)
+    assertEquals(await outsideStored.json(), { error: 'docker_network_gateway_invalid' })
+
+    // An options-only patch without subnet keeps the stored cidr.
+    const optionsOnly = await patch({ options: { dockerNetworkName: 'edge', mtu: 1400 } })
+    assertEquals(optionsOnly.status, 200)
+    assertEquals(await stored(), {
+      cidr: '10.77.0.0/16',
+      options: { dockerNetworkName: 'edge', subnet: '10.77.0.0/16', mtu: 1400 },
+    })
+
+    // Now a cidr-only re-range lands and mirrors into options.subnet.
+    const reranged = await patch({ cidr: '10.90.0.0/16' })
+    assertEquals(reranged.status, 200)
+    assertEquals(await stored(), {
+      cidr: '10.90.0.0/16',
+      options: { dockerNetworkName: 'edge', subnet: '10.90.0.0/16', mtu: 1400 },
+    })
+
+    // Clearing works once nothing depends on the subnet.
+    const cleared = await patch({ cidr: null })
+    assertEquals(cleared.status, 200)
+    assertEquals(await stored(), {
+      cidr: null,
+      options: { dockerNetworkName: 'edge', mtu: 1400 },
+    })
   })
 })

@@ -7,6 +7,7 @@ import {
   loadServerDatacenterAddress,
   loadServerFabricAddress,
   loadServerPublicAddress,
+  partitionSharedDatacenters,
   pinAddressForDatacenter,
   preferredFamilyOrder,
   privateEndpointErrorResponse,
@@ -194,7 +195,7 @@ function createFixtureDb(fixture: Fixture): Parameters<typeof resolvePrivateEndp
         }
       }
 
-      // loadDatacenterAddressPreferences: { id, options }
+      // loadDatacenterPolicies: { id, options }
       if (keys.length === 2 && keySet.has('id') && keySet.has('options')) {
         return {
           from() {
@@ -240,6 +241,12 @@ test('privateEndpointErrorResponse returns 422 with error-only body', async () =
     },
     {
       kind: 'private_family_mismatch',
+      fromServerId: 'a',
+      toServerId: 'b',
+      datacenterId: 'dc-a',
+    },
+    {
+      kind: 'failover_requires_trusted_datacenter',
       fromServerId: 'a',
       toServerId: 'b',
       datacenterId: 'dc-a',
@@ -874,4 +881,271 @@ test('preferredFamilyOrder and pinAddressForDatacenter honor address preference'
     pinAddressForDatacenter(fromPins, toPins, 'dc-missing', 'ipv6'),
     null,
   )
+})
+
+const TWO_SHARED_DC_MEMBERSHIPS: MembershipPinRow[] = [
+  membershipPin('s1', 'dc-a', '10.0.0.1'),
+  membershipPin('s1', 'dc-b', '10.1.0.1'),
+  membershipPin('s2', 'dc-a', '10.0.0.2'),
+  membershipPin('s2', 'dc-b', '10.1.0.2'),
+]
+
+test('resolvePrivateEndpoint picks the shared datacenter with the lower priority number', async () => {
+  const db = createFixtureDb({
+    memberships: TWO_SHARED_DC_MEMBERSHIPS,
+    datacenterOptions: [
+      { id: 'dc-a', options: { priority: 200 } },
+      { id: 'dc-b', options: { priority: 10 } },
+    ],
+  })
+  assertEquals(await resolvePrivateEndpoint(db, {
+    fromServerId: 's1',
+    purpose: 'failover-replication',
+    toServerId: 's2',
+  }), {
+    address: '10.1.0.2',
+    transport: 'datacenter',
+    datacenterId: 'dc-b',
+  })
+})
+
+test('resolvePrivateEndpoint breaks equal priority by datacenter id', async () => {
+  const db = createFixtureDb({
+    memberships: TWO_SHARED_DC_MEMBERSHIPS,
+    datacenterOptions: [
+      { id: 'dc-a', options: { priority: 50 } },
+      { id: 'dc-b', options: { priority: 50 } },
+    ],
+  })
+  assertEquals(await resolvePrivateEndpoint(db, {
+    fromServerId: 's1',
+    purpose: 'read-replication',
+    toServerId: 's2',
+  }), {
+    address: '10.0.0.2',
+    transport: 'datacenter',
+    datacenterId: 'dc-a',
+  })
+})
+
+const UNTRUSTED_ONLY_FIXTURE: Fixture = {
+  memberships: [
+    membershipPin('s1', 'dc-shared', '10.0.0.1'),
+    membershipPin('s2', 'dc-shared', '10.0.0.2'),
+  ],
+  datacenterOptions: [
+    { id: 'dc-shared', options: { trusted: false } },
+  ],
+  relays: [
+    {
+      relayId: 'r1',
+      serverId: 's1',
+      fabricId: 'fabric-1',
+      fabricCreatedAt: '2020-01-01T00:00:00.000Z',
+      address: '10.250.0.1',
+    },
+    {
+      relayId: 'r2',
+      serverId: 's2',
+      fabricId: 'fabric-1',
+      fabricCreatedAt: '2020-01-01T00:00:00.000Z',
+      address: '10.250.0.2',
+    },
+  ],
+  publicAddresses: [
+    { serverId: 's2', address: '203.0.113.20' },
+  ],
+}
+
+test('failover-replication over an untrusted-only shared datacenter is failover_requires_trusted_datacenter', async () => {
+  const db = createFixtureDb(UNTRUSTED_ONLY_FIXTURE)
+  assertEquals(await resolvePrivateEndpoint(db, {
+    fromServerId: 's1',
+    purpose: 'failover-replication',
+    toServerId: 's2',
+  }), {
+    kind: 'failover_requires_trusted_datacenter',
+    fromServerId: 's1',
+    toServerId: 's2',
+    datacenterId: 'dc-shared',
+  })
+})
+
+test('read-replication and client-backend skip an untrusted shared datacenter and use fabric', async () => {
+  const db = createFixtureDb(UNTRUSTED_ONLY_FIXTURE)
+  for (const purpose of ['read-replication', 'client-backend'] as const) {
+    assertEquals(await resolvePrivateEndpoint(db, {
+      fromServerId: 's1',
+      purpose,
+      toServerId: 's2',
+    }), {
+      address: '10.250.0.2',
+      transport: 'fabric',
+      fabricId: 'fabric-1',
+    })
+  }
+})
+
+test('read-replication and client-backend fall from an untrusted shared datacenter to public without fabric', async () => {
+  const db = createFixtureDb({ ...UNTRUSTED_ONLY_FIXTURE, relays: [] })
+  for (const purpose of ['read-replication', 'client-backend'] as const) {
+    assertEquals(await resolvePrivateEndpoint(db, {
+      fromServerId: 's1',
+      purpose,
+      toServerId: 's2',
+    }), {
+      address: '203.0.113.20',
+      transport: 'public',
+    })
+  }
+})
+
+test('failover-replication with no shared datacenter at all stays private_path_unavailable', async () => {
+  const db = createFixtureDb({
+    memberships: [
+      membershipPin('s1', 'dc-a', '10.0.0.1'),
+      membershipPin('s2', 'dc-b', '10.1.0.2'),
+    ],
+    datacenterOptions: [
+      { id: 'dc-a', options: { trusted: false } },
+      { id: 'dc-b', options: { trusted: false } },
+    ],
+  })
+  assertEquals(await resolvePrivateEndpoint(db, {
+    fromServerId: 's1',
+    purpose: 'failover-replication',
+    toServerId: 's2',
+  }), {
+    kind: 'private_path_unavailable',
+    fromServerId: 's1',
+    toServerId: 's2',
+  })
+})
+
+test('resolvePrivateEndpoint prefers a trusted shared datacenter over a lower-priority untrusted one', async () => {
+  const db = createFixtureDb({
+    memberships: TWO_SHARED_DC_MEMBERSHIPS,
+    datacenterOptions: [
+      { id: 'dc-a', options: { priority: 0, trusted: false } },
+      { id: 'dc-b', options: { priority: 900 } },
+    ],
+  })
+  for (const purpose of ['failover-replication', 'read-replication', 'client-backend'] as const) {
+    assertEquals(await resolvePrivateEndpoint(db, {
+      fromServerId: 's1',
+      purpose,
+      toServerId: 's2',
+    }), {
+      address: '10.1.0.2',
+      transport: 'datacenter',
+      datacenterId: 'dc-b',
+    })
+  }
+})
+
+test('a trusted family mismatch still wins over falling through past an untrusted datacenter', async () => {
+  const db = createFixtureDb({
+    memberships: [
+      membershipPin('s1', 'dc-trusted', '2001:db8::1'),
+      membershipPin('s2', 'dc-trusted', '203.0.113.2'),
+      membershipPin('s1', 'dc-untrusted', '10.0.0.1'),
+      membershipPin('s2', 'dc-untrusted', '10.0.0.2'),
+    ],
+    datacenterOptions: [
+      { id: 'dc-untrusted', options: { priority: 0, trusted: false } },
+    ],
+    publicAddresses: [
+      { serverId: 's2', address: '203.0.113.20' },
+    ],
+  })
+  for (const purpose of ['failover-replication', 'read-replication', 'client-backend'] as const) {
+    assertEquals(await resolvePrivateEndpoint(db, {
+      fromServerId: 's1',
+      purpose,
+      toServerId: 's2',
+    }), {
+      kind: 'private_family_mismatch',
+      fromServerId: 's1',
+      toServerId: 's2',
+      datacenterId: 'dc-trusted',
+    })
+  }
+})
+
+test('untrusted datacenters never raise a family mismatch', async () => {
+  const db = createFixtureDb({
+    memberships: [
+      membershipPin('s1', 'dc-untrusted', '2001:db8::1'),
+      membershipPin('s2', 'dc-untrusted', '203.0.113.2'),
+    ],
+    datacenterOptions: [
+      { id: 'dc-untrusted', options: { trusted: false } },
+    ],
+    publicAddresses: [
+      { serverId: 's2', address: '203.0.113.20' },
+    ],
+  })
+  assertEquals(await resolvePrivateEndpoint(db, {
+    fromServerId: 's1',
+    purpose: 'read-replication',
+    toServerId: 's2',
+  }), {
+    address: '203.0.113.20',
+    transport: 'public',
+  })
+  assertEquals(await resolvePrivateEndpoint(db, {
+    fromServerId: 's1',
+    purpose: 'failover-replication',
+    toServerId: 's2',
+  }), {
+    kind: 'failover_requires_trusted_datacenter',
+    fromServerId: 's1',
+    toServerId: 's2',
+    datacenterId: 'dc-untrusted',
+  })
+})
+
+test('partitionSharedDatacenters sorts by (priority, id) and defaults absent policies', () => {
+  const pin = (
+    serverId: string,
+    datacenterId: string,
+  ) => ({
+    ipId: `${serverId}-${datacenterId}`,
+    serverId,
+    datacenterId,
+    networkId: null,
+    address: '10.0.0.1',
+    family: 4 as const,
+  })
+  const fromPins = [
+    pin('s1', 'dc-z'),
+    pin('s1', 'dc-a'),
+    pin('s1', 'dc-m'),
+    pin('s1', 'dc-u2'),
+    pin('s1', 'dc-u1'),
+    pin('s1', 'dc-only-from'),
+  ]
+  const toPins = [
+    pin('s2', 'dc-z'),
+    pin('s2', 'dc-a'),
+    pin('s2', 'dc-m'),
+    pin('s2', 'dc-u2'),
+    pin('s2', 'dc-u1'),
+    pin('s2', 'dc-only-to'),
+  ]
+  const policies = new Map([
+    ['dc-z', { addressPreference: 'ipv6' as const, priority: 5, trusted: true }],
+    ['dc-a', { addressPreference: 'ipv6' as const, priority: 100, trusted: true }],
+    ['dc-u2', { addressPreference: 'ipv6' as const, priority: 50, trusted: false }],
+    ['dc-u1', { addressPreference: 'ipv6' as const, priority: 50, trusted: false }],
+  ])
+  // dc-m has no policy row → defaults (priority 100, trusted) → ties with dc-a, id order.
+  assertEquals(partitionSharedDatacenters(fromPins, toPins, policies), {
+    trusted: ['dc-z', 'dc-a', 'dc-m'],
+    untrusted: ['dc-u1', 'dc-u2'],
+  })
+  assertEquals(partitionSharedDatacenters([], toPins, policies), {
+    trusted: [],
+    untrusted: [],
+  })
 })

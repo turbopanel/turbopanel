@@ -53,6 +53,7 @@ import {
   type OrganizationOptions,
   parseOrganizationOptions,
 } from "../lib/organization-options.ts";
+import { resolveOrganizationDockerNetworking } from "../lib/docker-address-pools.ts";
 import {
   parseServerHardwareProfile,
   parseServerHostResources,
@@ -1709,6 +1710,44 @@ export function registerDaemonApiRoutes<E extends Env>(
       const result = await buildDeploymentSecretsRehydrate(c, db, body);
       if (result instanceof Response) return result;
       return c.json({ ok: true, ...result }, 200);
+    },
+  );
+
+  /**
+   * Org-wide dockerd addressing (`default-address-pools` / `bip`) for the
+   * calling server's owner organization. Pulled once per daemon session
+   * (not carried on `environment.deploy`): the pools must reach a host that
+   * never runs a tenant deploy, and applying them restarts dockerd — a
+   * deploy is the wrong moment for that. Empty when unconfigured.
+   */
+  daemon.get(
+    "/host/docker-networking",
+    requireDaemonJwt,
+    enforceJwtRestLimit("host-docker-networking"),
+    requireActiveDaemonKey,
+    async (c) => {
+      const db = getDb(c);
+      if (!db) {
+        return c.json({ ok: false, error: "database unavailable" }, 503);
+      }
+      const daemonServerId = c.get("daemonServerId");
+      const [row] = await db
+        .select({ orgOptions: organization.options })
+        .from(server)
+        .innerJoin(organization, eq(organization.id, server.organizationId))
+        .where(eq(server.id, daemonServerId))
+        .limit(1);
+      if (!row) {
+        return c.json({ ok: false, error: "server not found" }, 404);
+      }
+      const docker = resolveOrganizationDockerNetworking(
+        parseOrganizationOptions(row.orgOptions),
+      );
+      return c.json({
+        ok: true,
+        addressPools: docker.addressPools ?? [],
+        defaultBridgeCidr: docker.defaultBridgeCidr ?? null,
+      }, 200);
     },
   );
 

@@ -4,8 +4,10 @@ import type { Db } from '../../db.ts'
 import { fabric, ip, relay } from '../db/schema.ts'
 import { inetAddressToString } from '../ip-address.ts'
 import {
-  loadDatacenterAddressPreferences,
+  defaultDatacenterPolicyRow,
+  loadDatacenterPolicies,
   type DatacenterAddressPreference,
+  type DatacenterPolicyRow,
 } from './datacenter-networks.ts'
 import {
   loadDatacenterMembershipsForServers,
@@ -38,6 +40,18 @@ export type PrivateEndpointError =
   }
   | {
     kind: 'private_family_mismatch'
+    fromServerId: string
+    toServerId: string
+    datacenterId: string
+  }
+  | {
+    /**
+     * The only datacenters the pair shares are `trusted: false`. Failover
+     * replication never rides an untrusted L2, and it never falls through to
+     * fabric/public either. `datacenterId` is the first untrusted shared
+     * datacenter (priority order) for operator messaging.
+     */
+    kind: 'failover_requires_trusted_datacenter'
     fromServerId: string
     toServerId: string
     datacenterId: string
@@ -271,6 +285,57 @@ export function pinAddressForDatacenter(
   return null
 }
 
+export type SharedDatacenterPartition = {
+  /** `trusted: true` shared datacenters, sorted `(priority asc, id asc)`. */
+  trusted: string[]
+  /** `trusted: false` shared datacenters, sorted `(priority asc, id asc)`. */
+  untrusted: string[]
+}
+
+function policyFor(
+  policiesByDatacenter: ReadonlyMap<string, DatacenterPolicyRow>,
+  datacenterId: string,
+): DatacenterPolicyRow {
+  return policiesByDatacenter.get(datacenterId) ?? defaultDatacenterPolicyRow()
+}
+
+/**
+ * Split the datacenters two servers share into trusted / untrusted lists,
+ * each ordered by `(priority asc, datacenterId asc)`. The id tiebreak keeps
+ * the order deterministic when two datacenters carry the same priority.
+ * Absent policy entries fall back to the documented defaults
+ * (`priority` 100, `trusted` true, `addressPreference` ipv6).
+ *
+ * Shared with TurboFabric path planning (`planRelayPath`) so the managed
+ * ladder and WireGuard endpoint selection can never disagree on which LAN
+ * segment a pair may use.
+ */
+export function partitionSharedDatacenters(
+  fromPins: readonly DatacenterMembershipRow[],
+  toPins: readonly DatacenterMembershipRow[],
+  policiesByDatacenter: ReadonlyMap<string, DatacenterPolicyRow>,
+): SharedDatacenterPartition {
+  const shared = sharedDatacenterIds(fromPins, toPins)
+  const compare = (a: string, b: string): number => {
+    const diff = policyFor(policiesByDatacenter, a).priority -
+      policyFor(policiesByDatacenter, b).priority
+    if (diff !== 0) return diff
+    return a.localeCompare(b)
+  }
+  const trusted: string[] = []
+  const untrusted: string[] = []
+  for (const datacenterId of shared) {
+    if (policyFor(policiesByDatacenter, datacenterId).trusted) {
+      trusted.push(datacenterId)
+    } else {
+      untrusted.push(datacenterId)
+    }
+  }
+  trusted.sort(compare)
+  untrusted.sort(compare)
+  return { trusted, untrusted }
+}
+
 function unavailablePath(
   fromServerId: string,
   toServerId: string,
@@ -282,23 +347,29 @@ function unavailablePath(
   }
 }
 
+/**
+ * Datacenter rung of the ladder: walk only the **trusted** shared datacenters
+ * in priority order and return the first family-compatible pin address. A
+ * trusted shared datacenter with no common family still reports
+ * `private_family_mismatch` (before any fall-through). Untrusted datacenters
+ * are never inspected, so they can neither win nor raise a mismatch.
+ */
 function resolveDatacenterFromCaches(params: {
   fromServerId: string
   toServerId: string
-  membershipsByServer: Map<string, DatacenterMembershipRow[]>
-  preferencesByDatacenter: Map<string, DatacenterAddressPreference>
+  fromPins: readonly DatacenterMembershipRow[]
+  toPins: readonly DatacenterMembershipRow[]
+  partition: SharedDatacenterPartition
+  policiesByDatacenter: ReadonlyMap<string, DatacenterPolicyRow>
 }): ResolvedPrivateEndpoint | PrivateEndpointError | null {
-  const fromPins = params.membershipsByServer.get(params.fromServerId) ?? []
-  const toPins = params.membershipsByServer.get(params.toServerId) ?? []
-  const shared = sharedDatacenterIds(fromPins, toPins)
+  const { fromPins, toPins } = params
   let mismatchDatacenterId: string | undefined
-  for (const sharedDc of shared) {
-    const preference = params.preferencesByDatacenter.get(sharedDc) ?? 'ipv6'
+  for (const sharedDc of params.partition.trusted) {
     const address = pinAddressForDatacenter(
       fromPins,
       toPins,
       sharedDc,
-      preference,
+      policyFor(params.policiesByDatacenter, sharedDc).addressPreference,
     )
     if (address) {
       return {
@@ -351,12 +422,20 @@ function resolveFabricFromCaches(params: {
  * is inverted from the former fabric-first path: datacenter (LAN) before
  * fabric, then public.
  *
+ * The datacenter rung is **trust-gated and priority-ordered**: only shared
+ * datacenters with `trusted: true` are candidates, walked in
+ * `(priority asc, id asc)` order (see {@link partitionSharedDatacenters}).
+ * Untrusted shared datacenters are skipped for every purpose.
+ *
  * - `failover-replication`: `local` → `datacenter` only (never fabric/public).
+ *   When the pair shares only untrusted datacenters the error is
+ *   `failover_requires_trusted_datacenter`; with no shared datacenter at all
+ *   it stays `private_path_unavailable`.
  * - `read-replication` / `client-backend`: `local` → `datacenter` → `fabric`
  *   → `public`.
  *
- * A shared-datacenter family mismatch is returned before fabric/public for
- * every purpose.
+ * A trusted shared-datacenter family mismatch is returned before fabric/public
+ * for every purpose.
  */
 function resolveOneFromCaches(params: {
   fromServerId: string
@@ -364,17 +443,40 @@ function resolveOneFromCaches(params: {
   purpose: PrivateEndpointPurpose
   membershipsByServer: Map<string, DatacenterMembershipRow[]>
   relays: RelayJoinRow[]
-  preferencesByDatacenter: Map<string, DatacenterAddressPreference>
+  policiesByDatacenter: ReadonlyMap<string, DatacenterPolicyRow>
   publicAddressesByServer: Map<string, string>
 }): ResolvedPrivateEndpoint | PrivateEndpointError {
   if (params.fromServerId === params.toServerId) {
     return { address: '127.0.0.1', transport: 'local' }
   }
 
-  const datacenter = resolveDatacenterFromCaches(params)
+  const fromPins = params.membershipsByServer.get(params.fromServerId) ?? []
+  const toPins = params.membershipsByServer.get(params.toServerId) ?? []
+  const partition = partitionSharedDatacenters(
+    fromPins,
+    toPins,
+    params.policiesByDatacenter,
+  )
+  const datacenter = resolveDatacenterFromCaches({
+    fromServerId: params.fromServerId,
+    toServerId: params.toServerId,
+    fromPins,
+    toPins,
+    partition,
+    policiesByDatacenter: params.policiesByDatacenter,
+  })
   if (datacenter) return datacenter
 
   if (params.purpose === 'failover-replication') {
+    const untrustedDatacenterId = partition.untrusted[0]
+    if (untrustedDatacenterId !== undefined) {
+      return {
+        kind: 'failover_requires_trusted_datacenter',
+        fromServerId: params.fromServerId,
+        toServerId: params.toServerId,
+        datacenterId: untrustedDatacenterId,
+      }
+    }
     return unavailablePath(params.fromServerId, params.toServerId)
   }
 
@@ -442,7 +544,7 @@ export async function resolvePrivateEndpoints(
   for (const pins of membershipsByServer.values()) {
     for (const pin of pins) datacenterIds.add(pin.datacenterId)
   }
-  const preferencesByDatacenter = await loadDatacenterAddressPreferences(
+  const policiesByDatacenter = await loadDatacenterPolicies(
     db,
     [...datacenterIds],
   )
@@ -456,7 +558,7 @@ export async function resolvePrivateEndpoints(
         purpose: params.purpose,
         membershipsByServer,
         relays,
-        preferencesByDatacenter,
+        policiesByDatacenter,
         publicAddressesByServer,
       }),
     )

@@ -197,7 +197,7 @@ function emptyPathCaches(): EndpointAddressCaches {
     publicAddressByServer: new Map(),
     reportedByServer: new Map(),
     datacenterMembershipsByServer: new Map(),
-    addressPreferenceByDatacenter: new Map(),
+    policyByDatacenter: new Map(),
     natEndpointByPair: new Map(),
     failedPathKindsByPair: new Map(),
   };

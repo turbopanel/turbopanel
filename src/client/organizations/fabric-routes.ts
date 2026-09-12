@@ -1,12 +1,13 @@
 import { eq } from 'drizzle-orm'
-import type { Hono } from 'hono'
+import type { Context, Hono } from 'hono'
 import type { AppEnv } from '../../app.ts'
 import type { AuthRouteOpts } from '../authn/http.ts'
 import { encryptSecret } from '../authn/data-encryption.ts'
 import { createSessionMiddleware } from '../authn/middleware.ts'
 import { assertCanManageOr403, parseJsonBody } from '../shared.ts'
-import { getDb, getDaemonCellRegistry } from '../../db.ts'
+import { type Db, getDb, getDaemonCellRegistry } from '../../db.ts'
 import { organization } from '../../lib/db/schema.ts'
+import type { CommandQueue } from '../../lib/commands/queue.ts'
 import { assertDispatchInfrastructure } from '../servers/command-dispatch.ts'
 import {
   assertGatewayRelaysReady,
@@ -16,6 +17,8 @@ import {
 import {
   disableOrganizationFabric,
   enableOrganizationFabric,
+  FabricContainerPoolOverlapError,
+  type FabricEnablePolicy,
   type FabricRecord,
   getOrganizationFabric,
   listFabricRelays,
@@ -24,10 +27,15 @@ import {
   loadRelayPresharedKeyPresence,
   purgeOrganizationComposeNetworks,
   type RelayRecord,
-  updateFabricPolicy,
   updateFabricRelay,
 } from '../../lib/db/fabric-records.ts'
 import { parseFabricPolicy } from '../../lib/fabric/policy.ts'
+import {
+  findCidrCollision,
+  loadOrganizationCidrRegistry,
+} from '../../lib/net/cidr-collisions.ts'
+import { cidrContains } from '../../lib/ip-address.ts'
+import { cidrCollisionResponse } from '../networks/network-scope.ts'
 import {
   enqueueFabricReconcileForServers,
   reconcileFabricMembership,
@@ -51,6 +59,47 @@ import {
   toFabricRelayApiRow,
 } from './fabric-routes-helpers.ts'
 
+/**
+ * Validate a replacement `fabric.options.containerPool` before anything is
+ * written:
+ *
+ * 1. the candidate goes through the org CIDR collision authority with the
+ *    *current* pool excluded (a narrowed or re-based pool always overlaps
+ *    the one it replaces) — 409 via `cidrCollisionResponse`;
+ * 2. every allocated relay prefix must still sit inside the new pool.
+ *    Nothing renumbers relays, so a pool that orphans one is refused
+ *    (409 `fabric_container_pool_in_use`) rather than silently accepted.
+ */
+async function assertContainerPoolWritable(
+  c: Context,
+  db: Db,
+  organizationId: string,
+  containerPool: string,
+  existing: FabricRecord | null,
+): Promise<Response | null> {
+  const registry = await loadOrganizationCidrRegistry(db, organizationId)
+  const collision = findCidrCollision(
+    { ...registry, containerPool: null },
+    { cidr: containerPool, intent: 'docker' },
+  )
+  if (collision) return cidrCollisionResponse(c, collision)
+  if (!existing) return null
+  const relays = await listFabricRelays(db, existing.id)
+  const orphaned = relays.find((row) => !cidrContains(containerPool, row.prefix))
+  if (orphaned) {
+    return c.json(
+      {
+        error: 'fabric_container_pool_in_use',
+        containerPool,
+        prefix: orphaned.prefix,
+        serverId: orphaned.serverId,
+      },
+      409,
+    )
+  }
+  return null
+}
+
 function fabricSecretsFromContext(c: {
   get: (key: 'secretsConfig' | 'dataEncryptionSecrets') => unknown
 }): FabricMembershipSecrets {
@@ -63,6 +112,65 @@ function fabricSecretsFromContext(c: {
   return {
     ...(secretsConfig ? { secretsConfig } : {}),
     ...(dataEncryptionSecrets ? { dataEncryptionSecrets } : {}),
+  }
+}
+
+/**
+ * `PUT { enabled: false }`: tear relays down, purge compose networks and
+ * clear the fabric row together. A never-enabled org is a no-op.
+ */
+async function disableOrganizationFabricForPut(params: {
+  db: Db
+  commandQueue: CommandQueue
+  organizationId: string
+  actorId: string
+  secrets: FabricMembershipSecrets
+}): Promise<void> {
+  const { db, commandQueue, organizationId, actorId, secrets } = params
+  const existing = await getOrganizationFabric(db, organizationId)
+  if (!existing) return
+  const relays = await listFabricRelays(db, existing.id)
+  await enqueueFabricReconcileForServers({
+    db,
+    commandQueue,
+    actorType: 'user',
+    actorId,
+    fabric: existing,
+    serverIds: relays.map((row) => row.serverId),
+    enabled: false,
+    ...secrets,
+  })
+  await db.transaction(async (tx) => {
+    await purgeOrganizationComposeNetworks(tx, organizationId)
+    await disableOrganizationFabric(tx, organizationId)
+  })
+}
+
+/**
+ * Enable (or re-policy) the fabric, mapping the typed enable failures onto
+ * their HTTP responses. A first-time enable picks the tp0 host range before
+ * anything is written; a pool that range lands in is refused with nothing
+ * enabled.
+ */
+async function enableOrganizationFabricOrResponse(
+  c: Context,
+  db: Db,
+  organizationId: string,
+  policy: FabricEnablePolicy,
+): Promise<FabricRecord | Response> {
+  try {
+    return await enableOrganizationFabric(db, organizationId, policy)
+  } catch (err) {
+    if (err instanceof FabricContainerPoolOverlapError) {
+      return cidrCollisionResponse(c, {
+        code: 'cidr_overlaps_fabric',
+        cidr: err.containerPool,
+        conflictingCidr: err.fabricCidr,
+        networkId: null,
+        datacenterId: null,
+      })
+    }
+    return fabricEnableErrorResponse(err)
   }
 }
 
@@ -311,39 +419,38 @@ export function registerOrganizationFabricRoutes(
     const secrets = fabricSecretsFromContext(c)
 
     if (!parsed.enabled) {
-      const existing = await getOrganizationFabric(db, id)
-      if (!existing) return c.json(fabricSettingsResponse(null))
-      const relays = await listFabricRelays(db, existing.id)
-      await enqueueFabricReconcileForServers({
+      await disableOrganizationFabricForPut({
         db,
         commandQueue,
-        actorType: 'user',
+        organizationId: id,
         actorId: session.userId,
-        fabric: existing,
-        serverIds: relays.map((row) => row.serverId),
-        enabled: false,
-        ...secrets,
-      })
-      await db.transaction(async (tx) => {
-        await purgeOrganizationComposeNetworks(tx, id)
-        await disableOrganizationFabric(tx, id)
+        secrets,
       })
       return c.json(fabricSettingsResponse(null))
     }
 
-    let record: FabricRecord
-    try {
-      record = await enableOrganizationFabric(db, id)
-    } catch (err) {
-      return fabricEnableErrorResponse(err)
+    if (parsed.containerPool !== undefined) {
+      const poolDenied = await assertContainerPoolWritable(
+        c,
+        db,
+        id,
+        parsed.containerPool,
+        await getOrganizationFabric(db, id),
+      )
+      if (poolDenied) return poolDenied
     }
-    if (parsed.allowRelay !== undefined) {
-      const updated = await updateFabricPolicy(db, {
-        fabricId: record.id,
-        allowRelay: parsed.allowRelay,
-      })
-      if (updated) record = updated
+
+    // The policy rides along with the enable so relay prefixes are carved
+    // from the requested pool (never the default) and the fabric row, policy
+    // and relays land — or roll back — together.
+    const policy: FabricEnablePolicy = {
+      ...(parsed.allowRelay === undefined ? {} : { allowRelay: parsed.allowRelay }),
+      ...(parsed.containerPool === undefined
+        ? {}
+        : { containerPool: parsed.containerPool }),
     }
+    const record = await enableOrganizationFabricOrResponse(c, db, id, policy)
+    if (record instanceof Response) return record
     const enqueueResults = await reconcileFabricMembership({
       db,
       commandQueue,

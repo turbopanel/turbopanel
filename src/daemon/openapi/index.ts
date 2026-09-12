@@ -1,6 +1,7 @@
 import { authPaths, authSchemas } from "./auth.ts";
 import { caPaths } from "./ca.ts";
 import { executionLogPaths, executionLogSchemas } from "./execution-logs.ts";
+import { hostPaths, hostSchemas } from "./host.ts";
 import { metricsPaths, metricsSchemas } from "./metrics.ts";
 import { readinessPaths, readinessSchemas } from "./readiness.ts";
 import { versionPaths, versionSchemas } from "./version.ts";
@@ -46,6 +47,7 @@ export function getDaemonOpenApiSpec(serverUrl: string): object {
         ...versionSchemas,
         ...metricsSchemas,
         ...executionLogSchemas,
+        ...hostSchemas,
       },
     },
     paths: {
@@ -56,6 +58,7 @@ export function getDaemonOpenApiSpec(serverUrl: string): object {
       ...websocketPaths,
       ...metricsPaths,
       ...executionLogPaths,
+      ...hostPaths,
     },
   };
 }

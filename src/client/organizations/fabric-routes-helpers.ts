@@ -7,6 +7,7 @@ import {
 } from '../../lib/fabric/enqueue.ts'
 import {
   type EndpointAddressCaches,
+  FabricAllocationError,
   type FabricPathSummaryEntry,
   type FabricRecord,
   type FabricSegmentMaterial,
@@ -14,7 +15,11 @@ import {
   type RelayRole,
   resolveRelayGlobalEndpointAddress,
 } from '../../lib/db/fabric-records.ts'
-import { parseFabricOptions } from '../../lib/fabric/cidr.ts'
+import {
+  parseFabricOptions,
+  parseIpv4Cidr,
+  RELAY_PREFIX_LENGTH,
+} from '../../lib/fabric/cidr.ts'
 import { PREFERRED_GATEWAY_IDS_MAX, resolveEffectiveAllowRelay } from '../../lib/fabric/policy.ts'
 import { isValidCidr, isValidIpAddress } from '../../lib/ip-address.ts'
 import { isValidWireguardPublicKey } from '../../lib/fabric/wg.ts'
@@ -38,16 +43,43 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+export type FabricPutBody = {
+  ok: true
+  enabled: boolean
+  allowRelay?: boolean
+  /** Replacement `fabric.options.containerPool` (IPv4, wide enough for one relay `/16`). */
+  containerPool?: string
+}
+
+/**
+ * The fabric container pool is deliberately IPv4-only (see the header of
+ * `src/lib/fabric/cidr.ts`) and must fit at least one relay aggregate
+ * (`RELAY_PREFIX_LENGTH`), otherwise `requireRelayPrefix` would exhaust on
+ * the first relay.
+ */
+export function parseFabricContainerPoolField(
+  value: unknown,
+): FieldResult<string> {
+  if (typeof value !== 'string') {
+    return { ok: false, error: 'Invalid containerPool' }
+  }
+  const parsed = parseIpv4Cidr(value)
+  if (!parsed || parsed.prefix > RELAY_PREFIX_LENGTH) {
+    return { ok: false, error: 'Invalid containerPool' }
+  }
+  return { ok: true, value: value.trim() }
+}
+
 export function parseFabricPutBody(
   body: unknown,
-): { ok: true; enabled: boolean; allowRelay?: boolean } | {
+): FabricPutBody | {
   ok: false
   error: string
 } {
   if (!isPlainObject(body) || typeof body.enabled !== 'boolean') {
     return { ok: false, error: 'Invalid request' }
   }
-  const parsed: { ok: true; enabled: boolean; allowRelay?: boolean } = {
+  const parsed: FabricPutBody = {
     ok: true,
     enabled: body.enabled,
   }
@@ -56,6 +88,11 @@ export function parseFabricPutBody(
       return { ok: false, error: 'Invalid allowRelay' }
     }
     parsed.allowRelay = body.allowRelay
+  }
+  if (body.containerPool !== undefined) {
+    const pool = parseFabricContainerPoolField(body.containerPool)
+    if (!pool.ok) return pool
+    parsed.containerPool = pool.value
   }
   return parsed
 }
@@ -342,7 +379,16 @@ export function fabricTypedEnqueueErrorResponse(
 }
 
 /** Map enable-organization fabric failures to stable API error codes. */
+/**
+ * 409 for every typed allocation failure an enable can raise
+ * (`fabric_address_pool_exhausted` for the tp0 host range,
+ * `fabric_prefix_pool_exhausted` for a container pool too small for the org's
+ * relays), `fabric_cidr_unavailable` when no host range is free, 500 otherwise.
+ */
 export function fabricEnableErrorResponse(err: unknown): Response {
+  if (err instanceof FabricAllocationError) {
+    return Response.json({ error: err.kind }, { status: 409 })
+  }
   const message = err instanceof Error ? err.message : String(err)
   if (message.includes('No free CIDR')) {
     return Response.json({ error: 'fabric_cidr_unavailable' }, { status: 409 })
@@ -493,7 +539,13 @@ export function fabricSettingsResponse(
   relays: FabricRelayApiRow[] = [],
 ): {
   enabled: boolean
-  fabric?: { id: string; cidr: string; mtu: number; allowRelay: boolean }
+  fabric?: {
+    id: string
+    cidr: string
+    mtu: number
+    allowRelay: boolean
+    containerPool: string
+  }
   relays: FabricRelayApiRow[]
 } {
   if (!record) return { enabled: false, relays: [] }
@@ -505,6 +557,7 @@ export function fabricSettingsResponse(
       cidr: record.cidr,
       mtu: options.mtu,
       allowRelay: options.allowRelay,
+      containerPool: options.containerPool,
     },
     relays,
   }

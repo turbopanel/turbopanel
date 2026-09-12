@@ -51,6 +51,7 @@ import {
   validateManagedDatabaseCreateName,
 } from './routes-helpers.ts'
 import { postgresEngineSpec } from '../../lib/managed/postgres.ts'
+import { privateEndpointErrorResponse } from '../../lib/net/private-endpoint.ts'
 import { writeManagedRowOptions } from './options.ts'
 
 /**
@@ -282,6 +283,30 @@ test('assertFailoverReplicaTransportAllowed rejects fabric and public', () => {
   assertEquals(assertFailoverReplicaTransportAllowed('public'), {
     kind: 'failover_replica_requires_datacenter_transport',
   })
+})
+
+test('failover_requires_trusted_datacenter maps to a 422 with an error-only body', async () => {
+  // The managed routes surface resolver errors through
+  // `privateEndpointErrorResponse` (replica create / member class patch);
+  // the untrusted-datacenter refusal must keep its own code rather than
+  // collapsing into `failover_replica_requires_datacenter_transport`.
+  const c = {
+    json(body: unknown, status?: number) {
+      return Response.json(body, { status })
+    },
+  } as unknown as Parameters<typeof privateEndpointErrorResponse>[0]
+  const response = privateEndpointErrorResponse(c, {
+    kind: 'failover_requires_trusted_datacenter',
+    fromServerId: 's-replica',
+    toServerId: 's-primary',
+    datacenterId: 'dc-untrusted',
+  })
+  assertEquals(response.status, 422)
+  assertEquals(await response.json(), {
+    error: 'failover_requires_trusted_datacenter',
+  })
+  // A trusted-derived `datacenter` transport still passes the class gate.
+  assertEquals(assertFailoverReplicaTransportAllowed('datacenter'), null)
 })
 
 test('evaluateReplicaClassConversion allows failover to read and gates the reverse', () => {

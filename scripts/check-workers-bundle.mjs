@@ -34,6 +34,9 @@ if (!fs.existsSync(WRANGLER)) {
 }
 
 const outdir = fs.mkdtempSync(path.join(os.tmpdir(), "tp-workers-bundle-"));
+const wranglerConfigHome = fs.mkdtempSync(
+  path.join(os.tmpdir(), "tp-wrangler-xdg-"),
+);
 
 try {
   // Target the top-level wrangler env (deploy entry = src/workers.ts). Empty
@@ -56,6 +59,10 @@ try {
         ...process.env,
         // Keep CI/local runs quiet; dry-run does not need network telemetry.
         WRANGLER_SEND_METRICS: "false",
+        // Guest `/home/vagrant/.config` can be unwritable (EACCES mkdir
+        // `.wrangler`). Isolate logs so the check reports bundle errors, not
+        // home-directory permissions.
+        XDG_CONFIG_HOME: wranglerConfigHome,
       },
     },
   );
@@ -71,4 +78,5 @@ try {
   console.log("check-workers-bundle: ok");
 } finally {
   fs.rmSync(outdir, { recursive: true, force: true });
+  fs.rmSync(wranglerConfigHome, { recursive: true, force: true });
 }

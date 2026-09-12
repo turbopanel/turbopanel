@@ -12,6 +12,7 @@ export const ipSchemas = {
       "scope",
       "createdAt",
       "updatedAt",
+      "stale",
     ],
     properties: {
       id: { type: "string", format: "uuid" },
@@ -33,6 +34,16 @@ export const ipSchemas = {
       options: { type: ["object", "null"] },
       createdAt: { type: "string", format: "date-time" },
       updatedAt: { type: "string", format: "date-time" },
+      stale: {
+        type: "boolean",
+        description:
+          "Membership pins only: true when the daemon stopped reporting this address and no unambiguous replacement was found, so the pin no longer reflects a live host address. Derived from `metadata.stale`, read-only.",
+      },
+      staleSince: { type: ["string", "null"], format: "date-time" },
+      staleReason: {
+        type: ["string", "null"],
+        enum: ["address_gone_no_candidate", "address_gone_ambiguous", null],
+      },
     },
   },
   IpsResponse: {

@@ -1,6 +1,6 @@
 /**
  * Defensive parsers for `datacenter.options` jsonb fields used by the
- * client timezone and host-defaults APIs.
+ * client timezone, host-defaults, and routing-policy APIs.
  */
 
 import {
@@ -31,6 +31,55 @@ export type DatacenterOptions = {
   sshPort?: number
   /** Desired NTP client settings inherited by member servers. */
   ntp?: NtpDefaults
+  /**
+   * Routing-ladder rank among a server's datacenters — an integer in
+   * `DATACENTER_PRIORITY_MIN`..`DATACENTER_PRIORITY_MAX`, **lower wins**.
+   * Absence implies `DEFAULT_DATACENTER_PRIORITY`. The parser only returns the
+   * field when it was explicitly set to an in-range integer.
+   */
+  priority?: number
+  /**
+   * Whether the datacenter's L2 is under the operator's control. Absence
+   * implies `DEFAULT_DATACENTER_TRUSTED` (`true`); an untrusted datacenter is
+   * one whose L2 the operator does not control (shared or provider-owned
+   * segments). The parser only returns the field when it was explicitly set.
+   */
+  trusted?: boolean
+}
+
+/** Effective `priority` when `datacenter.options.priority` is absent. */
+export const DEFAULT_DATACENTER_PRIORITY = 100
+export const DATACENTER_PRIORITY_MIN = 0
+export const DATACENTER_PRIORITY_MAX = 1000
+/** Effective `trusted` when `datacenter.options.trusted` is absent. */
+export const DEFAULT_DATACENTER_TRUSTED = true
+
+/** Integer in range → the value; anything else → undefined (never clamps). */
+export function parseDatacenterPriority(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return undefined
+  if (value < DATACENTER_PRIORITY_MIN || value > DATACENTER_PRIORITY_MAX) {
+    return undefined
+  }
+  return value
+}
+
+/** Resolved policy fields the API surfaces beside the raw `options`. */
+export type DatacenterPolicy = {
+  priority: number
+  trusted: boolean
+}
+
+/**
+ * Effective routing policy: parsed `options` with documented defaults applied
+ * (`priority` → `DEFAULT_DATACENTER_PRIORITY`, `trusted` → `DEFAULT_DATACENTER_TRUSTED`).
+ * Accepts raw jsonb so callers can hand it a `datacenter.options` row value.
+ */
+export function resolveDatacenterPolicy(value: unknown): DatacenterPolicy {
+  const options = parseDatacenterOptions(value)
+  return {
+    priority: options.priority ?? DEFAULT_DATACENTER_PRIORITY,
+    trusted: options.trusted ?? DEFAULT_DATACENTER_TRUSTED,
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -55,5 +104,8 @@ export function parseDatacenterOptions(value: unknown): DatacenterOptions {
   if (sshPort !== undefined) options.sshPort = sshPort
   const ntp = parseNtpDefaults(value.ntp)
   if (ntp) options.ntp = ntp
+  const priority = parseDatacenterPriority(value.priority)
+  if (priority !== undefined) options.priority = priority
+  if (typeof value.trusted === 'boolean') options.trusted = value.trusted
   return options
 }

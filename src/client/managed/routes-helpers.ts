@@ -858,7 +858,14 @@ export type FailoverReplicaTransportError = {
   kind: 'failover_replica_requires_datacenter_transport'
 }
 
-/** Failover replicas may only use local or datacenter transport — never fabric/public. */
+/**
+ * Failover replicas may only use local or datacenter transport — never
+ * fabric/public.
+ *
+ * An untrusted shared datacenter is rejected **upstream** by the resolver
+ * (`failover_requires_trusted_datacenter` from `resolvePrivateEndpoint`), so
+ * a `datacenter` transport reaching this check is always trusted-derived.
+ */
 export function assertFailoverReplicaTransportAllowed(
   transport: 'local' | 'datacenter' | 'fabric' | 'public',
 ): FailoverReplicaTransportError | null {
@@ -872,6 +879,9 @@ export function assertFailoverReplicaTransportAllowed(
  * Whether placement still needs a ready datacenter CIDR after transport resolve.
  * Failover always needs a datacenter (fabric/public are rejected earlier).
  * Read replicas skip the CIDR check on fabric/public (already overlay/TLS).
+ *
+ * Only trusted-derived transports reach here: the resolver already refused an
+ * untrusted-only failover pair with `failover_requires_trusted_datacenter`.
  */
 export function replicaPlacementNeedsDatacenter(
   transport: 'local' | 'datacenter' | 'fabric' | 'public',

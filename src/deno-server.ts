@@ -25,6 +25,7 @@ import {
 } from './lib/db/webhook-delivery-records.ts'
 import { registerWebhookRoutes } from './webhook/routes.ts'
 import { runManagedIngressOrphanSweep } from './client/managed/ingress-desired.ts'
+import { runDatacenterRepinFanoutSweep } from './client/datacenters/repin-fanout.ts'
 import { runSystemReconcileSweep } from './client/system/reconcile.ts'
 import {
   LEAF_RENEWAL_SWEEP_INTERVAL_MS,
@@ -461,6 +462,16 @@ export async function startDenoServer(options: StartDenoServerOptions = {}): Pro
       dataEncryptionSecrets,
     }).catch((err) => {
       logWarn('daemon-cell', `managed ingress orphan sweep error: ${String(err)}`)
+    })
+    // Automatic membership repins stamp `ip.metadata.repin.pendingFanoutAt`
+    // from the presence path (which must not enqueue); this drains them with
+    // the datacenter routing fan-out. Isolated so a failure never affects the
+    // other sweeps.
+    void runDatacenterRepinFanoutSweep(db, commandQueue, {
+      secretsConfig,
+      dataEncryptionSecrets,
+    }).catch((err) => {
+      logWarn('daemon-cell', `datacenter repin fan-out sweep error: ${String(err)}`)
     })
   }
   // Observe pending self-host inventory on boot, not only after the first

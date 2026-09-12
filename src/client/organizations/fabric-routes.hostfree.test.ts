@@ -1,9 +1,10 @@
 import { assertEquals } from '@std/assert'
 import type { Db } from '../../db.ts'
 import type { CommandQueue } from '../../lib/commands/queue.ts'
-import type {
-  EndpointAddressCaches,
-  RelayRecord,
+import {
+  type EndpointAddressCaches,
+  FabricAllocationError,
+  type RelayRecord,
 } from '../../lib/db/fabric-records.ts'
 import {
   bindSecretEncryptFn,
@@ -151,10 +152,36 @@ test('fabricSettingsResponse omits fabric when TurboFabric is off', () => {
     }),
     {
       enabled: true,
-      fabric: { id: 'fab-1', cidr: '10.250.0.0/16', mtu: 1420, allowRelay: false },
+      fabric: {
+        id: 'fab-1',
+        cidr: '10.250.0.0/16',
+        mtu: 1420,
+        allowRelay: false,
+        containerPool: '10.192.0.0/12',
+      },
       relays: [],
     },
   )
+})
+
+test('parseFabricPutBody accepts an IPv4 containerPool wide enough for a relay /16', () => {
+  assertEquals(parseFabricPutBody({ enabled: true, containerPool: ' 10.64.0.0/10 ' }), {
+    ok: true,
+    enabled: true,
+    containerPool: '10.64.0.0/10',
+  })
+  assertEquals(parseFabricPutBody({ enabled: true, containerPool: '10.64.0.0/16' }), {
+    ok: true,
+    enabled: true,
+    containerPool: '10.64.0.0/16',
+  })
+  // Too narrow for one relay aggregate, IPv6, or not a CIDR at all.
+  for (const containerPool of ['10.64.0.0/17', 'fd00::/48', '10.64.0.0', 12]) {
+    assertEquals(parseFabricPutBody({ enabled: true, containerPool }), {
+      ok: false,
+      error: 'Invalid containerPool',
+    })
+  }
 })
 
 test('fabricSettingsResponse includes relay rows without presharedKey', () => {
@@ -482,6 +509,14 @@ test('fabricEnableErrorResponse maps CIDR and pool exhaustion to 409', async () 
   const other = fabricEnableErrorResponse('boom')
   assertEquals(other.status, 500)
   assertEquals(await other.json(), { error: 'TurboFabric update failed' })
+
+  // Typed allocation failures report their own kind — a container pool too
+  // small for the org's relays is a prefix, not host-address, exhaustion.
+  const prefix = fabricEnableErrorResponse(
+    new FabricAllocationError('fabric_prefix_pool_exhausted'),
+  )
+  assertEquals(prefix.status, 409)
+  assertEquals(await prefix.json(), { error: 'fabric_prefix_pool_exhausted' })
 })
 
 test('fabricNotEnabledErrorResponse returns stable 409', async () => {
@@ -515,7 +550,7 @@ function emptyEndpointCaches(): EndpointAddressCaches {
     publicAddressByServer: new Map(),
     reportedByServer: new Map(),
     datacenterMembershipsByServer: new Map(),
-    addressPreferenceByDatacenter: new Map(),
+    policyByDatacenter: new Map(),
     natEndpointByPair: new Map(),
     failedPathKindsByPair: new Map(),
   }

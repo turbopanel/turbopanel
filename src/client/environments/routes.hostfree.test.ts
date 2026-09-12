@@ -9,6 +9,7 @@ import type { AppEnv } from "../../app.ts";
 import type { Db } from "../../db.ts";
 import {
   environment,
+  hosting,
   managed,
   project,
   repository,
@@ -222,6 +223,14 @@ async function buildSessionApp(opts: SessionAppOpts): Promise<{
         }
         if (table === repository) {
           return { where: () => Promise.resolve([]) };
+        }
+        if (table === hosting) {
+          // `loadRepinNeedsRedeployForEnvironment`: no hostings pinned to an ip.
+          const chain = {
+            innerJoin: () => chain,
+            where: () => Promise.resolve([]),
+          };
+          return chain;
         }
         if (table === project) {
           return {
@@ -478,9 +487,12 @@ test("GET /environments/:id returns the serialized environment", async () => {
   assertEquals(res.status, 200);
   const body = await res.json() as {
     environment: { id: string; name: string };
+    needsRedeploy: unknown[];
   };
   assertEquals(body.environment.id, environmentId);
   assertEquals(body.environment.name, "Staging");
+  // Derived repin notice rides the detail response; empty without hostings.
+  assertEquals(body.needsRedeploy, []);
 });
 
 test("POST /environments returns 400 when projectId is missing", async () => {

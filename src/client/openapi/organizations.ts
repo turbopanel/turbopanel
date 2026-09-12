@@ -277,6 +277,58 @@ export const organizationSchemas = {
       },
     },
   },
+  OrganizationDockerNetworking: {
+    type: "object",
+    required: ["addressPools", "defaultBridgeCidr"],
+    properties: {
+      addressPools: {
+        type: "array",
+        maxItems: 16,
+        description:
+          "dockerd default-address-pools every enrolled host merges into /etc/docker/daemon.json: the ranges Docker carves unaddressed bridge networks out of. Empty = Docker's built-in pools. Bases also join the organization CIDR registry (collision authority) and the TurboFabric allocator exclusion list.",
+        items: {
+          type: "object",
+          required: ["base", "size"],
+          properties: {
+            base: {
+              type: "string",
+              description: "Pool network CIDR, e.g. 10.200.0.0/16.",
+            },
+            size: {
+              type: "integer",
+              description:
+                "Prefix length of every network carved from base (>= the base prefix, <= 30 for IPv4).",
+            },
+          },
+        },
+      },
+      defaultBridgeCidr: {
+        type: ["string", "null"],
+        description:
+          "dockerd bip — the default docker0 bridge's own address with prefix (172.17.0.1/16). null = Docker's built-in bridge.",
+      },
+    },
+  },
+  OrganizationDockerNetworkingUpdate: {
+    type: "object",
+    description:
+      "Replaces the whole stored object (null on a key clears it). addressPools entries must not overlap each other; every base is checked by the CIDR collision authority against the fabric, reserved ranges, site subnets and registered docker networks (409 with the usual cidr_overlaps_* / subnet_overlaps codes). Applying a change restarts dockerd on each host; networks and containers that already exist keep their addresses — pools only affect networks created afterwards.",
+    properties: {
+      addressPools: {
+        type: ["array", "null"],
+        maxItems: 16,
+        items: {
+          type: "object",
+          required: ["base", "size"],
+          properties: {
+            base: { type: "string" },
+            size: { type: "integer" },
+          },
+        },
+      },
+      defaultBridgeCidr: { type: ["string", "null"] },
+    },
+  },
   TimezonesResponse: {
     type: "object",
     required: ["timezones"],
@@ -299,7 +351,7 @@ export const organizationSchemas = {
       },
       fabric: {
         type: "object",
-        required: ["id", "cidr", "mtu", "allowRelay"],
+        required: ["id", "cidr", "mtu", "allowRelay", "containerPool"],
         properties: {
           id: { type: "string", format: "uuid" },
           cidr: { type: "string" },
@@ -308,6 +360,11 @@ export const organizationSchemas = {
             type: "boolean",
             description:
               "Org-level relay transport. Default false (opt-in / degraded). A relay may only tighten this; it cannot enable relay when the org has it off.",
+          },
+          containerPool: {
+            type: "string",
+            description:
+              "Effective IPv4 pool relay /16 prefixes are carved from (`fabric.options.containerPool`, default 10.192.0.0/12).",
           },
           status: { type: "string" },
         },
@@ -521,6 +578,11 @@ export const organizationSchemas = {
         type: "boolean",
         description:
           "Opt-in relay transport (default false, degraded). Relays may only tighten this policy.",
+      },
+      containerPool: {
+        type: "string",
+        description:
+          "Replacement IPv4 pool for relay /16 prefixes (prefix <= /16). Checked by the CIDR collision authority with the current pool excluded (409 cidr_overlaps_* / subnet_overlaps) and refused with 409 fabric_container_pool_in_use when an allocated relay prefix would fall outside it. Changing the pool does not renumber existing relay prefixes.",
       },
     },
   },
@@ -1424,6 +1486,129 @@ export const organizationPaths: Record<string, unknown> = {
       },
     },
   },
+  "/api/client/v1/organizations/{id}/docker-networking": {
+    get: {
+      tags: ["Organizations"],
+      summary: "Get organization Docker host addressing",
+      description:
+        "Manage-gated. Returns the org-wide dockerd default-address-pools and bip every enrolled host merges into /etc/docker/daemon.json. Empty pools / null bip mean Docker's built-in defaults apply.",
+      security: [{ cookieAuth: [] }],
+      parameters: [
+        {
+          name: "id",
+          in: "path",
+          required: true,
+          schema: { type: "string", format: "uuid" },
+        },
+      ],
+      responses: {
+        "200": {
+          description: "Docker host addressing",
+          content: {
+            "application/json": {
+              schema: {
+                $ref: "#/components/schemas/OrganizationDockerNetworking",
+              },
+            },
+          },
+        },
+        "403": {
+          description: "Forbidden",
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/ErrorResponse" },
+            },
+          },
+        },
+        "404": {
+          description: "Organization not found",
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/ErrorResponse" },
+            },
+          },
+        },
+      },
+    },
+    put: {
+      tags: ["Organizations"],
+      summary: "Replace organization Docker host addressing",
+      description:
+        "Manage-gated. Replaces organization.options.docker wholesale (null on a key clears it; a body that clears everything removes the stored key). Every addressPools base runs the CIDR collision authority — 409 cidr_overlaps_fabric / cidr_overlaps_fabric_pool / cidr_overlaps_reserved / cidr_overlaps_docker_network / subnet_overlaps with { cidr, conflictingCidr, networkId?, datacenterId? }. Hosts pick the change up on their next daemon session and restart dockerd; existing networks and containers keep their current addresses.",
+      security: [{ cookieAuth: [] }],
+      parameters: [
+        {
+          name: "id",
+          in: "path",
+          required: true,
+          schema: { type: "string", format: "uuid" },
+        },
+      ],
+      requestBody: {
+        required: true,
+        content: {
+          "application/json": {
+            schema: {
+              $ref: "#/components/schemas/OrganizationDockerNetworkingUpdate",
+            },
+          },
+        },
+      },
+      responses: {
+        "200": {
+          description: "Updated Docker host addressing",
+          content: {
+            "application/json": {
+              schema: {
+                allOf: [
+                  {
+                    $ref: "#/components/schemas/OrganizationDockerNetworking",
+                  },
+                  {
+                    type: "object",
+                    required: ["ok"],
+                    properties: { ok: { type: "boolean", const: true } },
+                  },
+                ],
+              },
+            },
+          },
+        },
+        "400": {
+          description: "Invalid pool, size, overlapping pools, or bip",
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/ErrorResponse" },
+            },
+          },
+        },
+        "403": {
+          description: "Forbidden",
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/ErrorResponse" },
+            },
+          },
+        },
+        "404": {
+          description: "Organization not found",
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/ErrorResponse" },
+            },
+          },
+        },
+        "409": {
+          description: "A pool base overlaps a registered range",
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/ErrorResponse" },
+            },
+          },
+        },
+      },
+    },
+  },
   "/api/client/v1/timezones": {
     get: {
       tags: ["Organizations"],
@@ -1497,7 +1682,7 @@ export const organizationPaths: Record<string, unknown> = {
       tags: ["Organizations"],
       summary: "Enable or disable TurboFabric",
       description:
-        "Manage-gated. `{ enabled: true }` creates the org fabric (if missing) and change-driven `server.fabric.reconcile` on enrolled servers. `{ enabled: false }` enqueues teardown (`tp0`, routed bridges, `TP-FORWARD`, keys, state) then deletes the fabric row and reclaims `network(kind='compose')` / `segment` rows. Does not auto-enable on install, enroll, or first deploy. Returns 409 `fabric_cidr_unavailable` / `fabric_address_pool_exhausted` when the default host CIDR cannot be allocated.",
+        "Manage-gated. `{ enabled: true }` creates the org fabric (if missing) and change-driven `server.fabric.reconcile` on enrolled servers. `{ enabled: false }` enqueues teardown (`tp0`, routed bridges, `TP-FORWARD`, keys, state) then deletes the fabric row and reclaims `network(kind='compose')` / `segment` rows. Does not auto-enable on install, enroll, or first deploy. Returns 409 `fabric_cidr_unavailable` / `fabric_address_pool_exhausted` when the default host CIDR cannot be allocated. Optional `allowRelay` and `containerPool` update `fabric.options`; `containerPool` (IPv4, prefix <= /16 so a relay /16 fits) runs the CIDR collision authority with the current pool excluded (409 `cidr_overlaps_*` / `subnet_overlaps`) and is refused with 409 `fabric_container_pool_in_use` when an allocated relay prefix would fall outside it. Changing the pool does **not** renumber existing relay prefixes — only future allocations are carved from the new pool. The policy is written before any relay is allocated, in one transaction with the fabric row: a first-time enable carves every relay prefix from the requested pool, and a pool too small for the org's servers (409 `fabric_prefix_pool_exhausted`) or one the auto-picked host range lands in (409 `cidr_overlaps_fabric`) leaves TurboFabric disabled.",
       security: [{ cookieAuth: [] }],
       parameters: [
         {

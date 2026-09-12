@@ -1,9 +1,22 @@
 /**
- * IPv4 CIDR helpers for TurboFabric host (`tp0`) and per-relay container
- * aggregates. Dual-stack is reserved in `fabric.options`; not implemented here.
+ * IPv4 **pool arithmetic** for TurboFabric host (`tp0`) and per-relay container
+ * aggregates: `nthSubnet`, `nextFreeSubnet`, `nthHostAddress`, and friends.
+ *
+ * The fabric pool itself stays IPv4 (dual-stack is reserved in
+ * `fabric.options`; not implemented here). Overlap / containment math is
+ * **not** owned here: `cidrOverlaps` / `cidrContains` below are thin IPv4-named
+ * aliases that delegate to the dual-family authority in `../ip-address.ts`
+ * (`cidrsOverlap` / `cidrContains`), so datacenter subnets — which may be IPv6 —
+ * and fabric pools share one comparison implementation.
  */
 
-import { isValidCidr, isValidIpAddress, stripInetPrefixSuffix } from '../ip-address.ts'
+import {
+  cidrContains as cidrContainsAnyFamily,
+  cidrsOverlap,
+  isValidCidr,
+  isValidIpAddress,
+  stripInetPrefixSuffix,
+} from '../ip-address.ts'
 
 export const DEFAULT_FABRIC_HOST_CIDR = '10.250.0.0/16' // NOSONAR typescript:S1313 — RFC1918 TurboFabric tp0 default, not a reachable host
 export const DEFAULT_FABRIC_CONTAINER_POOL = '10.192.0.0/12' // NOSONAR typescript:S1313 — RFC1918 container-pool default, not a reachable host
@@ -67,13 +80,9 @@ export function parseIpv4Cidr(value: string): Ipv4Cidr | null {
   return { network, prefix, hostCount }
 }
 
+/** Delegates to the dual-family authority (`ip-address.ts` `cidrsOverlap`). */
 export function cidrOverlaps(a: string, b: string): boolean {
-  const left = parseIpv4Cidr(a)
-  const right = parseIpv4Cidr(b)
-  if (!left || !right) return false
-  const leftEnd = left.network + left.hostCount - 1
-  const rightEnd = right.network + right.hostCount - 1
-  return left.network <= rightEnd && right.network <= leftEnd
+  return cidrsOverlap(a, b)
 }
 
 export function pickNonOverlappingCidr(
@@ -184,45 +193,55 @@ export function isRelayPrefixUniqueViolation(err: unknown): boolean {
   return message.includes('uniq_relay_fabric_prefix')
 }
 
-/** True when `child` is entirely inside `parent` (same family, longer-or-equal prefix). */
+/**
+ * True when `child` is entirely inside `parent` (same family, longer-or-equal
+ * prefix). Delegates to the dual-family authority (`ip-address.ts` `cidrContains`).
+ */
 export function cidrContains(parent: string, child: string): boolean {
-  const outer = parseIpv4Cidr(parent)
-  const inner = parseIpv4Cidr(child)
-  if (!outer || !inner) return false
-  if (inner.prefix < outer.prefix) return false
-  const outerEnd = outer.network + outer.hostCount - 1
-  const innerEnd = inner.network + inner.hostCount - 1
-  return inner.network >= outer.network && innerEnd <= outerEnd
+  return cidrContainsAnyFamily(parent, child)
 }
 
 /**
  * Lowest-free subnet of `prefixLength` inside `poolCidr` that is not already
- * listed in `taken`. Returns null when the pool is exhausted.
+ * listed in `taken` (exact match — the pool's own allocations) and does not
+ * overlap any range in `exclusions` (reserved rows, site subnets, docker
+ * registrations — fed from `../net/cidr-collisions.ts`). Returns null when
+ * the pool is exhausted.
  */
 export function nextFreeSubnet(
   poolCidr: string,
   prefixLength: number,
   taken: Iterable<string>,
+  exclusions: Iterable<string> = [],
 ): string | null {
   const takenSet = new Set(taken)
+  const excluded = [...exclusions]
   for (let i = 0; ; i++) {
     const candidate = nthSubnet(poolCidr, prefixLength, i)
     if (!candidate) return null
-    if (!takenSet.has(candidate)) return candidate
+    if (takenSet.has(candidate)) continue
+    if (excluded.some((range) => cidrOverlaps(candidate, range))) continue
+    return candidate
   }
 }
 
 /**
  * Lowest-free `/24` inside `relayPrefix` whose CIDR is not already held by a
- * segment that actually falls inside this prefix.
+ * segment that actually falls inside this prefix and does not overlap any
+ * `exclusions` range that reaches into the prefix.
  */
 export function nextFreeSubnetCidr(
   relayPrefix: string,
   takenCidrs: Iterable<string>,
+  exclusions: Iterable<string> = [],
 ): string | null {
   const scoped: string[] = []
   for (const cidrValue of takenCidrs) {
     if (cidrContains(relayPrefix, cidrValue)) scoped.push(cidrValue)
   }
-  return nextFreeSubnet(relayPrefix, 24, scoped)
+  const scopedExclusions: string[] = []
+  for (const range of exclusions) {
+    if (cidrOverlaps(relayPrefix, range)) scopedExclusions.push(range)
+  }
+  return nextFreeSubnet(relayPrefix, 24, scoped, scopedExclusions)
 }

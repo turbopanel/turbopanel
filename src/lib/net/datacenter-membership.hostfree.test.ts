@@ -386,6 +386,7 @@ test('loadDatacenterMembershipsForDatacenter skips incomplete pins', async () =>
       networkId: 'net-v4',
       address: '203.0.113.10',
       family: 4,
+      metadata: null,
     },
   ])
 })

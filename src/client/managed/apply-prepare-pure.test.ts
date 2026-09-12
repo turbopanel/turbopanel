@@ -132,6 +132,16 @@ const ALL_PREPARE_ERRORS: Array<{
     status: 422,
     body: 'private_family_mismatch',
   },
+  {
+    error: {
+      kind: 'failover_requires_trusted_datacenter',
+      fromServerId: 's1',
+      toServerId: 's2',
+      datacenterId: 'dc-a',
+    },
+    status: 422,
+    body: 'failover_requires_trusted_datacenter',
+  },
 ]
 
 test('isPrepareError is true for every ManagedApplyPrepareError kind', () => {

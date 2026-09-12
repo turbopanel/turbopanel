@@ -226,18 +226,177 @@ changes.
   `datacenter_has_members` while any membership pin remains; otherwise **every**
   `kind='datacenter'` network is deleted with the datacenter (**409**
   `datacenter_has_networks` only for leftover non-site / docker rows).
-  `src/lib/net/private-endpoint.ts` resolves reachability (`local` → `fabric` →
-  `datacenter`) in an **address-family aware** way: it intersects the source and
-  target pin families in the shared datacenter and orders candidates by
-  `datacenter.options.addressPreference` (default **IPv6**, RFC 6724), never
-  returning a family the source does not hold; a shared datacenter with no
-  common family is **422** `private_family_mismatch`. Fabric dials over `tp0`.
+- **Membership pin is the single address authority (automatic repin):** a
+  datacenter membership pin (`ip.scope='datacenter'` + `server_id`) is the
+  only durable record of a server's private address in a site subnet.
+  Binding-owned `variable` rows, ProxySQL backend addresses, compose
+  `extra_hosts`, relay `endpoint_address` / gateway `advertisedCidrs`, and
+  hosting `bindAddress` are **recomputed per deploy / reconcile from the pin**
+  and must never be treated as an address record or written back to. When a
+  daemon's reported `resources.ips` moves, `touchServerMetadata`
+  (`src/server-registry.ts`) — the one change-detected write both the Deno
+  WS hello and the Durable Object `#projectInbound` funnel through — runs
+  `applyReportedAddressRepin` (`src/lib/net/repin-apply.ts`) best-effort,
+  gated on `serverIpsEquals` so CPU / docker-only deltas never touch `ip`
+  rows. The decision is pure (`decideRepinActions`, `src/lib/net/repin.ts`):
+  address still reported → nothing (clears a `stale` flag); address gone with
+  **exactly one** reported private address inside the pin's subnet that is
+  not an `ip` row elsewhere in the org → `repin` (`ip.address` rewritten,
+  `metadata.repin { at, from, pendingFanoutAt }`; re-validated through
+  `validateMemberPinAddress`; a `uniq_ip_org_address` race downgrades to
+  stale); zero or 2+ candidates → `metadata.stale { since, reason }`
+  (`address_gone_no_candidate` / `address_gone_ambiguous`). At most one repin
+  per `(server, network)` per pass. **Nothing enqueues on that path** — hello
+  / DO handlers must not enqueue commands — so the routing fan-out is
+  deferred: `runDatacenterRepinFanoutSweep`
+  (`src/client/datacenters/repin-fanout.ts`) drains `pendingFanoutAt` from
+  the shared maintenance tick (`runSystemReconcileSweepTick` in
+  `deno-server.ts`; the `tlsRenewal`-gated block in
+  `daemon/cell/offline-sweep.ts`), one `fanOutDatacenterRoutingChange`
+  (`routing-fanout.ts`, the same core `PATCH /datacenters/:id` uses) per
+  `(org, datacenter)` group plus the repinned servers' own clusters via
+  `listManagedIdsForServer`; the marker is cleared only after success. Leaf
+  SANs re-mint through the existing `managed.ingress.reconcile` /
+  `pendingTlsLeafMetadata` rail — no issuance path here. Hosting
+  `bindAddress` is frozen at deploy time, so `GET /environments/:id` returns a
+  derived `needsRedeploy: { serverId, environmentId }[]`
+  (`src/client/environments/repin-needs-redeploy.ts`, `metadata.repin.at`
+  later than the last applied `deployment.finished_at`); **no automatic
+  `environment.deploy`**, and no new columns — `stale` on `GET /ips[/:id]` and
+  on `GET /datacenters/:id` `members[]` is read from `ip.metadata` via
+  `parseIpPinMetadata`.
+- **CIDR collision authority (`src/lib/net/cidr-collisions.ts`):** every CIDR
+  write — `POST`/`PATCH /networks`, `POST /datacenters`,
+  `POST /datacenters/:id/subnets`, the auto-derive path of
+  `POST /datacenters/:id/members` — calls `assertCidrAvailable` /
+  `assertCidrsAvailable` before touching `network`; do **not** add a local
+  overlap scan to a route. Every pair is a hard **409** with its own code,
+  returned as `{ error, cidr, conflictingCidr, networkId?, datacenterId? }`
+  via `cidrCollisionResponse` (`src/client/networks/network-scope.ts`):
+  `cidr_overlaps_fabric` (org `fabric.cidr`, `tp0`),
+  `cidr_overlaps_fabric_pool` (`fabric.options.containerPool`, default
+  `10.192.0.0/12`), `subnet_overlaps` (any site subnet in the org — the
+  org-wide default is kept, not relaxed), `cidr_overlaps_gateway_advertised`
+  (a site subnet in **another** datacenter when both datacenters have a
+  gateway-role relay — resolved through `resolveDerivedAdvertisedCidrsByRelay`,
+  so IPv6 subnets and operator overrides behave as on the wire; this is the
+  case that actually breaks `AllowedIPs`), `cidr_overlaps_reserved`
+  (`network(kind='reserved')`), `cidr_overlaps_docker_network`
+  (`kind='docker'` / `kind='managed'` rows with a CIDR). `PATCH` passes
+  `excludeNetworkId` so a row never collides with itself. **`kind='reserved'`**
+  is the operator's "never allocate from here" registry (org-only scope, CIDR
+  required, `name` carries the label — "Corp VPN — Chicago branch"); unlike
+  `managed`, reserved rows are operator data: rename and re-range are allowed,
+  `cidr: null` is **400** `network_cidr_required`. The reverse direction is
+  automatic: `occupiedCidrs` (fabric-records) sweeps every `network.cidr`, so
+  reserved rows constrain `pickDefaultFabricHostCidr`, and the allocators
+  (`requireRelayPrefix` / `requireSubnetCidr`, `nextFreeSubnet` /
+  `nextFreeSubnetCidr`) take an **exclusion list** from
+  `loadCidrAllocationExclusions` so a relay `/16` or a `tpn_*` `/24` never
+  lands inside a reserved range or a site subnet (exhaustion keeps the
+  existing `FabricAllocationError` codes). **Org Docker host addressing**
+  (`organization.options.docker`, `src/lib/docker-address-pools.ts`,
+  `GET`/`PUT /organizations/:id/docker-networking`) — every pool base
+  **and** the aligned network of `defaultBridgeCidr` (dockerd `bip`, the
+  docker0 subnet on every host), together `dockerHostCidrs()` — is part of
+  the registry (`dockerHostCidrs`, same rung / code as `kind='docker'` rows
+  — `cidr_overlaps_docker_network`) **and** of the exclusion list, so a
+  later reserved range, site subnet, docker row or fabric allocation can
+  never land inside a pool or the bridge. The PUT first refuses a submitted
+  bridge that overlaps a submitted pool (`findDockerBridgePoolOverlap`, 409
+  `cidr_overlaps_docker_network`), then checks each new range with
+  `excludeDockerHostCidrs` so a replace never collides with the config it
+  overwrites. They are host configuration, not a
+  registration: the daemon pulls them over
+  `GET /api/daemon/v1/host/docker-networking` and the `docker` Ansible role
+  merges them into `/etc/docker/daemon.json` (restarts dockerd; existing
+  networks keep their ranges). **Per-network `kind='docker'` addressing:**
+  rows may carry `options.subnet` / `ipRange` / `gateway` / `mtu`
+  (`docker-network-name.ts`); `network.cidr` is the registry-visible range
+  and `POST`/`PATCH /networks` keep it in agreement with `options.subnet`
+  (`reconcileDockerNetworkAddressing` — either may be sent, a disagreeing pair
+  is **400** `docker_network_subnet_mismatch`, `cidr: null` is refused while
+  `ipRange` / `gateway` remain). The addressing rides `environment.deploy` as
+  the additive `dockerNetworkAddressing[]` sibling of `dockerExternalNetworks`
+  (resolved by `resolveRegisteredExternalDockerNetworks` from the same rows
+  the registration check loads) and is applied only when the daemon *creates*
+  the network. **`fabric.options.containerPool` is operator-settable** via
+  `PUT /organizations/:id/fabric` (`containerPool`, IPv4, prefix ≤ `/16`):
+  validated through the same authority with the current pool excluded, and
+  **409** `fabric_container_pool_in_use` when an allocated relay prefix would
+  fall outside it — changing the pool never renumbers existing relays. The
+  policy is handed to `enableOrganizationFabric` and written **before** relay
+  allocation, in one transaction with the fabric row, so a first-time enable
+  carves every relay `/16` from the requested pool; a pool too small for the
+  org's servers (**409** `fabric_prefix_pool_exhausted`) or one the
+  auto-picked host range lands in (**409** `cidr_overlaps_fabric`) rolls back
+  and leaves TurboFabric disabled.
+  `src/lib/net/private-endpoint.ts` resolves reachability (`local` →
+  `datacenter` → `fabric` → `public`) in an **address-family aware** way: it
+  intersects the source and target pin families in each trusted shared
+  datacenter (priority order — see the routing-policy bullet below) and orders
+  candidates by `datacenter.options.addressPreference` (default **IPv6**, RFC
+  6724), never returning a family the source does not hold; a trusted shared
+  datacenter with no common family is **422** `private_family_mismatch`. Fabric
+  dials over `tp0`.
   Shared membership + **at least one** subnet gate managed-cluster private
   placement (`assertDatacenterHasCidr` / `assertServerDatacenterReady` in
   `src/lib/net/datacenter-networks.ts`). New error codes: **400** `invalid_cidr`
   / `address_not_in_any_subnet`, **409** `address_in_use` / `subnet_overlaps` /
   `subnet_has_members`, **422** `private_family_mismatch` (alongside existing
   `datacenter_has_members` / `datacenter_has_networks`).
+
+- **Datacenter routing policy (`options.priority` / `options.trusted`):** a
+  datacenter is a **logical routing domain**, not a building — a server may
+  belong to several. Two `datacenter.options` jsonb fields (parsed by
+  `src/lib/datacenter-options.ts`, no migration) describe how the ladder should
+  treat each membership:
+  - `priority` — integer `0`–`1000`, **lower wins**; absent = **`100`**
+    (`DEFAULT_DATACENTER_PRIORITY`). Out-of-range or non-integer values are
+    dropped by the parser, never clamped.
+  - `trusted` — boolean; absent = **`true`** (`DEFAULT_DATACENTER_TRUSTED`).
+    `false` marks a datacenter whose L2 is **not** under the operator's control
+    (shared or provider-owned segments).
+
+  `PATCH /datacenters/:id` accepts both under the same **replace-all `options`**
+  semantics as `addressPreference` (send the merged object). `GET /datacenters`
+  and `GET /datacenters/:id` return the raw `options` **and** the effective
+  top-level `priority` / `trusted` with defaults applied
+  (`resolveDatacenterPolicy` / `attachEffectivePolicy`), so clients never
+  re-derive them. The ladder **reads both**: `loadDatacenterPolicies`
+  (`src/lib/net/datacenter-networks.ts`) loads the effective
+  `{ addressPreference, priority, trusted }` per datacenter and
+  `partitionSharedDatacenters` (`src/lib/net/private-endpoint.ts`) splits the
+  datacenters a pair shares into trusted / untrusted lists ordered
+  `(priority asc, id asc)` — the id tiebreak is what keeps the choice
+  deterministic. The datacenter rung walks **only the trusted list**, for
+  every purpose; an untrusted datacenter can neither win nor raise
+  `private_family_mismatch`. `read-replication` / `client-backend` then fall
+  through to fabric → public as before. `failover-replication` never leaves
+  the LAN: an untrusted-only pair is **422**
+  `failover_requires_trusted_datacenter` (replica create, member class patch,
+  managed apply prepare — never collapsed into
+  `failover_replica_requires_datacenter_transport`), no shared datacenter at
+  all stays `private_path_unavailable`. TurboFabric path planning
+  (`lanPathCandidate` in `src/lib/db/fabric-records.ts`) consumes the same
+  partition through `EndpointAddressCaches.policyByDatacenter`, so a
+  `direct_lan` WireGuard endpoint is never emitted on a segment the managed
+  ladder refused; gateway locality ranking deliberately stays trust-blind
+  (it only orders next hops — the hop itself is trust-filtered).
+  `PATCH /datacenters/:id` compares the effective policy before/after the
+  UPDATE and, only when `priority` or `trusted` actually changed, re-converges:
+  every managed cluster with a member pinned into the datacenter goes through
+  `fanOutManagedIngressReconcile` (recompute `replica.replication_transport`,
+  re-materialize bindings, enqueue `managed.ingress.reconcile` on members and
+  bound consumers), then `reconcileFabricMembership` re-plans the org fabric
+  and enqueues `server.fabric.reconcile` only where the desired payload hash
+  moved. The fan-out needs the command queue and both secrets on the context;
+  without them (unit-test app, secretless isolate) it logs and skips, and a
+  fan-out failure never turns the successful save into a 5xx. CIDR overlap /
+  containment for datacenter subnets (IPv4 **or** IPv6) must go through the
+  dual-family authority `cidrsOverlap` / `cidrContains` in
+  `src/lib/ip-address.ts`; `src/lib/fabric/cidr.ts` keeps only IPv4 pool
+  arithmetic and delegates its overlap helpers there.
 
 - **Compose hosting projection (client surface):** `x-turbopanel.hosting[]` is
   the _declaration_; `hosting` rows are the _record_. `reconcile-hostings.ts`

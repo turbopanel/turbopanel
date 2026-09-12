@@ -12,6 +12,7 @@ import {
   ensureComposeNetworkRow,
   ensureFabricRelays,
   FabricAllocationError,
+  FabricContainerPoolOverlapError,
   listEnvironmentComposeNetworks,
   purgeComposeNetworksCreatedAfter,
   purgeEnvironmentComposeNetworks,
@@ -545,6 +546,28 @@ function createLifecycleDb(opts: {
         return thenableRows([]);
       },
     }),
+    /**
+     * Snapshot every table, run `fn` against this same object, and restore
+     * the snapshot when it throws — the rollback `enableOrganizationFabric`
+     * relies on to leave no fabric row behind a refused pool.
+     */
+    transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+      const snapshot = {
+        fabrics: fabrics.map((row) => ({ ...row })),
+        relays: relays.map((row) => ({ ...row })),
+        networks: networks.map((row) => ({ ...row })),
+        segments: segments.map((row) => ({ ...row })),
+      };
+      try {
+        return await fn(db as unknown as Db);
+      } catch (err) {
+        fabrics.splice(0, fabrics.length, ...snapshot.fabrics);
+        relays.splice(0, relays.length, ...snapshot.relays);
+        networks.splice(0, networks.length, ...snapshot.networks);
+        segments.splice(0, segments.length, ...snapshot.segments);
+        throw err;
+      }
+    },
   };
 
   return db as unknown as LifecycleDb;
@@ -578,6 +601,50 @@ test("enableOrganizationFabric inserts fabric avoiding occupied org CIDRs", asyn
   assertEquals(db.fabrics.length, 1);
   assertEquals(db.relays.length, 1);
   assertEquals(db.relays[0]?.fabricId, record.id);
+});
+
+test("enableOrganizationFabric steps around an operator-reserved range (reverse direction)", async () => {
+  // `occupiedCidrs` sweeps every `network.cidr` — a `kind='reserved'` row
+  // constrains `pickDefaultFabricHostCidr` without any extra wiring, and the
+  // relay prefix allocator honours it too.
+  const db = createLifecycleDb({
+    servers: [{ id: "srv-a", organizationId: ORG }],
+    networks: [
+      {
+        id: "net-reserved",
+        organizationId: ORG,
+        environmentId: ENV,
+        kind: "reserved",
+        name: "Corp VPN — Chicago branch",
+        cidr: "10.250.0.0/16",
+        options: {},
+      },
+      {
+        id: "net-reserved-2",
+        organizationId: ORG,
+        environmentId: ENV,
+        kind: "reserved",
+        name: "Transit",
+        cidr: "10.251.128.0/17",
+        options: {},
+      },
+      {
+        id: "net-reserved-pool",
+        organizationId: ORG,
+        environmentId: ENV,
+        kind: "reserved",
+        name: "Lab",
+        cidr: "10.192.0.0/16",
+        options: {},
+      },
+    ],
+  });
+
+  const record = await enableOrganizationFabric(db, ORG);
+
+  assertEquals(record.cidr, "10.252.0.0/16");
+  assertEquals(db.relays.length, 1);
+  assertEquals(db.relays[0]?.prefix, "10.193.0.0/16");
 });
 
 test("enableOrganizationFabric reuses existing fabric and ensures relays", async () => {
@@ -668,6 +735,153 @@ test("enableOrganizationFabric throws when no free host CIDR remains", async () 
     Error,
     "No free CIDR for TurboFabric",
   );
+});
+
+test("enableOrganizationFabric carves every first-time relay from the requested containerPool", async () => {
+  const db = createLifecycleDb({
+    servers: [
+      { id: "srv-a", organizationId: ORG },
+      { id: "srv-b", organizationId: ORG },
+    ],
+  });
+
+  const record = await enableOrganizationFabric(db, ORG, {
+    containerPool: "10.64.0.0/15",
+    allowRelay: true,
+  });
+
+  assertEquals(record.cidr, "10.250.0.0/16");
+  assertEquals(record.options, {
+    containerPool: "10.64.0.0/15",
+    listenPort: 51821,
+    mtu: 1420,
+    allowRelay: true,
+  });
+  assertEquals(db.fabrics.length, 1);
+  assertEquals(
+    db.relays.map((row) => row.prefix).sort((a, b) => a.localeCompare(b)),
+    ["10.64.0.0/16", "10.65.0.0/16"],
+  );
+});
+
+test("enableOrganizationFabric rolls back the fabric row when the requested pool is too small", async () => {
+  // Two servers need two relay /16s; a /16 pool fits exactly one.
+  const db = createLifecycleDb({
+    servers: [
+      { id: "srv-a", organizationId: ORG },
+      { id: "srv-b", organizationId: ORG },
+    ],
+  });
+
+  const err = await assertRejects(() =>
+    enableOrganizationFabric(db, ORG, { containerPool: "10.64.0.0/16" })
+  );
+  assertKind(err, "fabric_prefix_pool_exhausted");
+  assertEquals(db.fabrics, []);
+  assertEquals(db.relays, []);
+});
+
+test("enableOrganizationFabric refuses a pool the auto-picked host range lands in without writing", async () => {
+  const db = createLifecycleDb({
+    servers: [{ id: "srv-a", organizationId: ORG }],
+  });
+
+  const err = await assertRejects(
+    () => enableOrganizationFabric(db, ORG, { containerPool: "10.250.0.0/16" }),
+    FabricContainerPoolOverlapError,
+  );
+  assertEquals(err.containerPool, "10.250.0.0/16");
+  assertEquals(err.fabricCidr, "10.250.0.0/16");
+  assertEquals(db.fabrics, []);
+  assertEquals(db.relays, []);
+});
+
+test("enableOrganizationFabric applies the policy before allocating relays for new servers", async () => {
+  const existing: FabricRecord = {
+    id: "fab-existing",
+    organizationId: ORG,
+    cidr: "10.252.0.0/16",
+    options: null,
+  };
+  const db = createLifecycleDb({
+    servers: [
+      { id: "srv-a", organizationId: ORG },
+      { id: "srv-b", organizationId: ORG },
+    ],
+    fabrics: [{
+      id: existing.id,
+      organizationId: ORG,
+      cidr: existing.cidr,
+      options: null,
+    }],
+    relays: [{
+      id: "relay-a",
+      fabricId: existing.id,
+      serverId: "srv-a",
+      address: "10.252.0.1",
+      role: "member",
+      keepalive: null,
+      endpointAddress: null,
+      publicKey: null,
+      prefix: "10.64.0.0/16",
+      advertisedCidrs: [],
+      metadata: {},
+    }],
+  });
+
+  const record = await enableOrganizationFabric(db, ORG, {
+    containerPool: "10.64.0.0/15",
+  });
+
+  assertEquals(record.id, existing.id);
+  assertEquals(
+    (record.options as { containerPool: string }).containerPool,
+    "10.64.0.0/15",
+  );
+  assertEquals(db.relays.length, 2);
+  assertEquals(db.relays[1]?.serverId, "srv-b");
+  assertEquals(db.relays[1]?.prefix, "10.65.0.0/16");
+});
+
+test("enableOrganizationFabric rolls back a policy write when the new relay cannot be allocated", async () => {
+  const existing: FabricRecord = {
+    id: "fab-existing",
+    organizationId: ORG,
+    cidr: "10.252.0.0/16",
+    options: { containerPool: "10.64.0.0/15" },
+  };
+  const db = createLifecycleDb({
+    servers: [
+      { id: "srv-a", organizationId: ORG },
+      { id: "srv-b", organizationId: ORG },
+    ],
+    fabrics: [{
+      id: existing.id,
+      organizationId: ORG,
+      cidr: existing.cidr,
+      options: existing.options,
+    }],
+    relays: [{
+      id: "relay-a",
+      fabricId: existing.id,
+      serverId: "srv-a",
+      address: "10.252.0.1",
+      role: "member",
+      keepalive: null,
+      endpointAddress: null,
+      publicKey: null,
+      prefix: "10.64.0.0/16",
+      advertisedCidrs: [],
+      metadata: {},
+    }],
+  });
+
+  const err = await assertRejects(() =>
+    enableOrganizationFabric(db, ORG, { containerPool: "10.64.0.0/16" })
+  );
+  assertKind(err, "fabric_prefix_pool_exhausted");
+  assertEquals(db.fabrics[0]?.options, { containerPool: "10.64.0.0/15" });
+  assertEquals(db.relays.length, 1);
 });
 
 test("disableOrganizationFabric no-ops when fabric is absent", async () => {

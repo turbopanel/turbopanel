@@ -7,13 +7,21 @@ import { assertCanOr403, listVisible } from "../authz/index.ts";
 import { resolveEntityOrganizationId } from "../authz/create-access-grant.ts";
 import { type Db, getDb } from "../../db.ts";
 import { datacenter, ip, network, server } from "../../lib/db/schema.ts";
-import { parseDatacenterOptions } from "../../lib/datacenter-options.ts";
-import { suggestDatacenterNames } from "../../lib/datacenter-name-suggestions.ts";
 import {
-  alignedNetworkCidr,
-  cidrsOverlap,
-  isValidCidr,
-} from "../../lib/ip-address.ts";
+  type DatacenterPolicy,
+  parseDatacenterOptions,
+  resolveDatacenterPolicy,
+} from "../../lib/datacenter-options.ts";
+import { getCommandQueue } from "../../lib/commands/queue.ts";
+import { isNoopCommandQueue } from "../../lib/commands/noop-command-queue.ts";
+import { compatLogWarn } from "../../log-compat.ts";
+import { fanOutDatacenterRoutingChange } from "./routing-fanout.ts";
+import { suggestDatacenterNames } from "../../lib/datacenter-name-suggestions.ts";
+import { alignedNetworkCidr, isValidCidr } from "../../lib/ip-address.ts";
+import {
+  assertCidrAvailable,
+  assertCidrsAvailable,
+} from "../../lib/net/cidr-collisions.ts";
 import {
   loadDatacenterCidrs,
   loadDatacenterSubnets,
@@ -25,6 +33,8 @@ import {
   validateMemberPinAddress,
 } from "../../lib/net/datacenter-membership.ts";
 import { isIpAddressUniqueViolation } from "../ips/ip-create-validation.ts";
+import { parseIpPinMetadata } from "../../lib/net/repin.ts";
+import { cidrCollisionResponse } from "../networks/network-scope.ts";
 import {
   assertCanCreateOr403,
   assertCanManageOr403,
@@ -37,6 +47,7 @@ import {
   parseJsonBody,
 } from "../shared.ts";
 import {
+  attachEffectivePolicy,
   attachPrivateCidrs,
   type CreateDatacenterInput,
   groupMembersByDerivedCidr,
@@ -50,6 +61,7 @@ import {
 } from "./create-input.ts";
 
 export {
+  attachEffectivePolicy,
   attachPrivateCidrs,
   groupMembersByDerivedCidr,
   mergeDatacenterMetadata,
@@ -60,6 +72,108 @@ export {
   resolveOrCreateSubnetForAddress,
   resolveSeededFields,
 } from "./create-input.ts";
+
+function datacenterPolicyChanged(
+  before: DatacenterPolicy,
+  after: DatacenterPolicy,
+): boolean {
+  return before.priority !== after.priority ||
+    before.trusted !== after.trusted;
+}
+
+type DatacenterPatchFields = {
+  name?: string | null;
+  description?: string | null;
+  metadata?: Record<string, unknown> | null;
+  options?: ReturnType<typeof parseDatacenterOptions> | null;
+  updatedAt: string;
+};
+
+/**
+ * Validate a PATCH /datacenters/:id body into the UPDATE column set, or
+ * return the 400 response describing the first invalid field.
+ */
+function parseDatacenterPatchFields(
+  c: Context,
+  body: Record<string, unknown>,
+): DatacenterPatchFields | Response {
+  let patchFields: DatacenterPatchFields;
+  try {
+    patchFields = buildPatchUpdateFields(body);
+  } catch {
+    return c.json({ error: "Invalid request" }, 400);
+  }
+
+  const metadataResult = parseJsonbObject(c, body, "metadata");
+  if (metadataResult instanceof Response) return metadataResult;
+  if (metadataResult !== null) patchFields.metadata = metadataResult;
+
+  // `options` is replace-all: `null` clears the stored blob so GET falls back
+  // to the documented defaults (`priority` 100, `trusted` true, ...).
+  if (body.options === null) {
+    patchFields.options = null;
+    return patchFields;
+  }
+  const optionsResult = parseJsonbObject(c, body, "options");
+  if (optionsResult instanceof Response) return optionsResult;
+  if (optionsResult !== null) {
+    patchFields.options = parseDatacenterOptions(optionsResult);
+  }
+  return patchFields;
+}
+
+/**
+ * Re-converge everything that read the datacenter's routing policy after
+ * `priority` / `trusted` changed — see `fanOutDatacenterRoutingChange`
+ * (`routing-fanout.ts`) for what is recomputed. The same core is reused by
+ * the automatic-repin sweep.
+ *
+ * Skipped with a warning when the queue or secrets are absent from the
+ * context (unit-test app, Workers isolate without secrets). Failures are
+ * logged, never surfaced — the policy save already succeeded.
+ */
+async function fanOutDatacenterPolicyChange(
+  c: Context<AppEnv>,
+  db: Db,
+  params: Readonly<{
+    datacenterId: string;
+    organizationId: string;
+    actorId: string;
+  }>,
+): Promise<void> {
+  const commandQueue = getCommandQueue(c);
+  const secretsConfig = c.get("secretsConfig");
+  const dataEncryptionSecrets = c.get("dataEncryptionSecrets");
+  if (
+    !commandQueue ||
+    isNoopCommandQueue(commandQueue) ||
+    !secretsConfig ||
+    !dataEncryptionSecrets
+  ) {
+    compatLogWarn(
+      "datacenters",
+      `skipping routing-policy fan-out for datacenter ${params.datacenterId}: command queue or secrets unavailable`,
+    );
+    return;
+  }
+
+  try {
+    await fanOutDatacenterRoutingChange(db, commandQueue, {
+      datacenterId: params.datacenterId,
+      organizationId: params.organizationId,
+      actorType: "user",
+      actorId: params.actorId,
+      secretsConfig,
+      dataEncryptionSecrets,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    compatLogWarn(
+      "datacenters",
+      `routing-policy fan-out failed for datacenter ${params.datacenterId}: ${message}`,
+    );
+  }
+}
 
 function parseCreateDatacenterInput(
   c: Context<AppEnv>,
@@ -305,65 +419,6 @@ async function loadDatacenterSubnetViews(
     .sort((a, b) => a.cidr.localeCompare(b.cidr));
 }
 
-function uniqueCidrs(cidrs: readonly string[]): string[] {
-  const unique: string[] = [];
-  const seen = new Set<string>();
-  for (const cidr of cidrs) {
-    if (seen.has(cidr)) continue;
-    seen.add(cidr);
-    unique.push(cidr);
-  }
-  return unique;
-}
-
-function candidateCidrsOverlapEachOther(cidrs: readonly string[]): boolean {
-  const unique = uniqueCidrs(cidrs);
-  for (let i = 0; i < unique.length; i++) {
-    const left = unique[i];
-    if (!left) continue;
-    for (let j = i + 1; j < unique.length; j++) {
-      const right = unique[j];
-      if (right && cidrsOverlap(left, right)) return true;
-    }
-  }
-  return false;
-}
-
-/**
- * True when any candidate derived CIDR overlaps an existing org site subnet
- * (`network(kind='datacenter')`) or another candidate CIDR in the same request.
- */
-async function derivedSiteCidrsOverlap(
-  db: Db,
-  organizationId: string,
-  candidateCidrs: readonly string[],
-): Promise<boolean> {
-  if (candidateCidrsOverlapEachOther(candidateCidrs)) return true;
-  const unique = uniqueCidrs(candidateCidrs);
-  if (unique.length === 0) return false;
-  const rows = await db
-    .select({ cidr: network.cidr })
-    .from(network)
-    .where(
-      and(
-        eq(network.organizationId, organizationId),
-        eq(network.kind, "datacenter"),
-        isNotNull(network.cidr),
-      ),
-    );
-  return unique.some((cidr) =>
-    rows.some((row) => row.cidr !== null && cidrsOverlap(cidr, row.cidr))
-  );
-}
-
-function orgDatacenterCidrsOverlap(
-  db: Db,
-  organizationId: string,
-  cidr: string,
-): Promise<boolean> {
-  return derivedSiteCidrsOverlap(db, organizationId, [cidr]);
-}
-
 function isFreshAddMemberPin(
   pin: ResolvedAddMember,
 ): pin is { member: ParsedMemberPin; cidr: string } {
@@ -466,7 +521,9 @@ export function registerDatacenterRoutes(
       rows.map((row) => row.id),
     );
 
-    return c.json({ datacenters: attachPrivateCidrs(rows, cidrsByDc) });
+    return c.json({
+      datacenters: attachEffectivePolicy(attachPrivateCidrs(rows, cidrsByDc)),
+    });
   });
 
   router.get("/datacenters/name-suggestions", async (c) => {
@@ -588,10 +645,10 @@ export function registerDatacenterRoutes(
     if (!row) return c.json({ error: "Not found" }, 404);
 
     const subnets = await loadDatacenterSubnetViews(db, row.id);
-    const [withCidrs] = attachPrivateCidrs(
+    const [withCidrs] = attachEffectivePolicy(attachPrivateCidrs(
       [row],
       new Map([[row.id, subnets.map((subnet) => subnet.cidr)]]),
-    );
+    ));
     const members = await loadDatacenterMembershipsForDatacenter(db, row.id);
 
     return c.json({
@@ -601,6 +658,7 @@ export function registerDatacenterRoutes(
         address: m.address,
         ipId: m.ipId,
         networkId: m.networkId,
+        stale: parseIpPinMetadata(m.metadata).stale !== undefined,
       })),
     });
   });
@@ -655,15 +713,17 @@ export function registerDatacenterRoutes(
       }
     }
 
-    if (
-      await derivedSiteCidrsOverlap(
-        db,
-        organizationId,
-        grouped.groups.map((group) => group.cidr),
-      )
-    ) {
-      return c.json({ error: "subnet_overlaps" }, 409);
-    }
+    // Derived site subnets go through the one collision authority: against
+    // each other, the fabric, reserved ranges, docker registrations and every
+    // other site subnet in the organization. The datacenter does not exist yet,
+    // so no gateway can be advertising for it — the org-wide `subnet_overlaps`
+    // default applies to any site-subnet overlap.
+    const collision = await assertCidrsAvailable(db, {
+      organizationId,
+      cidrs: grouped.groups.map((group) => group.cidr),
+      intent: "datacenter",
+    });
+    if (collision) return cidrCollisionResponse(c, collision);
 
     const seeded = resolveSeededFields(input, loaded.rows);
 
@@ -768,15 +828,16 @@ export function registerDatacenterRoutes(
       return memberValidationResponse(c, resolved);
     }
 
-    if (
-      await derivedSiteCidrsOverlap(
-        db,
-        organizationId,
-        resolved.pins.filter(isFreshAddMemberPin).map((pin) => pin.cidr),
-      )
-    ) {
-      return c.json({ error: "subnet_overlaps" }, 409);
-    }
+    // Auto-derived subnets for fresh pins go through the collision authority
+    // scoped to this datacenter, so a gateway in another datacenter already
+    // advertising the range reports `cidr_overlaps_gateway_advertised`.
+    const collision = await assertCidrsAvailable(db, {
+      organizationId,
+      cidrs: resolved.pins.filter(isFreshAddMemberPin).map((pin) => pin.cidr),
+      intent: "datacenter",
+      datacenterId: id,
+    });
+    if (collision) return cidrCollisionResponse(c, collision);
 
     try {
       await db.transaction(async (tx) => {
@@ -911,9 +972,13 @@ export function registerDatacenterRoutes(
       return c.json({ error: "Invalid request" }, 400);
     }
 
-    if (await orgDatacenterCidrsOverlap(db, organizationId, cidr)) {
-      return c.json({ error: "subnet_overlaps" }, 409);
-    }
+    const collision = await assertCidrAvailable(db, {
+      organizationId,
+      cidr,
+      intent: "datacenter",
+      datacenterId: id,
+    });
+    if (collision) return cidrCollisionResponse(c, collision);
 
     const [inserted] = await db
       .insert(network)
@@ -1057,30 +1122,32 @@ export function registerDatacenterRoutes(
     const body = await parseJsonBody(c);
     if (body instanceof Response) return body;
 
-    let patchFields: {
-      name?: string | null;
-      description?: string | null;
-      metadata?: Record<string, unknown> | null;
-      options?: ReturnType<typeof parseDatacenterOptions>;
-      updatedAt: string;
-    };
-    try {
-      patchFields = buildPatchUpdateFields(body);
-    } catch {
-      return c.json({ error: "Invalid request" }, 400);
-    }
+    const patchFields = parseDatacenterPatchFields(c, body);
+    if (patchFields instanceof Response) return patchFields;
 
-    const metadataResult = parseJsonbObject(c, body, "metadata");
-    if (metadataResult instanceof Response) return metadataResult;
-    if (metadataResult !== null) patchFields.metadata = metadataResult;
-
-    const optionsResult = parseJsonbObject(c, body, "options");
-    if (optionsResult instanceof Response) return optionsResult;
-    if (optionsResult !== null) {
-      patchFields.options = parseDatacenterOptions(optionsResult);
-    }
+    const [current] = await db
+      .select({ options: datacenter.options })
+      .from(datacenter)
+      .where(eq(datacenter.id, id))
+      .limit(1);
+    if (!current) return c.json({ error: "Not found" }, 404);
+    const policyBefore = resolveDatacenterPolicy(current.options);
 
     await db.update(datacenter).set(patchFields).where(eq(datacenter.id, id));
+
+    // A name/description edit stays a single UPDATE; only a `priority` /
+    // `trusted` change re-converges stored transports and fabric payloads.
+    // The fan-out runs after the UPDATE so recomputation reads the new policy.
+    const policyAfter = "options" in patchFields
+      ? resolveDatacenterPolicy(patchFields.options ?? null)
+      : policyBefore;
+    if (datacenterPolicyChanged(policyBefore, policyAfter)) {
+      await fanOutDatacenterPolicyChange(c, db, {
+        datacenterId: id,
+        organizationId,
+        actorId: session.userId,
+      });
+    }
 
     return c.json({ ok: true as const });
   });

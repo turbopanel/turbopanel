@@ -7,6 +7,7 @@ import {
   isRelayAddressUniqueViolation,
   isRelayPrefixUniqueViolation,
   nextFreeSubnet,
+  nextFreeSubnetCidr,
   nthHostAddress,
   nthSubnet,
   parseFabricOptions,
@@ -48,6 +49,9 @@ test('nthSubnet carves /16s from the default container pool', () => {
 test('cidrOverlaps and hostRoute32', () => {
   assertEquals(cidrOverlaps('10.250.0.0/16', '10.250.1.0/24'), true)
   assertEquals(cidrOverlaps('10.250.0.0/16', '10.251.0.0/16'), false)
+  // Delegates to the dual-family authority: IPv6 compares, cross-family never overlaps.
+  assertEquals(cidrOverlaps('2001:db8::/32', '2001:db8:1::/48'), true)
+  assertEquals(cidrOverlaps('10.250.0.0/16', '2001:db8::/32'), false)
   assertEquals(hostRoute32('10.250.0.11/32'), '10.250.0.11/32')
 })
 
@@ -92,13 +96,61 @@ test('cidrContains and nextFreeSubnet skip taken subnets', () => {
   assertEquals(cidrContains('10.192.0.0/16', '10.193.0.0/24'), false)
   assertEquals(cidrContains('10.192.0.0/24', '10.192.0.0/16'), false)
   assertEquals(cidrContains('not-a-cidr', '10.192.0.0/24'), false)
-  assertEquals(cidrContains('2001:db8::/32', '2001:db8::/64'), false)
+  // Delegates to the dual-family authority: IPv6 containment works, cross-family never does.
+  assertEquals(cidrContains('2001:db8::/32', '2001:db8::/64'), true)
+  assertEquals(cidrContains('10.192.0.0/16', '2001:db8::/64'), false)
   assertEquals(nextFreeSubnet('10.192.0.0/16', 24, []), '10.192.0.0/24')
   assertEquals(
     nextFreeSubnet('10.192.0.0/16', 24, ['10.192.0.0/24', '10.192.2.0/24']),
     '10.192.1.0/24',
   )
   assertEquals(nextFreeSubnet('10.192.0.0/24', 24, ['10.192.0.0/24']), null)
+})
+
+test('nextFreeSubnet skips candidates overlapping an exclusion range', () => {
+  // A reserved /16 sitting on the first pool slot pushes the relay prefix up.
+  assertEquals(
+    nextFreeSubnet('10.192.0.0/12', 16, [], ['10.192.0.0/16']),
+    '10.193.0.0/16',
+  )
+  // A narrow reserved range still poisons the whole /16 that contains it …
+  assertEquals(
+    nextFreeSubnet('10.192.0.0/12', 16, [], ['10.193.7.0/24']),
+    '10.192.0.0/16',
+  )
+  assertEquals(
+    nextFreeSubnet('10.192.0.0/12', 16, ['10.192.0.0/16'], ['10.193.7.0/24']),
+    '10.194.0.0/16',
+  )
+  // … a wide one (a site subnet swallowing the pool head) skips several slots …
+  assertEquals(
+    nextFreeSubnet('10.192.0.0/12', 16, [], ['10.192.0.0/14']),
+    '10.196.0.0/16',
+  )
+  // … and cross-family / non-overlapping exclusions change nothing.
+  assertEquals(
+    nextFreeSubnet('10.192.0.0/12', 16, [], ['2001:db8::/32', '10.250.0.0/16']),
+    '10.192.0.0/16',
+  )
+})
+
+test('nextFreeSubnet returns null when exclusions alone exhaust the pool', () => {
+  assertEquals(nextFreeSubnet('10.192.0.0/12', 16, [], ['10.192.0.0/12']), null)
+  assertEquals(nextFreeSubnet('10.192.0.0/12', 16, [], ['10.0.0.0/8']), null)
+})
+
+test('nextFreeSubnetCidr only honours exclusions that reach into the relay prefix', () => {
+  assertEquals(
+    nextFreeSubnetCidr('10.192.0.0/16', [], ['10.192.0.0/24', '10.193.0.0/24']),
+    '10.192.1.0/24',
+  )
+  assertEquals(
+    nextFreeSubnetCidr('10.192.0.0/16', ['10.192.1.0/24'], ['10.192.0.0/23']),
+    '10.192.2.0/24',
+  )
+  // A reserved range wider than the prefix covers every /24 inside it.
+  assertEquals(nextFreeSubnetCidr('10.192.0.0/16', [], ['10.192.0.0/15']), null)
+  assertEquals(nextFreeSubnetCidr('10.192.0.0/16', [], ['10.200.0.0/16']), '10.192.0.0/24')
 })
 
 test('cidrOverlaps and nth helpers reject unusable prefixes', () => {

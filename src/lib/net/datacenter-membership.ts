@@ -37,6 +37,17 @@ export type DatacenterMembershipRow = {
   family: 4 | 6
 }
 
+/**
+ * Membership pin with the columns the automatic repin pass needs on top of
+ * {@link DatacenterMembershipRow}: the org (for the `uniq_ip_org_address`
+ * lookup), the owning subnet CIDR, and the raw `ip.metadata` markers.
+ */
+export type DatacenterMembershipPinDetailRow = DatacenterMembershipRow & {
+  organizationId: string
+  subnetCidr: string | null
+  metadata: unknown
+}
+
 export type MemberPinSubnet = {
   networkId: string
   cidr: string
@@ -219,12 +230,31 @@ function validateMemberPinAgainstSubnets(
   return { ok: true, address: normalized, networkId: matched.networkId }
 }
 
+const MEMBERSHIP_PIN_WHERE = (serverIds: string[]) =>
+  and(
+    eq(ip.scope, 'datacenter'),
+    isNotNull(ip.serverId),
+    isNotNull(ip.datacenterId),
+    inArray(ip.serverId, serverIds),
+  )
+
+function groupPinsByServer<T extends DatacenterMembershipRow>(
+  pins: readonly T[],
+): Map<string, T[]> {
+  const byServer = new Map<string, T[]>()
+  for (const pin of pins) {
+    const list = byServer.get(pin.serverId) ?? []
+    list.push(pin)
+    byServer.set(pin.serverId, list)
+  }
+  return byServer
+}
+
 export async function loadDatacenterMembershipsForServers(
   db: Db,
   serverIds: string[],
 ): Promise<Map<string, DatacenterMembershipRow[]>> {
-  const byServer = new Map<string, DatacenterMembershipRow[]>()
-  if (serverIds.length === 0) return byServer
+  if (serverIds.length === 0) return new Map()
 
   const rows = await db
     .select({
@@ -235,29 +265,28 @@ export async function loadDatacenterMembershipsForServers(
       address: ip.address,
     })
     .from(ip)
-    .where(
-      and(
-        eq(ip.scope, 'datacenter'),
-        isNotNull(ip.serverId),
-        isNotNull(ip.datacenterId),
-        inArray(ip.serverId, serverIds),
-      ),
-    )
+    .where(MEMBERSHIP_PIN_WHERE(serverIds))
 
+  const pins: DatacenterMembershipRow[] = []
   for (const row of rows) {
     const pin = toMembershipRow(row)
-    if (!pin) continue
-    const list = byServer.get(pin.serverId) ?? []
-    list.push(pin)
-    byServer.set(pin.serverId, list)
+    if (pin) pins.push(pin)
   }
-  return byServer
+  return groupPinsByServer(pins)
 }
 
-export async function loadDatacenterMembershipsForDatacenter(
+/**
+ * {@link loadDatacenterMembershipsForServers} with the owning subnet CIDR and
+ * `ip.metadata` joined in — the projection the automatic repin pass reads.
+ * One indexed read (`idx_ip_scope_server_datacenter`) plus the `network`
+ * join; a server without pins costs exactly that one read.
+ */
+export async function loadDatacenterMembershipPinDetailsForServers(
   db: Db,
-  datacenterId: string,
-): Promise<DatacenterMembershipRow[]> {
+  serverIds: string[],
+): Promise<Map<string, DatacenterMembershipPinDetailRow[]>> {
+  if (serverIds.length === 0) return new Map()
+
   const rows = await db
     .select({
       ipId: ip.id,
@@ -265,6 +294,45 @@ export async function loadDatacenterMembershipsForDatacenter(
       datacenterId: ip.datacenterId,
       networkId: ip.networkId,
       address: ip.address,
+      organizationId: ip.organizationId,
+      metadata: ip.metadata,
+      subnetCidr: network.cidr,
+    })
+    .from(ip)
+    .leftJoin(network, eq(network.id, ip.networkId))
+    .where(MEMBERSHIP_PIN_WHERE(serverIds))
+
+  const pins: DatacenterMembershipPinDetailRow[] = []
+  for (const row of rows) {
+    const pin = toMembershipRow(row)
+    if (!pin) continue
+    pins.push({
+      ...pin,
+      organizationId: row.organizationId,
+      subnetCidr: row.subnetCidr ?? null,
+      metadata: row.metadata ?? null,
+    })
+  }
+  return groupPinsByServer(pins)
+}
+
+/** Membership row plus the raw `ip.metadata` (stale / repin markers). */
+export type DatacenterMembershipWithMetadataRow = DatacenterMembershipRow & {
+  metadata: unknown
+}
+
+export async function loadDatacenterMembershipsForDatacenter(
+  db: Db,
+  datacenterId: string,
+): Promise<DatacenterMembershipWithMetadataRow[]> {
+  const rows = await db
+    .select({
+      ipId: ip.id,
+      serverId: ip.serverId,
+      datacenterId: ip.datacenterId,
+      networkId: ip.networkId,
+      address: ip.address,
+      metadata: ip.metadata,
     })
     .from(ip)
     .where(
@@ -275,11 +343,11 @@ export async function loadDatacenterMembershipsForDatacenter(
       ),
     )
 
-  const out: DatacenterMembershipRow[] = []
+  const out: DatacenterMembershipWithMetadataRow[] = []
   for (const row of rows) {
     const pin = toMembershipRow(row)
     if (!pin) continue
-    out.push(pin)
+    out.push({ ...pin, metadata: row.metadata ?? null })
   }
   return out
 }

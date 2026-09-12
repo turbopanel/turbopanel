@@ -11,6 +11,7 @@ import { MANAGED_RUNTIME_PRESENT_ERROR } from '../../lib/db/project-delete.ts'
 import { applyStorageRetentionOnParentDelete } from '../../lib/db/storage-records.ts'
 import { purgeEnvironmentComposeNetworks } from '../../lib/db/fabric-records.ts'
 import { verifyServerInOrg } from './deploy-prepare.ts'
+import { loadRepinNeedsRedeployForEnvironment } from './repin-needs-redeploy.ts'
 import { reconcileServicesForEnvironment } from './reconcile-after-compose-save.ts'
 import {
   assertCanCreateOr403,
@@ -300,7 +301,12 @@ export function registerEnvironmentRoutes(router: Hono<AppEnv>, opts: AuthRouteO
     const denied = await assertCanReadOr403(c, 'environment', id)
     if (denied) return denied
 
-    return c.json({ environment: serializeEnvironment(row) })
+    // Derived from `ip.metadata.repin` — a hosting `bindAddress` is frozen at
+    // deploy time, so a repinned membership address is surfaced as a notice,
+    // never as an automatic `environment.deploy`.
+    const needsRedeploy = await loadRepinNeedsRedeployForEnvironment(db, id)
+
+    return c.json({ environment: serializeEnvironment(row), needsRedeploy })
   })
 
   router.post('/environments', async (c) => {

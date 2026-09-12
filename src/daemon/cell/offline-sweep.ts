@@ -58,6 +58,7 @@ import {
 } from '../../db.ts'
 import { resolveWorkersDb } from '../../workers-bindings.ts'
 import { runManagedIngressOrphanSweep } from '../../client/managed/ingress-desired.ts'
+import { runDatacenterRepinFanoutSweep } from '../../client/datacenters/repin-fanout.ts'
 import { runSystemReconcileSweep } from '../../client/system/reconcile.ts'
 import { runLeafRenewalSweepTick } from '../../client/tls/leaf-renewal-sweep.ts'
 import type { DerivedSecretsConfig, SecretsConfig } from '../../client/authn/secrets.ts'
@@ -900,6 +901,16 @@ async function runQueuedCronSweeps(
         await runManagedIngressOrphanSweep(db, commandQueue, tlsRenewal)
       } catch (err) {
         sweepTrace('managed-ingress-orphan-sweep-failed', {
+          error: sweepErrorMessage(err),
+        })
+      }
+      // Automatic membership repins: the presence path only stamps
+      // `ip.metadata.repin.pendingFanoutAt` (hello / DO must not enqueue);
+      // the routing fan-out needs the same secrets bundle as leaf renewal.
+      try {
+        await runDatacenterRepinFanoutSweep(db, commandQueue, tlsRenewal)
+      } catch (err) {
+        sweepTrace('datacenter-repin-fanout-sweep-failed', {
           error: sweepErrorMessage(err),
         })
       }

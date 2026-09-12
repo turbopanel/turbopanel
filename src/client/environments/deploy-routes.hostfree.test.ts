@@ -148,6 +148,7 @@ function stubPrepared(managedNetworkServices: string[] = []): PreparedDeployComp
     nativeAppServices: [],
     sourceMaterial: [],
     dockerExternalNetworks: [],
+    dockerNetworkAddressing: [],
     fabricNetworks: [],
     managedNetworkServices,
     containers: [],

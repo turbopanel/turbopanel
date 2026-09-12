@@ -35,7 +35,7 @@ function emptyCaches(): EndpointAddressCaches {
     publicAddressByServer: new Map(),
     reportedByServer: new Map(),
     datacenterMembershipsByServer: new Map(),
-    addressPreferenceByDatacenter: new Map(),
+    policyByDatacenter: new Map(),
     natEndpointByPair: new Map(),
     failedPathKindsByPair: new Map(),
   };
@@ -115,6 +115,30 @@ test("requireRelayPrefix raises fabric_prefix_pool_exhausted", () => {
   );
 });
 
+test("requireRelayPrefix steps around exclusion ranges (reserved rows, site subnets)", () => {
+  assertEquals(
+    requireRelayPrefix(DEFAULT_FABRIC_CONTAINER_POOL, [], ["10.192.0.0/16"]),
+    "10.193.0.0/16",
+  );
+  assertEquals(
+    requireRelayPrefix(
+      DEFAULT_FABRIC_CONTAINER_POOL,
+      ["10.192.0.0/16"],
+      ["10.193.10.0/24", "10.194.0.0/15"],
+    ),
+    "10.196.0.0/16",
+  );
+});
+
+test("requireRelayPrefix raises fabric_prefix_pool_exhausted when exclusions cover the pool", () => {
+  assertThrows(
+    () =>
+      requireRelayPrefix(DEFAULT_FABRIC_CONTAINER_POOL, [], ["10.192.0.0/12"]),
+    FabricAllocationError,
+    "TurboFabric prefix address pool exhausted",
+  );
+});
+
 test("requireSubnetCidr is scoped to the owning relay prefix", () => {
   assertEquals(requireSubnetCidr("10.192.0.0/16", []), "10.192.0.0/24");
   assertEquals(
@@ -142,6 +166,30 @@ test("requireSubnetCidr stays scoped to the relay prefix and ignores foreign CID
       "10.194.0.0/24",
     ]),
     "10.192.0.0/24",
+  );
+});
+
+test("requireSubnetCidr steps around exclusion ranges inside the relay prefix", () => {
+  assertEquals(
+    requireSubnetCidr("10.192.0.0/16", [], ["10.192.0.0/23"]),
+    "10.192.2.0/24",
+  );
+  assertEquals(
+    requireSubnetCidr("10.192.0.0/16", ["10.192.2.0/24"], ["10.192.0.0/23"]),
+    "10.192.3.0/24",
+  );
+  // Exclusions outside the prefix are irrelevant.
+  assertEquals(
+    requireSubnetCidr("10.192.0.0/16", [], ["10.250.0.0/16", "10.193.0.0/24"]),
+    "10.192.0.0/24",
+  );
+});
+
+test("requireSubnetCidr raises fabric_segment_pool_exhausted when an exclusion covers the prefix", () => {
+  assertThrows(
+    () => requireSubnetCidr("10.192.0.0/16", [], ["10.192.0.0/16"]),
+    FabricAllocationError,
+    "TurboFabric segment address pool exhausted",
   );
 });
 
@@ -304,7 +352,7 @@ test("planRelayPath picks shared-datacenter LAN before public", () => {
   caches.datacenterMembershipsByServer.set("other", [
     membershipPin("other", "dc-a", "10.0.0.5"),
   ]);
-  caches.addressPreferenceByDatacenter.set("dc-a", "ipv6");
+  caches.policyByDatacenter.set("dc-a", { addressPreference: "ipv6", priority: 100, trusted: true });
   caches.publicAddressByServer.set("other", "203.0.113.5");
   assertEquals(
     planRelayPath({
@@ -324,6 +372,90 @@ test("planRelayPath picks shared-datacenter LAN before public", () => {
       },
       ...unimplementedPathFields(),
     },
+  );
+});
+
+test("planRelayPath omits direct_lan for an untrusted shared datacenter and falls to public", () => {
+  const caches = emptyCaches();
+  caches.datacenterMembershipsByServer.set("self", [
+    membershipPin("self", "dc-shared", "10.0.0.1"),
+  ]);
+  caches.datacenterMembershipsByServer.set("other", [
+    membershipPin("other", "dc-shared", "10.0.0.5"),
+  ]);
+  caches.policyByDatacenter.set("dc-shared", {
+    addressPreference: "ipv4",
+    priority: 0,
+    trusted: false,
+  });
+  caches.publicAddressByServer.set("other", "203.0.113.5");
+  assertEquals(
+    planRelayPath({
+      self: { serverId: "self" },
+      other: { serverId: "other", endpointAddress: null },
+      caches,
+    }),
+    {
+      candidates: [{ kind: "direct_public", address: "203.0.113.5" }],
+      selected: { kind: "direct_public", endpoint: "203.0.113.5" },
+      ...unimplementedPathFields(),
+    },
+  );
+});
+
+test("planRelayPath picks the lower-priority-number shared datacenter's pin", () => {
+  const caches = emptyCaches();
+  caches.datacenterMembershipsByServer.set("self", [
+    membershipPin("self", "dc-a", "10.0.0.1"),
+    membershipPin("self", "dc-b", "10.1.0.1"),
+  ]);
+  caches.datacenterMembershipsByServer.set("other", [
+    membershipPin("other", "dc-a", "10.0.0.5"),
+    membershipPin("other", "dc-b", "10.1.0.5"),
+  ]);
+  // Without policy `dc-a` would win on id order; priority inverts that.
+  caches.policyByDatacenter.set("dc-a", {
+    addressPreference: "ipv4",
+    priority: 200,
+    trusted: true,
+  });
+  caches.policyByDatacenter.set("dc-b", {
+    addressPreference: "ipv4",
+    priority: 10,
+    trusted: true,
+  });
+  assertEquals(
+    planRelayPath({
+      self: { serverId: "self" },
+      other: { serverId: "other", endpointAddress: null },
+      caches,
+    }),
+    {
+      candidates: [
+        { kind: "direct_lan", address: "10.1.0.5", datacenterId: "dc-b" },
+      ],
+      selected: {
+        kind: "direct_lan",
+        endpoint: "10.1.0.5",
+        datacenterId: "dc-b",
+      },
+      ...unimplementedPathFields(),
+    },
+  );
+
+  // A trusted datacenter beats an untrusted one regardless of priority.
+  caches.policyByDatacenter.set("dc-b", {
+    addressPreference: "ipv4",
+    priority: 10,
+    trusted: false,
+  });
+  assertEquals(
+    planRelayPath({
+      self: { serverId: "self" },
+      other: { serverId: "other", endpointAddress: null },
+      caches,
+    }).selected,
+    { kind: "direct_lan", endpoint: "10.0.0.5", datacenterId: "dc-a" },
   );
 });
 
@@ -727,8 +859,12 @@ function gatewayCaches(params: {
   for (const [serverId, rows] of params.memberships) {
     caches.datacenterMembershipsByServer.set(serverId, rows);
     for (const row of rows) {
-      if (!caches.addressPreferenceByDatacenter.has(row.datacenterId)) {
-        caches.addressPreferenceByDatacenter.set(row.datacenterId, "ipv4");
+      if (!caches.policyByDatacenter.has(row.datacenterId)) {
+        caches.policyByDatacenter.set(row.datacenterId, {
+          addressPreference: "ipv4",
+          priority: 100,
+          trusted: true,
+        });
       }
     }
   }

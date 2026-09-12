@@ -6358,3 +6358,76 @@ test("parseManagedPromotePayload and result reject leftover throws", () => {
     MANAGED_DEMOTE_ID,
   );
 });
+
+test("parseCommandPayload round-trips dockerNetworkAddressing, dedupes, sorts and drops unknown names", () => {
+  const parsed = parseCommandPayload("environment.deploy" as CommandType, {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "tp-demo",
+    composeFiles: [{ filename: "compose.yaml", role: "runtime" as const, content: "services: {}\n" }],
+    hostings: [],
+    dockerExternalNetworks: ["zeta-net", "alpha-net"],
+    dockerNetworkAddressing: [
+      { name: "zeta-net", subnet: " 10.77.0.0/16 ", ipRange: "10.77.8.0/24", gateway: "10.77.0.1", mtu: 1450 },
+      { name: "alpha-net" },
+      { name: "alpha-net", subnet: "10.78.0.0/16" },
+      { name: "not-in-list", subnet: "10.79.0.0/16" },
+    ],
+  }) as { dockerExternalNetworks?: string[]; dockerNetworkAddressing?: unknown };
+  assertEquals(parsed.dockerExternalNetworks, ["alpha-net", "zeta-net"]);
+  assertEquals(parsed.dockerNetworkAddressing, [
+    { name: "alpha-net" },
+    { name: "zeta-net", subnet: "10.77.0.0/16", ipRange: "10.77.8.0/24", gateway: "10.77.0.1", mtu: 1450 },
+  ]);
+});
+
+test("parseCommandPayload keeps a names-only deploy payload unchanged (no dockerNetworkAddressing)", () => {
+  const parsed = parseCommandPayload("environment.deploy" as CommandType, {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "tp-demo",
+    composeFiles: [{ filename: "compose.yaml", role: "runtime" as const, content: "services: {}\n" }],
+    hostings: [],
+    dockerExternalNetworks: ["alpha-net"],
+  }) as { dockerExternalNetworks?: string[]; dockerNetworkAddressing?: unknown };
+  assertEquals(parsed.dockerExternalNetworks, ["alpha-net"]);
+  assertEquals("dockerNetworkAddressing" in parsed, false);
+});
+
+test("parseCommandPayload rejects malformed dockerNetworkAddressing entries", () => {
+  const base = {
+    environmentId: "env-1",
+    projectId: "proj-1",
+    organizationId: "org-1",
+    projectName: "tp-demo",
+    composeFiles: [{ filename: "compose.yaml", role: "runtime" as const, content: "services: {}\n" }],
+    hostings: [],
+    dockerExternalNetworks: ["edge"],
+  };
+  const reject = (dockerNetworkAddressing: unknown, message: string) =>
+    assertThrows(
+      () =>
+        parseCommandPayload("environment.deploy" as CommandType, {
+          ...base,
+          dockerNetworkAddressing,
+        }),
+      Error,
+      message,
+    );
+  reject("edge", "dockerNetworkAddressing must be an array");
+  reject(["edge"], "dockerNetworkAddressing must be an array of objects");
+  reject([{ name: "-bad" }], "Invalid dockerNetworkAddressing name");
+  reject([{ name: "edge", subnet: "10.77.0.0" }], "Invalid dockerNetworkAddressing subnet");
+  reject([{ name: "edge", ipRange: "10.77.8.0/24" }], "Invalid dockerNetworkAddressing ipRange");
+  reject(
+    [{ name: "edge", subnet: "10.77.0.0/16", ipRange: "10.78.0.0/24" }],
+    "Invalid dockerNetworkAddressing ipRange",
+  );
+  reject(
+    [{ name: "edge", subnet: "10.77.0.0/16", gateway: "10.78.0.1" }],
+    "Invalid dockerNetworkAddressing gateway",
+  );
+  reject([{ name: "edge", mtu: 1279 }], "Invalid dockerNetworkAddressing mtu");
+});

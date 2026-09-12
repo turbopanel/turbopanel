@@ -548,7 +548,7 @@ function privateEndpointSelect(
       }
     }
 
-    // loadDatacenterAddressPreferences: { id, options }
+    // loadDatacenterPolicies: { id, options }
     if (keys.length === 2 && keySet.has('id') && keySet.has('options')) {
       return {
         from() {
@@ -715,6 +715,95 @@ test('resolveMemberTransports uses fabric when relays exist without datacenter I
   }
   assertEquals(transports.get('p'), 'local')
   assertEquals(transports.get('r'), 'fabric')
+})
+
+test('resolveMemberTransports walks shared datacenters in priority order', async () => {
+  const primary = member({ id: 'p', serverId: 's1', role: 'primary', ordinal: 1 })
+  const failover = member({
+    id: 'f',
+    serverId: 's2',
+    role: 'replica',
+    ordinal: 2,
+    replicaClass: 'failover',
+    privatePort: 45_100,
+  })
+  // dc-a (priority 200, family mismatch) sorts after dc-b (priority 10), so
+  // the trusted walk finds dc-b's compatible pin first; the family mismatch
+  // on the lower-ranked datacenter is never reached.
+  const memberships = [
+    membershipPin('s1', 'dc-a', '2001:db8::1'),
+    membershipPin('s2', 'dc-a', '10.0.0.2'),
+    membershipPin('s1', 'dc-b', '10.1.0.1'),
+    membershipPin('s2', 'dc-b', '10.1.0.2'),
+  ]
+  const datacenterOptions = [
+    { id: 'dc-a', options: { priority: 200 } },
+    { id: 'dc-b', options: { priority: 10 } },
+  ]
+  const transports = await resolveMemberTransports(
+    privateEndpointDb(memberships, { datacenterOptions }),
+    [primary, failover],
+    'failover-replication',
+  )
+  if (!('size' in transports)) {
+    throw new TypeError(JSON.stringify(transports))
+  }
+  assertEquals(transports.get('f'), 'datacenter')
+
+  const peers = await resolvePeersForMember(
+    peerResolutionDb({ containers: [], memberships, datacenterOptions }),
+    [primary, failover],
+    primary,
+    5432,
+  )
+  if (!Array.isArray(peers)) {
+    throw new TypeError(JSON.stringify(peers))
+  }
+  assertEquals(peers[0]?.address, '10.1.0.2')
+})
+
+test('resolveMemberTransports surfaces failover_requires_trusted_datacenter for an untrusted-only failover pair', async () => {
+  const primary = member({ id: 'p', serverId: 's1', role: 'primary', ordinal: 1 })
+  const failover = member({
+    id: 'f',
+    serverId: 's2',
+    role: 'replica',
+    ordinal: 2,
+    replicaClass: 'failover',
+    privatePort: 45_100,
+  })
+  const db = privateEndpointDb(
+    [
+      membershipPin('s1', 'dc-shared', '10.0.0.1'),
+      membershipPin('s2', 'dc-shared', '10.0.0.2'),
+    ],
+    {
+      datacenterOptions: [{ id: 'dc-shared', options: { trusted: false } }],
+      publicAddresses: [
+        { serverId: 's1', address: '203.0.113.1' },
+        { serverId: 's2', address: '203.0.113.2' },
+      ],
+    },
+  )
+  assertEquals(
+    await resolveMemberTransports(db, [primary, failover], 'failover-replication'),
+    {
+      kind: 'failover_requires_trusted_datacenter',
+      fromServerId: 's1',
+      toServerId: 's2',
+      datacenterId: 'dc-shared',
+    },
+  )
+  // The same pair as a read replica skips the untrusted LAN and rides public.
+  const readTransports = await resolveMemberTransports(
+    db,
+    [primary, failover],
+    'read-replication',
+  )
+  if (!('size' in readTransports)) {
+    throw new TypeError(JSON.stringify(readTransports))
+  }
+  assertEquals(readTransports.get('f'), 'public')
 })
 
 test('ensureMemberPrivatePorts clears leftover ports on single-member clusters', async () => {

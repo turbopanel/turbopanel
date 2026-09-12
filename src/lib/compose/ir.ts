@@ -76,6 +76,7 @@ import {
 } from '../schedule/interpret.ts'
 import type {
   EnvironmentDeployComposeFile,
+  EnvironmentDeployDockerNetwork,
   EnvironmentDeployFabricNetwork,
   EnvironmentDeployHosting,
   EnvironmentDeployIngressService,
@@ -566,6 +567,12 @@ export type ServerDeployment = {
   sourceMaterial: EnvironmentDeploySource[]
   /** Operator-registered external Docker networks this document names. */
   dockerExternalNetworks: string[]
+  /**
+   * Addressing for the `dockerExternalNetworks` entries whose registration
+   * carries any (`network.cidr` / `options.subnet|ipRange|gateway|mtu`).
+   * Additive on the wire — a name absent here is created bare.
+   */
+  dockerNetworkAddressing: EnvironmentDeployDockerNetwork[]
   /** Platform-owned `tpn_*` routed bridges. Disjoint from `dockerExternalNetworks`. */
   fabricNetworks: EnvironmentDeployFabricNetwork[]
   /** Compose services that must join the org's managed network. */

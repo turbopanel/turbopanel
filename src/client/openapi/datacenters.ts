@@ -25,13 +25,25 @@ export const datacenterSchemas = {
       options: {
         type: ["object", "null"],
         description:
-          "Optional `defaultServerTimezone`, `enforceServerTimezone`, `addressPreference` (`ipv4` | `ipv6`; omitted defaults to ipv6), `sshPort`, and `ntp`. SSH port and NTP cascade to member servers unless a server override is set.",
+          "Optional `defaultServerTimezone`, `enforceServerTimezone`, `addressPreference` (`ipv4` | `ipv6`; omitted defaults to ipv6), `sshPort`, `ntp`, `priority` (integer 0–1000, lower wins; omitted defaults to 100), and `trusted` (boolean; omitted defaults to true). SSH port and NTP cascade to member servers unless a server override is set.",
       },
       privateCidrs: {
         type: "array",
         items: { type: "string" },
         description:
-          "CIDRs from `network(kind='datacenter')` rows for this site (one or more subnets). Prerequisite for private/replica placement (server-to-server datacenter transport).",
+          "CIDRs from `network(kind='datacenter')` rows for this datacenter (one or more subnets). Prerequisite for private/replica placement (server-to-server datacenter transport).",
+      },
+      priority: {
+        type: "integer",
+        minimum: 0,
+        maximum: 1000,
+        description:
+          "Effective routing-ladder rank (`options.priority` with the default `100` applied). Lower wins.",
+      },
+      trusted: {
+        type: "boolean",
+        description:
+          "Effective trust flag (`options.trusted` with the default `true` applied). `false` means the datacenter's L2 is not under the operator's control.",
       },
       subnets: {
         type: "array",
@@ -53,11 +65,31 @@ export const datacenterSchemas = {
       },
     },
   },
+  DatacenterMember: {
+    type: "object",
+    required: ["serverId", "address", "ipId", "networkId", "stale"],
+    properties: {
+      serverId: { type: "string", format: "uuid" },
+      address: { type: "string" },
+      ipId: { type: "string", format: "uuid" },
+      networkId: { type: ["string", "null"], format: "uuid" },
+      stale: {
+        type: "boolean",
+        description:
+          "True when the daemon stopped reporting this pin's address and the automatic repin found no unambiguous replacement (`ip.metadata.stale`). The pin still names the last known address; re-pin manually or wait for the host to report a usable address.",
+      },
+    },
+  },
   DatacenterResponse: {
     type: "object",
     required: ["datacenter"],
     properties: {
       datacenter: { $ref: "#/components/schemas/DatacenterRow" },
+      members: {
+        type: "array",
+        description: "Membership pins in this datacenter (`GET /datacenters/{id}` only).",
+        items: { $ref: "#/components/schemas/DatacenterMember" },
+      },
     },
   },
   CreateDatacenterRequest: {
@@ -107,7 +139,7 @@ export const datacenterSchemas = {
       options: {
         type: ["object", "null"],
         description:
-          "Partial datacenter options. `addressPreference` is `'ipv4'` or `'ipv6'`.",
+          "Replace-all datacenter options; `null` clears the stored blob so the documented defaults apply again. `addressPreference` is `'ipv4'` or `'ipv6'`; `priority` is an integer 0–1000 (lower wins); `trusted` is a boolean.",
       },
     },
   },
@@ -286,8 +318,18 @@ export const datacenterPaths: Record<string, unknown> = {
           content: { "application/json": { schema: clientErrorJson } },
         },
         "409": {
-          description: "`address_in_use` when a pin address is already allocated in the organization",
-          content: { "application/json": { schema: clientErrorJson } },
+          description:
+            "`address_in_use` when a pin address is already allocated in the organization; otherwise a `CidrCollisionError` when a derived site CIDR collides with the fabric, a reserved range, a docker registration or any site subnet in the organization (`subnet_overlaps`, also for two derived CIDRs in one request)",
+          content: {
+            "application/json": {
+              schema: {
+                oneOf: [
+                  clientErrorJson,
+                  { $ref: "#/components/schemas/CidrCollisionError" },
+                ],
+              },
+            },
+          },
         },
       },
     },
@@ -494,8 +536,17 @@ export const datacenterPaths: Record<string, unknown> = {
         },
         "409": {
           description:
-            "`address_in_use` when a pin address is already allocated in the organization; `subnet_overlaps` when a newly derived site CIDR overlaps any site subnet in this organization",
-          content: { "application/json": { schema: clientErrorJson } },
+            "`address_in_use` when a pin address is already allocated in the organization; otherwise a `CidrCollisionError` when a newly derived site CIDR collides (`subnet_overlaps` for any site subnet in the organization, `cidr_overlaps_gateway_advertised` when the other datacenter and this one both have a gateway relay, `cidr_overlaps_reserved`, `cidr_overlaps_docker_network`, `cidr_overlaps_fabric`, `cidr_overlaps_fabric_pool`)",
+          content: {
+            "application/json": {
+              schema: {
+                oneOf: [
+                  clientErrorJson,
+                  { $ref: "#/components/schemas/CidrCollisionError" },
+                ],
+              },
+            },
+          },
         },
       },
     },
@@ -607,8 +658,12 @@ export const datacenterPaths: Record<string, unknown> = {
         },
         "409": {
           description:
-            "`subnet_overlaps` when the CIDR overlaps any site subnet in this organization",
-          content: { "application/json": { schema: clientErrorJson } },
+            "`CidrCollisionError` — `subnet_overlaps` when the CIDR overlaps any site subnet in this organization, `cidr_overlaps_gateway_advertised` when that subnet is in another datacenter and both datacenters have a gateway relay, or `cidr_overlaps_reserved` / `cidr_overlaps_docker_network` / `cidr_overlaps_fabric` / `cidr_overlaps_fabric_pool`",
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/CidrCollisionError" },
+            },
+          },
         },
       },
     },

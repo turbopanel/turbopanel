@@ -1247,14 +1247,25 @@ it('age-based flush writes a sample that is under the row batch cap', async () =
   )
   try {
     await store.writeSample(sample({ atMs: DAY_START, cpuBusyPercent: 7 }))
-    await new Promise((resolve) => setTimeout(resolve, 30))
-    const result = await store.queryHostSeries({
-      serverId: SERVER_A,
-      metrics: ['host.cpu.busyPercent'],
-      from: new Date(DAY_START).toISOString(),
-      to: new Date(DAY_START + 60_000).toISOString(),
-      resolutionSeconds: 60,
-    })
+    // Age timer is 5ms, but DuckDB open+insert under a loaded `test:coverage`
+    // run can take hundreds of ms. Poll the query (which force-flushes) so a
+    // slow first open is not a flake.
+    const deadline = Date.now() + 2_000
+    let result = {
+      sampleCount: 0,
+      points: [] as { values: Record<string, number | null> }[],
+    }
+    while (Date.now() < deadline) {
+      result = await store.queryHostSeries({
+        serverId: SERVER_A,
+        metrics: ['host.cpu.busyPercent'],
+        from: new Date(DAY_START).toISOString(),
+        to: new Date(DAY_START + 60_000).toISOString(),
+        resolutionSeconds: 60,
+      })
+      if (result.sampleCount === 1) break
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
     assertEquals(result.sampleCount, 1)
     assertEquals(result.points[0]?.values['host.cpu.busyPercent'], 7)
   } finally {

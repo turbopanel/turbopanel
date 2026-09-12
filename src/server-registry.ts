@@ -25,6 +25,8 @@ import {
 } from './lib/db/server-metadata.ts'
 import { license, server } from './lib/db/schema.ts'
 import { recomputeAssignmentsForServer } from './lib/tiers/assignment-records.ts'
+import { applyReportedAddressRepin } from './lib/net/repin-apply.ts'
+import { serverIpsEquals } from './server-addresses.ts'
 import { normalizeMachineKey } from './lib/machine-key.ts'
 import { ensureSystemHierarchy } from './client/system/hierarchy.ts'
 import { compatLogWarn } from './log-compat.ts'
@@ -323,6 +325,27 @@ export async function touchServerMetadata(
     await recomputeAssignmentsForServer(db, serverId).catch((err) => {
       console.warn(`tier assignment recompute failed for ${serverId}: ${String(err)}`)
     })
+  }
+
+  // Reported addresses moved: re-point / flag the server's datacenter
+  // membership pins. Gated on `ips` specifically so a CPU / docker-only delta
+  // never touches `ip` rows. Best-effort like the tier recompute. Nothing is
+  // enqueued here — hello and Durable Object handlers must not enqueue
+  // commands (DO cost rule, see `client/system/reconcile.ts`); the routing
+  // fan-out for a repin is deferred to the maintenance sweep
+  // (`client/datacenters/repin-fanout.ts`) via `ip.metadata.repin.pendingFanoutAt`.
+  if (
+    delta.resources?.ips !== undefined &&
+    !serverIpsEquals(delta.resources.ips, base?.resources?.ips)
+  ) {
+    await applyReportedAddressRepin(db, serverId, delta.resources.ips).catch(
+      (err) => {
+        compatLogWarn(
+          'server-registry',
+          `membership repin failed for ${serverId}: ${String(err)}`,
+        )
+      },
+    )
   }
 }
 

@@ -20,6 +20,7 @@ import type { Db } from '../../db.ts'
 import {
   binding,
   environment,
+  ip,
   replica,
   organization,
   principal,
@@ -223,6 +224,47 @@ export async function memberServerIdsForManaged(
     .from(replica)
     .where(and(eq(replica.managedId, managedId)))
   return rows.map((r) => r.serverId)
+}
+
+/**
+ * Distinct managed clusters with at least one member pinned into the given
+ * datacenter (`ip.scope='datacenter'` rows joined to `replica.server_id`).
+ * Used by `PATCH /datacenters/:id` to re-converge member transports when the
+ * datacenter's routing policy changes.
+ */
+export async function listManagedIdsForDatacenter(
+  db: Db,
+  datacenterId: string,
+): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ managedId: replica.managedId })
+    .from(replica)
+    .innerJoin(ip, eq(ip.serverId, replica.serverId))
+    .where(
+      and(
+        eq(ip.scope, 'datacenter'),
+        eq(ip.datacenterId, datacenterId),
+      ),
+    )
+  return rows.map((row) => row.managedId)
+}
+
+/**
+ * Distinct managed clusters with a replica on the given server. Paired with
+ * {@link listManagedIdsForDatacenter} by the automatic-repin sweep: the
+ * datacenter set covers every peer whose transport ladder result could have
+ * moved, the server set covers the repinned host's own engine listeners and
+ * ProxySQL backends.
+ */
+export async function listManagedIdsForServer(
+  db: Db,
+  serverId: string,
+): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ managedId: replica.managedId })
+    .from(replica)
+    .where(eq(replica.serverId, serverId))
+  return rows.map((row) => row.managedId)
 }
 
 /**

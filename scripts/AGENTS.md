@@ -11,7 +11,9 @@ files — an unclaimed suite never runs in CI and contributes nothing to
 `test-coverage.sh`; Workers/DO suites go in `vitest.config.ts` `test.include`;
 Redis (etc.) suites go in `SERVICE_DEPENDENT` in `check-test-inventory.mjs`
 with a reason. Full checklist: root `AGENTS.md` → **Adding tests (inventory)**.
-The guard is wired into `pnpm test:hook` and CI `build.yml`.
+The guard is wired into `pnpm test:hook`, **`pnpm verify:ci`**
+(`scripts/verify-ci.sh` — the local mirror of `build.yml` minus Sonar), and
+CI `build.yml`. Fleet-wide from the host `dev` checkout: `./scripts/ci-verify.sh`.
 
 - Analysis runs in GitHub Actions (`.github/workflows/build.yml` **SonarQube**
   job — SonarCloud wizard layout) with `SONAR_TOKEN` and

@@ -21,9 +21,15 @@ import {
 } from "../../lib/organization-options.ts";
 import { loadOrgServerCapacity } from "../../lib/server-capacity.ts";
 import { listTimezones } from "../../lib/timezones.ts";
+import { assertCidrAvailable } from "../../lib/net/cidr-collisions.ts";
+import { alignedNetworkCidr } from "../../lib/ip-address.ts";
+import { findDockerBridgePoolOverlap } from "../../lib/docker-address-pools.ts";
+import { cidrCollisionResponse } from "../networks/network-scope.ts";
 import {
   applyManagedDefaultsPatch,
   defaultEnvironmentGetResponse,
+  dockerNetworkingGetResponse,
+  dockerNetworkingPutResponse,
   defaultEnvironmentPutResponse,
   defaultTimezoneGetResponse,
   defaultTimezonePutResponse,
@@ -33,6 +39,7 @@ import {
   managedDefaultsPutResponse,
   parseDefaultEnvironmentPutBody,
   parseDefaultTimezonePatch,
+  parseDockerNetworkingPatch,
   parseHostDefaultsPatch,
   parseManagedDefaultsPatch,
   parseOrganizationCreateDisplayName,
@@ -96,6 +103,10 @@ export function registerOrganizationRoutes(
   );
   router.use(
     "/organizations/:id/principal-defaults",
+    createSessionMiddleware(secrets),
+  );
+  router.use(
+    "/organizations/:id/docker-networking",
     createSessionMiddleware(secrets),
   );
   router.use("/timezones", createSessionMiddleware(secrets));
@@ -608,6 +619,112 @@ export function registerOrganizationRoutes(
       randomizedUsernames: value,
       effectiveRandomizedUsernames: value ?? true,
     });
+  });
+
+  router.get("/organizations/:id/docker-networking", async (c) => {
+    const db = getDb(c);
+    if (!db) return c.json({ error: "Database unavailable" }, 503);
+
+    const id = c.req.param("id");
+    const denied = await assertCanManageOr403(c, "organization", id);
+    if (denied) return denied;
+
+    const [orgRow] = await db
+      .select({ options: organization.options })
+      .from(organization)
+      .where(eq(organization.id, id))
+      .limit(1);
+    if (!orgRow) return c.json({ error: "Not found" }, 404);
+
+    const options = parseOrganizationOptions(orgRow.options);
+    return c.json(dockerNetworkingGetResponse(options.docker ?? {}));
+  });
+
+  router.put("/organizations/:id/docker-networking", async (c) => {
+    const db = getDb(c);
+    if (!db) return c.json({ error: "Database unavailable" }, 503);
+
+    const id = c.req.param("id");
+    const denied = await assertCanManageOr403(c, "organization", id);
+    if (denied) return denied;
+
+    const body = await parseJsonBody(c);
+    if (body instanceof Response) return body;
+
+    const parsed = parseDockerNetworkingPatch(body);
+    if (!parsed.ok) return c.json({ error: parsed.error }, parsed.status);
+
+    const [orgRow] = await db
+      .select({ id: organization.id })
+      .from(organization)
+      .where(eq(organization.id, id))
+      .limit(1);
+    if (!orgRow) return c.json({ error: "Not found" }, 404);
+
+    // The body is replace-all, so the submitted bridge and the submitted
+    // pools are checked against each other here — the authority below
+    // excludes the *stored* docker addressing and would never see this pair.
+    const next = parsed.value;
+    const bridgeVsPool = findDockerBridgePoolOverlap(next);
+    if (bridgeVsPool) {
+      return cidrCollisionResponse(c, {
+        code: "cidr_overlaps_docker_network",
+        cidr: bridgeVsPool.bridgeCidr,
+        conflictingCidr: bridgeVsPool.pool.base,
+        networkId: null,
+        datacenterId: null,
+      });
+    }
+
+    // Every pool base goes through the one CIDR collision authority: dockerd
+    // will carve bridge networks out of it on every host, so it must not
+    // overlap the fabric, a reserved hole, a site subnet or a registered
+    // docker network. The stored pools and bridge are excluded — this PUT
+    // replaces them, and the body's own entries were already checked against
+    // each other.
+    for (const pool of next?.addressPools ?? []) {
+      const collision = await assertCidrAvailable(db, {
+        organizationId: id,
+        cidr: pool.base,
+        intent: "docker",
+        excludeDockerHostCidrs: true,
+      });
+      if (collision) return cidrCollisionResponse(c, collision);
+    }
+
+    // `bip` is the docker0 bridge's own address + prefix on every host; the
+    // network it names is a docker network like any other and must clear the
+    // same authority (reserved holes, site subnets, the fabric host range
+    // and container pool, registered docker rows). Once stored it joins the
+    // registry through `dockerHostCidrs`, so later writes stay clear of it.
+    // The stored pools and bridge are excluded for the same reason as above.
+    if (next?.defaultBridgeCidr) {
+      // Already syntactically valid (`parseDockerNetworkingPatch`), so the
+      // aligned network form always resolves.
+      const collision = await assertCidrAvailable(db, {
+        organizationId: id,
+        cidr: alignedNetworkCidr(next.defaultBridgeCidr) ??
+          next.defaultBridgeCidr,
+        intent: "docker",
+        excludeDockerHostCidrs: true,
+      });
+      if (collision) return cidrCollisionResponse(c, collision);
+    }
+
+    // Top-level jsonb merge replaces the whole `docker` object, which is the
+    // correct replace-all semantics for a list; an all-cleared body removes
+    // the key.
+    const patch = next === null
+      ? sql`COALESCE(${organization.options}, '{}'::jsonb) - 'docker'`
+      : sql`COALESCE(${organization.options}, '{}'::jsonb) || ${
+        JSON.stringify({ docker: next })
+      }::jsonb`;
+    await db.update(organization).set({
+      options: patch,
+      updatedAt: new Date().toISOString(),
+    }).where(eq(organization.id, id));
+
+    return c.json(dockerNetworkingPutResponse(next ?? {}));
   });
 
   router.get("/timezones", (c) => {

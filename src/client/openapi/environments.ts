@@ -96,4 +96,19 @@ export const environmentPaths = buildResourceCrudPaths({
     name: 'projectId',
     description: 'Filter environments under a project',
   },
+  detailExtraProperties: {
+    needsRedeploy: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['serverId', 'environmentId'],
+        properties: {
+          serverId: { type: 'string', format: 'uuid' },
+          environmentId: { type: 'string', format: 'uuid' },
+        },
+      },
+      description:
+        'Deploy targets whose running hosting `bindAddress` predates an automatic repin of the membership pin their `hosting.ipId` names (`ip.metadata.repin.at` later than the last applied `deployment.finishedAt`). Derived, read-only; nothing enqueues environment.deploy.',
+    },
+  },
 })

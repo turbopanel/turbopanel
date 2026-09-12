@@ -28,6 +28,15 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Wrangler/vitest-pool-workers writes under $XDG_CONFIG_HOME/.wrangler.
+# Guest `/home/vagrant/.config` is root-owned; isolate so coverage fails on
+# tests, not mkdir EACCES.
+if [ -z "${XDG_CONFIG_HOME:-}" ]; then
+  XDG_CONFIG_HOME=$(mktemp -d "${TMPDIR:-/tmp}/tp-wrangler-xdg.XXXXXX")
+  export XDG_CONFIG_HOME
+  trap 'rm -rf "$XDG_CONFIG_HOME"' EXIT
+fi
+
 rm -rf coverage
 mkdir -p coverage
 
@@ -456,6 +465,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/lib/db/slot-records.hostfree.test.ts \
   src/lib/db/workspace-kind.test.ts \
   src/lib/db/principal-alias-records.test.ts \
+  src/lib/docker-address-pools.test.ts \
   src/lib/docker-network-name.test.ts \
   src/lib/docker-run/import.test.ts \
   src/lib/docker-run/lexer.test.ts \
@@ -490,9 +500,12 @@ deno test -A --coverage=coverage/deno-profile \
   src/lib/ip-address.test.ts \
   src/lib/machine-key.test.ts \
   src/lib/managed/ \
+  src/lib/net/cidr-collisions.hostfree.test.ts \
   src/lib/net/datacenter-membership.hostfree.test.ts \
   src/lib/net/datacenter-networks.pure.test.ts \
   src/lib/net/private-endpoint.pure.test.ts \
+  src/lib/net/repin.hostfree.test.ts \
+  src/lib/net/repin-apply.hostfree.test.ts \
   src/lib/naming.test.ts \
   src/lib/notices.test.ts \
   src/build-info.test.ts \
@@ -551,6 +564,7 @@ deno test -A --coverage=coverage/deno-profile \
   src/client/datacenters/routes.test.ts \
   src/client/datacenters/routes-pure.test.ts \
   src/client/datacenters/routes.hostfree.test.ts \
+  src/client/datacenters/repin-fanout.hostfree.test.ts \
   src/client/environments/routes-helpers.hostfree.test.ts \
   src/client/environments/routes.hostfree.test.ts \
   src/client/environments/deploy-routes-helpers.hostfree.test.ts \

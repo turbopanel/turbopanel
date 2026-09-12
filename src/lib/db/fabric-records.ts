@@ -2,10 +2,11 @@
  * TurboFabric desired-state helpers (`fabric` / `relay` / `subnet`).
  */
 
-import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { Db } from "../../db.ts";
 import { nowIso } from "../commands/ids.ts";
 import {
+  cidrsOverlap,
   inetAddressToString,
   isValidIpAddress,
   nextFreeHostAddress,
@@ -42,17 +43,21 @@ import {
   type ServerReportedIp,
 } from "../../server-addresses.ts";
 import {
-  type DatacenterAddressPreference,
-  loadDatacenterAddressPreferences,
+  type DatacenterPolicyRow,
+  defaultDatacenterPolicyRow,
+  loadDatacenterPolicies,
   loadDatacenterSubnetsForServers,
   resolveDerivedAdvertisedCidrsByRelay,
 } from "../net/datacenter-networks.ts";
 import {
   type DatacenterMembershipRow,
   loadDatacenterMembershipsForServers,
-  sharedDatacenterIds,
 } from "../net/datacenter-membership.ts";
-import { pinAddressForDatacenter } from "../net/private-endpoint.ts";
+import {
+  partitionSharedDatacenters,
+  pinAddressForDatacenter,
+} from "../net/private-endpoint.ts";
+import { loadCidrAllocationExclusions } from "../net/cidr-collisions.ts";
 import { WIREGUARD_PERSISTENT_KEEPALIVE } from "../fabric/wg.ts";
 import {
   type FabricPolicy,
@@ -141,6 +146,35 @@ export class FabricAllocationError extends Error {
   }
 }
 
+/**
+ * Operator policy a `PUT /organizations/:id/fabric` may carry alongside
+ * `enabled: true`. Applied **before** any relay is allocated so a first-time
+ * enable (or an enable that adds relays for new servers) carves every prefix
+ * from the requested pool rather than the default one.
+ */
+export type FabricEnablePolicy = {
+  allowRelay?: boolean;
+  /** Replacement `fabric.options.containerPool` (validated by the route). */
+  containerPool?: string;
+};
+
+/**
+ * A first-time enable picks the `tp0` host range automatically; when that
+ * range lands inside the requested container pool nothing is written and the
+ * route reports `cidr_overlaps_fabric` with both ranges.
+ */
+export class FabricContainerPoolOverlapError extends Error {
+  readonly containerPool: string;
+  readonly fabricCidr: string;
+
+  constructor(containerPool: string, fabricCidr: string) {
+    super("TurboFabric container pool overlaps the host range");
+    this.name = "FabricContainerPoolOverlapError";
+    this.containerPool = containerPool;
+    this.fabricCidr = fabricCidr;
+  }
+}
+
 export type RelayPathKind =
   | "direct_lan"
   | "direct_public"
@@ -194,7 +228,12 @@ export type EndpointAddressCaches = {
   publicAddressByServer: Map<string, string>;
   reportedByServer: Map<string, ServerReportedIp[] | undefined>;
   datacenterMembershipsByServer: Map<string, DatacenterMembershipRow[]>;
-  addressPreferenceByDatacenter: Map<string, DatacenterAddressPreference>;
+  /**
+   * Effective routing policy per datacenter (`addressPreference`, `priority`,
+   * `trusted`). Shared with the private-endpoint ladder so LAN path planning
+   * honors the same trust gate and priority order.
+   */
+  policyByDatacenter: Map<string, DatacenterPolicyRow>;
   /** Runtime-only NAT hole-punch endpoints; never loaded from Postgres. */
   natEndpointByPair: Map<string, string>;
   /** Runtime-only demoted kinds so the planner falls through. */
@@ -212,13 +251,13 @@ export function fabricPairCacheKey(
 function emptyPairPlanningCaches(): Pick<
   EndpointAddressCaches,
   | "datacenterMembershipsByServer"
-  | "addressPreferenceByDatacenter"
+  | "policyByDatacenter"
   | "natEndpointByPair"
   | "failedPathKindsByPair"
 > {
   return {
     datacenterMembershipsByServer: new Map(),
-    addressPreferenceByDatacenter: new Map(),
+    policyByDatacenter: new Map(),
     natEndpointByPair: new Map(),
     failedPathKindsByPair: new Map(),
   };
@@ -245,30 +284,18 @@ type ServerEndpointRow = {
   metadata: unknown;
 };
 
-async function occupiedCidrs(
+/**
+ * Every range the org already holds: each CIDR-bearing `network` row (site
+ * subnets, `reserved` ranges, docker registrations) plus any existing fabric
+ * host range. Sourced from the collision authority so the reverse direction —
+ * `pickDefaultFabricHostCidr` stepping around an operator's reserved range —
+ * shares one definition with the forward checks.
+ */
+function occupiedCidrs(
   db: Db,
   organizationId: string,
 ): Promise<string[]> {
-  const [networks, fabrics] = await Promise.all([
-    db
-      .select({ cidr: network.cidr })
-      .from(network)
-      .where(
-        and(
-          eq(network.organizationId, organizationId),
-          isNotNull(network.cidr),
-        ),
-      ),
-    db
-      .select({ cidr: fabric.cidr })
-      .from(fabric)
-      .where(eq(fabric.organizationId, organizationId)),
-  ]);
-  const out: string[] = [];
-  for (const row of [...networks, ...fabrics]) {
-    if (typeof row.cidr === "string" && row.cidr.length > 0) out.push(row.cidr);
-  }
-  return out;
+  return loadCidrAllocationExclusions(db, organizationId);
 }
 
 export async function getOrganizationFabric(
@@ -457,22 +484,41 @@ export function requireRelayHostAddress(
   return address;
 }
 
+/**
+ * Lowest free relay `/16` in the container pool. `occupied` is the exact set
+ * of prefixes other relays already hold; `exclusions` are org ranges the
+ * prefix must not overlap (reserved rows, site subnets — see
+ * `loadCidrAllocationExclusions`). Exhaustion, including exhaustion caused
+ * purely by exclusions, still raises `fabric_prefix_pool_exhausted`.
+ */
 export function requireRelayPrefix(
   containerPool: string,
   occupied: readonly string[],
+  exclusions: readonly string[] = [],
 ): string {
-  const prefix = nextFreeSubnet(containerPool, RELAY_PREFIX_LENGTH, occupied);
+  const prefix = nextFreeSubnet(
+    containerPool,
+    RELAY_PREFIX_LENGTH,
+    occupied,
+    exclusions,
+  );
   if (!prefix) {
     throw new FabricAllocationError("fabric_prefix_pool_exhausted");
   }
   return prefix;
 }
 
+/**
+ * Lowest free `/24` segment inside a relay prefix. `takenCidrs` are the
+ * server's existing segments; `exclusions` are org ranges the segment must
+ * not overlap. Exhaustion still raises `fabric_segment_pool_exhausted`.
+ */
 export function requireSubnetCidr(
   relayPrefix: string,
   takenCidrs: readonly string[],
+  exclusions: readonly string[] = [],
 ): string {
-  const cidrValue = nextFreeSubnetCidr(relayPrefix, takenCidrs);
+  const cidrValue = nextFreeSubnetCidr(relayPrefix, takenCidrs, exclusions);
   if (!cidrValue) {
     throw new FabricAllocationError("fabric_segment_pool_exhausted");
   }
@@ -513,6 +559,8 @@ async function insertRelayOnce(
     fabric: FabricRecord;
     serverId: string;
     containerPool: string;
+    /** Org ranges the relay prefix must not overlap (reserved / site / docker). */
+    exclusions: readonly string[];
   },
 ): Promise<void> {
   const [addresses, prefixes] = await Promise.all([
@@ -520,7 +568,11 @@ async function insertRelayOnce(
     occupiedRelayPrefixes(tx, params.fabric.id),
   ]);
   const address = requireRelayHostAddress(params.fabric.cidr, addresses);
-  const prefix = requireRelayPrefix(params.containerPool, prefixes);
+  const prefix = requireRelayPrefix(
+    params.containerPool,
+    prefixes,
+    params.exclusions,
+  );
   await tx.insert(relay).values({
     fabricId: params.fabric.id,
     serverId: params.serverId,
@@ -540,6 +592,7 @@ async function insertRelayWithRetry(
     fabric: FabricRecord;
     serverId: string;
     containerPool: string;
+    exclusions: readonly string[];
   },
 ): Promise<void> {
   try {
@@ -576,26 +629,61 @@ export async function ensureFabricRelays(
   const existing = await listFabricRelays(db, params.fabric.id);
   const have = new Set(existing.map((row) => row.serverId));
 
+  let exclusions: readonly string[] | null = null;
   for (const row of orgServers) {
     if (have.has(row.id)) continue;
+    // Loaded lazily: most calls find every server already has a relay.
+    exclusions ??= await loadCidrAllocationExclusions(
+      db,
+      params.organizationId,
+    );
     await insertRelayWithRetry(db, {
       fabric: params.fabric,
       serverId: row.id,
       containerPool: options.containerPool,
+      exclusions,
     });
   }
 
   return listFabricRelays(db, params.fabric.id);
 }
 
+function hasFabricEnablePolicy(policy: FabricEnablePolicy): boolean {
+  return policy.allowRelay !== undefined || policy.containerPool !== undefined;
+}
+
+/**
+ * Enable TurboFabric for an organization (idempotent) and make sure every org
+ * server holds a relay.
+ *
+ * The optional `policy` is written **before** relays are allocated and the
+ * whole step runs in one transaction: a relay prefix is always carved from
+ * the pool that ends up persisted (allocation is the containment proof), and
+ * pool exhaustion or a host-range collision rolls back the fabric row /
+ * policy write instead of leaving Fabric half-enabled. The route still
+ * refuses a pool that would orphan an *already allocated* relay prefix before
+ * calling this. Note the allocator's unique-violation retry cannot recover
+ * inside the transaction (Postgres aborts it on the first violation) — a
+ * concurrent allocation race surfaces as a rolled-back enable instead.
+ */
 export async function enableOrganizationFabric(
   db: Db,
   organizationId: string,
+  policy: FabricEnablePolicy = {},
 ): Promise<FabricRecord> {
   const existing = await getOrganizationFabric(db, organizationId);
   if (existing) {
-    await ensureFabricRelays(db, { fabric: existing, organizationId });
-    return existing;
+    return db.transaction(async (tx) => {
+      let record = existing;
+      if (hasFabricEnablePolicy(policy)) {
+        record = (await updateFabricPolicy(tx, {
+          fabricId: existing.id,
+          ...policy,
+        })) ?? existing;
+      }
+      await ensureFabricRelays(tx, { fabric: record, organizationId });
+      return record;
+    });
   }
 
   const cidr = pickDefaultFabricHostCidr(
@@ -604,30 +692,41 @@ export async function enableOrganizationFabric(
   if (!cidr) {
     throw new Error("No free CIDR for TurboFabric");
   }
+  if (
+    policy.containerPool !== undefined &&
+    cidrsOverlap(cidr, policy.containerPool)
+  ) {
+    throw new FabricContainerPoolOverlapError(policy.containerPool, cidr);
+  }
 
-  const [row] = await db
-    .insert(fabric)
-    .values({
-      organizationId,
-      cidr,
-      options: parseFabricOptions(null),
-    })
-    .returning({
-      id: fabric.id,
-      organizationId: fabric.organizationId,
-      cidr: fabric.cidr,
-      options: fabric.options,
-    });
-  if (!row) throw new Error("TurboFabric insert failed");
-
-  const record: FabricRecord = {
-    id: row.id,
-    organizationId: row.organizationId,
-    cidr: typeof row.cidr === "string" ? row.cidr : String(row.cidr),
-    options: row.options,
+  const defaults = parseFabricOptions(null);
+  const options = {
+    ...defaults,
+    allowRelay: policy.allowRelay ?? defaults.allowRelay,
+    containerPool: policy.containerPool ?? defaults.containerPool,
   };
-  await ensureFabricRelays(db, { fabric: record, organizationId });
-  return record;
+
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(fabric)
+      .values({ organizationId, cidr, options })
+      .returning({
+        id: fabric.id,
+        organizationId: fabric.organizationId,
+        cidr: fabric.cidr,
+        options: fabric.options,
+      });
+    if (!row) throw new Error("TurboFabric insert failed");
+
+    const record: FabricRecord = {
+      id: row.id,
+      organizationId: row.organizationId,
+      cidr: typeof row.cidr === "string" ? row.cidr : String(row.cidr),
+      options: row.options,
+    };
+    await ensureFabricRelays(tx, { fabric: record, organizationId });
+    return record;
+  });
 }
 
 export async function disableOrganizationFabric(
@@ -862,9 +961,15 @@ const FABRIC_RECORD_SELECT = {
   options: fabric.options,
 };
 
+/**
+ * Write the operator-settable fabric policy keys into `fabric.options`.
+ * `containerPool` only changes what future relay prefixes are carved from —
+ * nothing renumbers an allocated relay `/16`, so the route refuses a pool
+ * that would orphan one (`fabric_container_pool_in_use`) before calling this.
+ */
 export async function updateFabricPolicy(
   db: Db,
-  params: { fabricId: string; allowRelay: boolean },
+  params: { fabricId: string; allowRelay?: boolean; containerPool?: string },
 ): Promise<FabricRecord | null> {
   const [existing] = await db
     .select({ options: fabric.options })
@@ -872,9 +977,11 @@ export async function updateFabricPolicy(
     .where(eq(fabric.id, params.fabricId))
     .limit(1);
   if (!existing) return null;
+  const current = parseFabricOptions(existing.options);
   const options = {
-    ...parseFabricOptions(existing.options),
-    allowRelay: params.allowRelay,
+    ...current,
+    allowRelay: params.allowRelay ?? current.allowRelay,
+    containerPool: params.containerPool ?? current.containerPool,
   };
   const [row] = await db
     .update(fabric)
@@ -1171,6 +1278,13 @@ export function resolveRelayGlobalEndpointAddress(
   return publicIpv4FromIps(caches.reportedByServer.get(row.serverId)) ?? null;
 }
 
+/**
+ * First family-compatible pin in a **trusted** shared datacenter, walked in
+ * `(priority asc, id asc)` order — the same partition the managed ladder
+ * uses (`partitionSharedDatacenters`). A `direct_lan` candidate is never
+ * produced on an untrusted segment; otherwise WireGuard would pick a LAN
+ * endpoint the managed ladder just refused.
+ */
 function lanPathCandidate(
   selfServerId: string,
   otherServerId: string,
@@ -1178,15 +1292,19 @@ function lanPathCandidate(
 ): RelayPathCandidate | null {
   const fromPins = caches.datacenterMembershipsByServer.get(selfServerId) ?? [];
   const toPins = caches.datacenterMembershipsByServer.get(otherServerId) ?? [];
-  const shared = sharedDatacenterIds(fromPins, toPins);
-  for (const datacenterId of shared) {
-    const preference = caches.addressPreferenceByDatacenter.get(datacenterId) ??
-      "ipv6";
+  const { trusted } = partitionSharedDatacenters(
+    fromPins,
+    toPins,
+    caches.policyByDatacenter,
+  );
+  for (const datacenterId of trusted) {
+    const policy = caches.policyByDatacenter.get(datacenterId) ??
+      defaultDatacenterPolicyRow();
     const address = pinAddressForDatacenter(
       fromPins,
       toPins,
       datacenterId,
-      preference,
+      policy.addressPreference,
     );
     if (address) return { kind: "direct_lan", address, datacenterId };
   }
@@ -1343,6 +1461,14 @@ function gatewayCandidateRelays(
   );
 }
 
+// Gateway locality (`datacenterIdSet` / `sharesDatacenterIds` /
+// `gatewayLocalityAllowed` / `gatewayRankTier`) deliberately ignores
+// `policyByDatacenter`: these rank *which* gateway to route through, using
+// co-location as a proximity hint. The hop itself is still chosen by
+// `directCandidates`, whose LAN rung is trust-filtered — so an untrusted
+// shared datacenter can make a gateway *look* nearby without ever yielding a
+// `direct_lan` endpoint on that segment. Do not "fix" this by trust-filtering
+// locality.
 function datacenterIdSet(
   serverId: string,
   caches: EndpointAddressCaches,
@@ -1828,7 +1954,7 @@ export async function loadFabricReconcileSnapshot(
   for (const pins of datacenterMembershipsByServer.values()) {
     for (const pin of pins) datacenterIds.add(pin.datacenterId);
   }
-  const addressPreferenceByDatacenter = await loadDatacenterAddressPreferences(
+  const policyByDatacenter = await loadDatacenterPolicies(
     db,
     [...datacenterIds],
   );
@@ -1839,7 +1965,7 @@ export async function loadFabricReconcileSnapshot(
   const caches: EndpointAddressCaches = {
     ...endpointCaches,
     datacenterMembershipsByServer,
-    addressPreferenceByDatacenter,
+    policyByDatacenter,
   };
   return {
     fabric,
@@ -2281,6 +2407,10 @@ export async function materializeSpanningNetworks(
   });
   const relays = await listFabricRelays(db, params.fabric.id);
   const relayByServer = new Map(relays.map((row) => [row.serverId, row]));
+  const exclusions = await loadCidrAllocationExclusions(
+    db,
+    params.organizationId,
+  );
 
   for (const composeKey of keys) {
     const networkRow = await ensureComposeNetworkRow(db, {
@@ -2320,7 +2450,7 @@ export async function materializeSpanningNetworks(
       const taken = existing.map((row) =>
         typeof row.cidr === "string" ? row.cidr : String(row.cidr)
       );
-      const cidrValue = requireSubnetCidr(relayRow.prefix, taken);
+      const cidrValue = requireSubnetCidr(relayRow.prefix, taken, exclusions);
       await ensureNetworkSubnet(db, {
         networkId: networkRow.id,
         serverId,

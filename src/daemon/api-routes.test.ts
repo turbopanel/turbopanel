@@ -3737,3 +3737,48 @@ test("POST /secrets/decrypt rejects JWT after license invalidation", async () =>
     },
   );
 });
+
+test("GET /host/docker-networking returns 401 without JWT", async () => {
+  await withEnrollFixture(async ({ app }) => {
+    const response = await app.request("/api/daemon/v1/host/docker-networking");
+    assertEquals(response.status, 401);
+  });
+});
+
+test("GET /host/docker-networking returns the owner org's pools (empty when unconfigured)", async () => {
+  await withEnrollFixture(async ({ app, db, serverId, keyId, organizationId }) => {
+    const daemonToken = await issueDaemonToken(serverId, keyId);
+    const headers = { Authorization: `Bearer ${daemonToken}` };
+
+    const unconfigured = await app.request(
+      "/api/daemon/v1/host/docker-networking",
+      { headers },
+    );
+    assertEquals(unconfigured.status, 200);
+    assertEquals(await unconfigured.json(), {
+      ok: true,
+      addressPools: [],
+      defaultBridgeCidr: null,
+    });
+
+    await db.update(organization).set({
+      options: {
+        docker: {
+          addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+          defaultBridgeCidr: "172.17.0.1/16",
+        },
+      },
+    }).where(eq(organization.id, organizationId));
+
+    const configured = await app.request(
+      "/api/daemon/v1/host/docker-networking",
+      { headers },
+    );
+    assertEquals(configured.status, 200);
+    assertEquals(await configured.json(), {
+      ok: true,
+      addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+      defaultBridgeCidr: "172.17.0.1/16",
+    });
+  });
+});

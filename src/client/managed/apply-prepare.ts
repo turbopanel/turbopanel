@@ -351,6 +351,7 @@ export function prepareErrorResponse(
       return c.json({ error: 'managed_listener_bind_conflict' }, 422)
     case 'private_path_unavailable':
     case 'private_family_mismatch':
+    case 'failover_requires_trusted_datacenter':
       return privateEndpointErrorResponse(c, error)
   }
 }

@@ -7,7 +7,14 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppEnv } from "../../app.ts";
 import type { Db } from "../../db.ts";
-import { datacenter, ip, network, server } from "../../lib/db/schema.ts";
+import {
+  datacenter,
+  fabric,
+  ip,
+  network,
+  relay,
+  server,
+} from "../../lib/db/schema.ts";
 import { parseTestSecretsConfig } from "../../test-fixtures/secrets.ts";
 import {
   createEmptyMockAuthState,
@@ -151,12 +158,25 @@ type SessionAppOpts = {
   visibleMemberServers?: boolean;
   orgOverlapFromOtherSite?: boolean;
   memberAddressInUse?: boolean;
+  /** Stored `datacenter.options` jsonb for the seeded row (default `{}`). */
+  datacenterOptions?: Record<string, unknown> | null;
+  /**
+   * Raw rows the collision authority (`src/lib/net/cidr-collisions.ts`) sees
+   * for the given table — every `select().from(<table>)` returns them
+   * verbatim, conditions ignored. Overrides the scenario flags above.
+   */
+  networkRows?: Record<string, unknown>[];
+  fabricRows?: Record<string, unknown>[];
+  relayRows?: Record<string, unknown>[];
+  ipRows?: Record<string, unknown>[];
   afterSession?: "drop-db" | "swallow-session";
 };
 
 async function buildSessionApp(opts: SessionAppOpts): Promise<{
   app: Hono<AppEnv>;
   cookie: string;
+  /** Every `db.update(...).set(patch)` payload the routes issued, in order. */
+  updates: Record<string, unknown>[];
 }> {
   const secretsConfig = parseTestSecretsConfig("deno");
   const secrets = await deriveSecretsConfig(secretsConfig, "session-signing");
@@ -191,6 +211,7 @@ async function buildSessionApp(opts: SessionAppOpts): Promise<{
   ).transaction.bind(authDb);
   let executePhase = 0;
   let datacenterSelects = 0;
+  const updates: Record<string, unknown>[] = [];
   const db = Object.assign(authDb, {
     execute: () => {
       if (opts.listOnly) {
@@ -211,13 +232,31 @@ async function buildSessionApp(opts: SessionAppOpts): Promise<{
     },
     select: (fields?: unknown) => ({
       from: (table: unknown) => {
+        if (table === network && opts.networkRows) {
+          return { where: () => thenableRows(opts.networkRows ?? []) };
+        }
+        if (table === fabric && opts.fabricRows) {
+          return { where: () => thenableRows(opts.fabricRows ?? []) };
+        }
+        if (table === relay && opts.relayRows) {
+          return { where: () => thenableRows(opts.relayRows ?? []) };
+        }
+        if (table === ip && opts.ipRows) {
+          return { where: () => thenableRows(opts.ipRows ?? []) };
+        }
         if (table === datacenter) {
           return {
             where: () => {
               datacenterSelects += 1;
               if (opts.entityOrgId === null) return thenableRows([]);
               const org = opts.entityOrgId ?? organizationId;
-              const row = { ...DC_ROW, organizationId: org };
+              const row = {
+                ...DC_ROW,
+                organizationId: org,
+                ...(opts.datacenterOptions !== undefined
+                  ? { options: opts.datacenterOptions }
+                  : {}),
+              };
               if (org !== organizationId) return thenableRows([row]);
               if (datacenterSelects === 1) return thenableRows([row]);
               return thenableRows(opts.withDatacenterRow ? [row] : []);
@@ -248,7 +287,16 @@ async function buildSessionApp(opts: SessionAppOpts): Promise<{
             };
           }
           if (opts.overlappingCidrs) {
-            return { where: () => thenableRows([{ cidr: "10.0.0.0/24" }]) };
+            return {
+              where: () =>
+                thenableRows([{
+                  id: networkId,
+                  datacenterId: otherDatacenterId,
+                  cidr: "10.0.0.0/24",
+                  name: "other-lan",
+                  kind: "datacenter",
+                }]),
+            };
           }
           if (opts.datacenterHasForeignNetworks) {
             return {
@@ -288,6 +336,14 @@ async function buildSessionApp(opts: SessionAppOpts): Promise<{
         return origSelect(fields).from(table);
       },
     }),
+    update: () => ({
+      set: (patch: Record<string, unknown>) => ({
+        where: () => {
+          updates.push(patch);
+          return thenableRows([]);
+        },
+      }),
+    }),
     delete: () => ({
       where: () =>
         thenableRows(
@@ -324,7 +380,7 @@ async function buildSessionApp(opts: SessionAppOpts): Promise<{
     runtime: "deno",
     signupEnvOverride: undefined,
   });
-  return { app, cookie };
+  return { app, cookie, updates };
 }
 
 function sessionHeaders(
@@ -542,6 +598,84 @@ test("GET /datacenters/:id returns the serialized datacenter", async () => {
   assertEquals(Array.isArray(body.members), true);
 });
 
+test("GET /datacenters/:id applies default priority and trusted when options are empty", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    withDatacenterRow: true,
+    datacenterOptions: null,
+  });
+  const res = await app.request(`/datacenters/${id}`, {
+    headers: sessionHeaders(cookie),
+  });
+  assertEquals(res.status, 200);
+  const body = await res.json() as {
+    datacenter: { options: unknown; priority: number; trusted: boolean };
+  };
+  assertEquals(body.datacenter.options, null);
+  assertEquals(body.datacenter.priority, 100);
+  assertEquals(body.datacenter.trusted, true);
+});
+
+test("GET /datacenters/:id surfaces stored priority and trusted from options", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    withDatacenterRow: true,
+    datacenterOptions: { priority: 10, trusted: false },
+  });
+  const res = await app.request(`/datacenters/${id}`, {
+    headers: sessionHeaders(cookie),
+  });
+  assertEquals(res.status, 200);
+  const body = await res.json() as {
+    datacenter: { priority: number; trusted: boolean };
+  };
+  assertEquals(body.datacenter.priority, 10);
+  assertEquals(body.datacenter.trusted, false);
+});
+
+test("GET /datacenters includes effective priority and trusted per row", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    listOnly: true,
+    manageThenList: true,
+    listVisibleIds: [id],
+    datacenterOptions: { priority: 5, trusted: false },
+  });
+  const res = await app.request("/datacenters", {
+    headers: sessionHeaders(cookie),
+  });
+  assertEquals(res.status, 200);
+  const body = await res.json() as {
+    datacenters: Array<
+      { id: string; privateCidrs: string[]; priority: number; trusted: boolean }
+    >;
+  };
+  assertEquals(body.datacenters.length, 1);
+  assertEquals(body.datacenters[0]?.id, id);
+  assertEquals(body.datacenters[0]?.privateCidrs, []);
+  assertEquals(body.datacenters[0]?.priority, 5);
+  assertEquals(body.datacenters[0]?.trusted, false);
+});
+
+test("GET /datacenters defaults priority and trusted when options omit them", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    listOnly: true,
+    manageThenList: true,
+    listVisibleIds: [id],
+    datacenterOptions: { addressPreference: "ipv4" },
+  });
+  const res = await app.request("/datacenters", {
+    headers: sessionHeaders(cookie),
+  });
+  assertEquals(res.status, 200);
+  const body = await res.json() as {
+    datacenters: Array<{ priority: number; trusted: boolean }>;
+  };
+  assertEquals(body.datacenters[0]?.priority, 100);
+  assertEquals(body.datacenters[0]?.trusted, true);
+});
+
 test("POST /datacenters returns 403 when create is denied", async () => {
   const { app, cookie } = await buildSessionApp({ manageAllowed: false });
   const res = await app.request("/datacenters", {
@@ -712,7 +846,142 @@ test("POST /datacenters/:id/subnets returns 409 when the cidr overlaps", async (
     body: JSON.stringify({ cidr: "10.0.0.0/24" }),
   });
   assertEquals(res.status, 409);
-  assertEquals(await res.json(), { error: "subnet_overlaps" });
+  assertEquals(await res.json(), {
+    error: "subnet_overlaps",
+    cidr: "10.0.0.0/24",
+    conflictingCidr: "10.0.0.0/24",
+    networkId,
+    datacenterId: otherDatacenterId,
+  });
+});
+
+test("POST /datacenters/:id/subnets returns 409 cidr_overlaps_reserved for an operator-reserved range", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    networkRows: [{
+      id: networkId,
+      datacenterId: null,
+      cidr: "10.0.0.0/16",
+      name: "Corp VPN",
+      kind: "reserved",
+    }],
+  });
+  const res = await app.request(`/datacenters/${id}/subnets`, {
+    method: "POST",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({ cidr: "10.0.7.0/24" }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_reserved",
+    cidr: "10.0.7.0/24",
+    conflictingCidr: "10.0.0.0/16",
+    networkId,
+  });
+});
+
+test("POST /datacenters/:id/subnets returns 409 cidr_overlaps_fabric inside the tp0 range", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    fabricRows: [{
+      id: "77777777-7777-4777-8777-777777777777",
+      cidr: "10.250.0.0/16",
+      options: {},
+    }],
+  });
+  const res = await app.request(`/datacenters/${id}/subnets`, {
+    method: "POST",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({ cidr: "10.250.4.0/24" }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_fabric",
+    cidr: "10.250.4.0/24",
+    conflictingCidr: "10.250.0.0/16",
+  });
+});
+
+test("POST /datacenters/:id/subnets returns 409 cidr_overlaps_fabric_pool inside the container pool", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    fabricRows: [{
+      id: "77777777-7777-4777-8777-777777777777",
+      cidr: "10.250.0.0/16",
+      options: {},
+    }],
+  });
+  const res = await app.request(`/datacenters/${id}/subnets`, {
+    method: "POST",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({ cidr: "10.200.0.0/24" }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_fabric_pool",
+    cidr: "10.200.0.0/24",
+    conflictingCidr: "10.192.0.0/12",
+  });
+});
+
+test("POST /datacenters/:id/subnets returns 409 cidr_overlaps_gateway_advertised when both datacenters have a gateway", async () => {
+  const fabricId = "77777777-7777-4777-8777-777777777777";
+  const gatewayHere = "88888888-8888-4888-8888-888888888888";
+  const gatewayThere = "99999999-9999-4999-8999-999999999999";
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    fabricRows: [{ id: fabricId, cidr: "10.250.0.0/16", options: {} }],
+    relayRows: [
+      {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        serverId: gatewayHere,
+        role: "gateway",
+        advertisedCidrs: [],
+      },
+      {
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        serverId: gatewayThere,
+        role: "gateway",
+        advertisedCidrs: [],
+      },
+    ],
+    ipRows: [
+      {
+        ipId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        serverId: gatewayHere,
+        datacenterId: id,
+        networkId: null,
+        address: "10.9.0.1",
+      },
+      {
+        ipId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        serverId: gatewayThere,
+        datacenterId: otherDatacenterId,
+        networkId,
+        address: "10.0.0.5",
+      },
+    ],
+    networkRows: [{
+      id: networkId,
+      datacenterId: otherDatacenterId,
+      cidr: "10.0.0.0/24",
+      name: "remote-lan",
+      kind: "datacenter",
+    }],
+  });
+  const res = await app.request(`/datacenters/${id}/subnets`, {
+    method: "POST",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({ cidr: "10.0.0.0/25" }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_gateway_advertised",
+    cidr: "10.0.0.0/25",
+    conflictingCidr: "10.0.0.0/24",
+    networkId,
+    datacenterId: otherDatacenterId,
+  });
 });
 
 test("POST /datacenters/:id/subnets returns 200 for a valid cidr", async () => {
@@ -830,7 +1099,10 @@ test("PATCH /datacenters/:id returns 400 for a non-string name", async () => {
 });
 
 test("PATCH /datacenters/:id returns 200 for a name update", async () => {
-  const { app, cookie } = await buildSessionApp({ manageAllowed: true });
+  const { app, cookie } = await buildSessionApp({
+    withDatacenterRow: true,
+    manageAllowed: true,
+  });
   const res = await app.request(`/datacenters/${id}`, {
     method: "PATCH",
     headers: sessionHeaders(cookie, true),
@@ -838,6 +1110,80 @@ test("PATCH /datacenters/:id returns 200 for a name update", async () => {
   });
   assertEquals(res.status, 200);
   assertEquals(await res.json(), { ok: true });
+});
+
+test("PATCH /datacenters/:id persists valid priority and trusted options", async () => {
+  const { app, cookie, updates } = await buildSessionApp({
+    withDatacenterRow: true,
+    manageAllowed: true,
+  });
+  const res = await app.request(`/datacenters/${id}`, {
+    method: "PATCH",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({
+      options: { addressPreference: "ipv4", priority: 20, trusted: false },
+    }),
+  });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true });
+  assertEquals(updates.length, 1);
+  assertEquals(updates[0]?.options, {
+    addressPreference: "ipv4",
+    priority: 20,
+    trusted: false,
+  });
+});
+
+test("PATCH /datacenters/:id drops invalid priority and trusted values", async () => {
+  const { app, cookie, updates } = await buildSessionApp({
+    withDatacenterRow: true,
+    manageAllowed: true,
+  });
+  const res = await app.request(`/datacenters/${id}`, {
+    method: "PATCH",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({
+      options: {
+        addressPreference: "ipv6",
+        priority: 5000,
+        trusted: "yes",
+      },
+    }),
+  });
+  assertEquals(res.status, 200);
+  assertEquals(updates.length, 1);
+  assertEquals(updates[0]?.options, { addressPreference: "ipv6" });
+});
+
+test("PATCH /datacenters/:id clears options when null is sent", async () => {
+  const { app, cookie, updates } = await buildSessionApp({
+    withDatacenterRow: true,
+    manageAllowed: true,
+  });
+  const res = await app.request(`/datacenters/${id}`, {
+    method: "PATCH",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({ options: null }),
+  });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true });
+  assertEquals(updates.length, 1);
+  assertEquals(updates[0]?.options, null);
+  assertEquals("options" in (updates[0] ?? {}), true);
+});
+
+test("PATCH /datacenters/:id returns 400 for non-object options", async () => {
+  const { app, cookie, updates } = await buildSessionApp({
+    manageAllowed: true,
+  });
+  const res = await app.request(`/datacenters/${id}`, {
+    method: "PATCH",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({ options: [] }),
+  });
+  assertEquals(res.status, 400);
+  assertEquals(await res.json(), { error: "Invalid request" });
+  assertEquals(updates.length, 0);
 });
 
 test("DELETE /datacenters/:id returns 404 when the entity is in another org", async () => {
@@ -908,6 +1254,65 @@ test("POST /datacenters returns 200 when members are visible and CIDRs derive", 
   assertEquals(typeof body.id, "string");
 });
 
+test("POST /datacenters returns 409 cidr_overlaps_reserved when a derived CIDR hits a reserved range", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    visibleMemberServers: true,
+    networkRows: [{
+      id: networkId,
+      datacenterId: null,
+      cidr: "10.0.0.0/8",
+      name: "Corp VPN — Chicago branch",
+      kind: "reserved",
+    }],
+  });
+  const res = await app.request("/datacenters", {
+    method: "POST",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({
+      name: "dc",
+      members: [{ serverId, address: MEMBER_ADDRESS }],
+    }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_reserved",
+    cidr: MEMBER_CIDR,
+    conflictingCidr: "10.0.0.0/8",
+    networkId,
+  });
+});
+
+test("POST /datacenters returns 409 subnet_overlaps when a derived CIDR hits another datacenter's subnet", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    visibleMemberServers: true,
+    networkRows: [{
+      id: networkId,
+      datacenterId: otherDatacenterId,
+      cidr: "10.0.0.0/23",
+      name: "other-lan",
+      kind: "datacenter",
+    }],
+  });
+  const res = await app.request("/datacenters", {
+    method: "POST",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({
+      name: "dc",
+      members: [{ serverId, address: MEMBER_ADDRESS }],
+    }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "subnet_overlaps",
+    cidr: MEMBER_CIDR,
+    conflictingCidr: "10.0.0.0/23",
+    networkId,
+    datacenterId: otherDatacenterId,
+  });
+});
+
 test("POST /datacenters/:id/members returns 200 when the pin matches a site subnet", async () => {
   const { app, cookie } = await buildSessionApp({
     manageAllowed: true,
@@ -939,7 +1344,69 @@ test("POST /datacenters/:id/members returns 409 when a derived CIDR overlaps", a
     }),
   });
   assertEquals(res.status, 409);
-  assertEquals(await res.json(), { error: "subnet_overlaps" });
+  assertEquals(await res.json(), {
+    error: "subnet_overlaps",
+    cidr: MEMBER_CIDR,
+    conflictingCidr: MEMBER_CIDR,
+    networkId,
+    datacenterId: otherDatacenterId,
+  });
+});
+
+test("POST /datacenters/:id/members returns 409 cidr_overlaps_docker_network when the derived CIDR hits a docker registration", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    visibleMemberServers: true,
+    networkRows: [{
+      id: networkId,
+      datacenterId: null,
+      cidr: "10.0.0.0/16",
+      name: "bridge",
+      kind: "docker",
+    }],
+  });
+  const res = await app.request(`/datacenters/${id}/members`, {
+    method: "POST",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({
+      members: [{ serverId, address: MEMBER_ADDRESS }],
+    }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_docker_network",
+    cidr: MEMBER_CIDR,
+    conflictingCidr: "10.0.0.0/16",
+    networkId,
+  });
+});
+
+test("POST /datacenters/:id/members returns 409 cidr_overlaps_reserved when the derived CIDR hits a reserved range", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    visibleMemberServers: true,
+    networkRows: [{
+      id: networkId,
+      datacenterId: null,
+      cidr: "10.0.0.0/8",
+      name: "Corp VPN — Chicago branch",
+      kind: "reserved",
+    }],
+  });
+  const res = await app.request(`/datacenters/${id}/members`, {
+    method: "POST",
+    headers: sessionHeaders(cookie, true),
+    body: JSON.stringify({
+      members: [{ serverId, address: MEMBER_ADDRESS }],
+    }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_reserved",
+    cidr: MEMBER_CIDR,
+    conflictingCidr: "10.0.0.0/8",
+    networkId,
+  });
 });
 
 test("POST /datacenters/:id/members returns 409 when the address is already in use", async () => {

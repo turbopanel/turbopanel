@@ -4,6 +4,7 @@ import {
   loadDatacenterSubnets,
   loadDatacenterSubnetsForServers,
   loadDatacenterAddressPreferences,
+  loadDatacenterPolicies,
   assertDatacenterHasCidr,
   assertGatewayRelaysReady,
   assertServerDatacenterReady,
@@ -120,6 +121,42 @@ test('loadDatacenterAddressPreferences defaults missing and invalid options to i
 test('loadDatacenterAddressPreferences returns empty map for empty id list', async () => {
   const db = createQueuedDb([[{ should: 'not-run' }]])
   const map = await loadDatacenterAddressPreferences(db, [])
+  assertEquals(map.size, 0)
+})
+
+test('loadDatacenterPolicies seeds defaults for missing rows and drops invalid values', async () => {
+  const db = createQueuedDb([[
+    { id: 'dc-default', options: null },
+    { id: 'dc-set', options: { addressPreference: 'ipv4', priority: 7, trusted: false } },
+    {
+      id: 'dc-bad',
+      options: { addressPreference: 'dual', priority: 1.5, trusted: 'no' },
+    },
+    { id: 'dc-range', options: { priority: 5000 } },
+  ]])
+  const map = await loadDatacenterPolicies(db, [
+    'dc-missing',
+    'dc-default',
+    'dc-set',
+    'dc-bad',
+    'dc-range',
+  ])
+  const defaults = { addressPreference: 'ipv6', priority: 100, trusted: true }
+  assertEquals(map.get('dc-missing'), defaults)
+  assertEquals(map.get('dc-default'), defaults)
+  assertEquals(map.get('dc-set'), {
+    addressPreference: 'ipv4',
+    priority: 7,
+    trusted: false,
+  })
+  assertEquals(map.get('dc-bad'), defaults)
+  assertEquals(map.get('dc-range'), defaults)
+  assertEquals(map.size, 5)
+})
+
+test('loadDatacenterPolicies returns empty map for empty id list', async () => {
+  const db = createQueuedDb([[{ should: 'not-run' }]])
+  const map = await loadDatacenterPolicies(db, [])
   assertEquals(map.size, 0)
 })
 

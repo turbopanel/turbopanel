@@ -9,7 +9,7 @@ import type { Context } from "hono";
 import type { AppEnv } from "../../app.ts";
 import type { AuthRouteOpts } from "../authn/http.ts";
 import type { Db } from "../../db.ts";
-import { organization } from "../../lib/db/schema.ts";
+import { fabric, network, organization, relay } from "../../lib/db/schema.ts";
 import { parseTestSecretsConfig } from "../../test-fixtures/secrets.ts";
 import {
   createEmptyMockAuthState,
@@ -53,6 +53,8 @@ const ORG_PATHS = [
   ["PUT", `/organizations/${orgId}/managed-defaults`],
   ["GET", `/organizations/${orgId}/principal-defaults`],
   ["PUT", `/organizations/${orgId}/principal-defaults`],
+  ["GET", `/organizations/${orgId}/docker-networking`],
+  ["PUT", `/organizations/${orgId}/docker-networking`],
   ["GET", "/timezones"],
 ] as const;
 
@@ -79,7 +81,31 @@ type SessionAppOpts = {
   orgOptions?: unknown;
   executeQueue?: unknown[][];
   afterSession?: "drop-db" | "swallow-session";
+  /**
+   * Org CIDR registry doubles for the collision authority: CIDR-bearing
+   * `network` rows and the fabric row (no gateway relays).
+   */
+  registry?: {
+    networks?: Array<{
+      id: string;
+      kind: string;
+      cidr: string;
+      datacenterId?: string | null;
+    }>;
+    fabric?: { id: string; cidr: string; options?: unknown };
+  };
+  /** Records every `db.update(...)` call so a refused PUT can prove it wrote nothing. */
+  updates?: unknown[];
 };
+
+function registryRows<T>(rows: T[]) {
+  return Object.assign(Promise.resolve(rows), {
+    where: () =>
+      Object.assign(Promise.resolve(rows), {
+        limit: () => Promise.resolve(rows),
+      }),
+  });
+}
 
 function dropDbAfterSession(db: Db) {
   return async (c: Context<AppEnv>, next: () => Promise<void>) => {
@@ -149,8 +175,15 @@ async function buildSessionApp(
       select: (fields?: unknown) => { from: (table: unknown) => unknown };
     }
   ).select.bind(authDb);
+  const origUpdate = (
+    authDb as unknown as { update: (table: unknown) => unknown }
+  ).update.bind(authDb);
 
   const db = Object.assign(authDb, {
+    update: (table: unknown) => {
+      opts.updates?.push(table);
+      return origUpdate(table);
+    },
     execute: () => {
       if (executeQueue.length > 0) {
         return Promise.resolve(executeQueue.shift() ?? []);
@@ -186,6 +219,27 @@ async function buildSessionApp(
             }),
             orderBy: () => Promise.resolve([]),
           });
+        }
+        if (opts.registry && table === network) {
+          return registryRows(
+            (opts.registry.networks ?? []).map((row) => ({
+              id: row.id,
+              kind: row.kind,
+              cidr: row.cidr,
+              datacenterId: row.datacenterId ?? null,
+            })),
+          );
+        }
+        if (opts.registry && table === fabric) {
+          const row = opts.registry.fabric;
+          return registryRows(
+            row
+              ? [{ id: row.id, cidr: row.cidr, options: row.options ?? null }]
+              : [],
+          );
+        }
+        if (opts.registry && table === relay) {
+          return registryRows([]);
         }
         return origSelect(fields).from(table);
       },
@@ -736,4 +790,234 @@ test("PUT /principal-defaults returns 400 when randomizedUsernames is not a bool
   });
   assertEquals(res.status, 400);
   assertEquals(await res.json(), { error: "Invalid request" });
+});
+
+test("GET /docker-networking returns empty pools and a null bip when unconfigured", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    executeQueue: [[{ allowed: true }]],
+  });
+  const res = await app.request(`/organizations/${orgId}/docker-networking`, {
+    headers: { Cookie: cookie },
+  });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { addressPools: [], defaultBridgeCidr: null });
+});
+
+test("GET /docker-networking echoes the stored organization.options.docker", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    executeQueue: [[{ allowed: true }]],
+    orgOptions: {
+      docker: {
+        addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+        defaultBridgeCidr: "172.17.0.1/16",
+      },
+    },
+  });
+  const res = await app.request(`/organizations/${orgId}/docker-networking`, {
+    headers: { Cookie: cookie },
+  });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), {
+    addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+    defaultBridgeCidr: "172.17.0.1/16",
+  });
+});
+
+test("PUT /docker-networking rejects malformed bodies with 400 before touching the registry", async () => {
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    executeQueue: [[{ allowed: true }]],
+  });
+  const put = (body: unknown) =>
+    app.request(`/organizations/${orgId}/docker-networking`, {
+      method: "PUT",
+      headers: { Cookie: cookie, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  for (
+    const [body, error] of [
+      [{}, "Invalid request"],
+      [{ addressPools: "10.0.0.0/8" }, "Invalid addressPools"],
+      [{ addressPools: [{ base: "nope", size: 24 }] }, "Invalid addressPools base (entry 0)"],
+      [
+        { addressPools: [{ base: "10.0.0.0/8", size: 4 }] },
+        "Invalid addressPools size (integer between the base prefix and /30) (entry 0)",
+      ],
+      [
+        { addressPools: [{ base: "10.0.0.0/8", size: 24 }, { base: "10.1.0.0/16", size: 24 }] },
+        "addressPools entries overlap each other (entry 1)",
+      ],
+      [
+        { defaultBridgeCidr: "172.17.0.0/16" },
+        "Invalid defaultBridgeCidr (host address with prefix, e.g. 172.17.0.1/16)",
+      ],
+    ] as const
+  ) {
+    const res = await put(body);
+    assertEquals(res.status, 400, JSON.stringify(body));
+    assertEquals(await res.json(), { error });
+  }
+});
+
+test("PUT /docker-networking refuses a defaultBridgeCidr inside a reserved range without writing", async () => {
+  const updates: unknown[] = [];
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    executeQueue: [[{ allowed: true }]],
+    registry: {
+      networks: [{
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        kind: "reserved",
+        cidr: "172.17.0.0/16",
+      }],
+    },
+    updates,
+  });
+  const res = await app.request(`/organizations/${orgId}/docker-networking`, {
+    method: "PUT",
+    headers: { Cookie: cookie, "content-type": "application/json" },
+    body: JSON.stringify({ defaultBridgeCidr: "172.17.0.1/16" }),
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_reserved",
+    cidr: "172.17.0.0/16",
+    conflictingCidr: "172.17.0.0/16",
+    networkId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  });
+  assertEquals(updates, []);
+});
+
+test("PUT /docker-networking refuses a defaultBridgeCidr inside one of the submitted pools without writing", async () => {
+  const updates: unknown[] = [];
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    registry: {},
+    updates,
+  });
+  const put = (body: unknown) =>
+    app.request(`/organizations/${orgId}/docker-networking`, {
+      method: "PUT",
+      headers: { Cookie: cookie, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  // Both halves are new, so the registry (which skips the stored docker
+  // config) cannot catch this pair — the route compares them itself.
+  const res = await put({
+    addressPools: [
+      { base: "10.200.0.0/16", size: 24 },
+      { base: "172.26.0.0/16", size: 24 },
+    ],
+    defaultBridgeCidr: "172.26.4.1/24",
+  });
+  assertEquals(res.status, 409);
+  assertEquals(await res.json(), {
+    error: "cidr_overlaps_docker_network",
+    cidr: "172.26.4.0/24",
+    conflictingCidr: "172.26.0.0/16",
+  });
+  assertEquals(updates, []);
+
+  // A disjoint bridge stores alongside the same pools.
+  const ok = await put({
+    addressPools: [
+      { base: "10.200.0.0/16", size: 24 },
+      { base: "172.26.0.0/16", size: 24 },
+    ],
+    defaultBridgeCidr: "172.27.0.1/16",
+  });
+  assertEquals(ok.status, 200);
+  assertEquals(await ok.json(), {
+    ok: true,
+    addressPools: [
+      { base: "10.200.0.0/16", size: 24 },
+      { base: "172.26.0.0/16", size: 24 },
+    ],
+    defaultBridgeCidr: "172.27.0.1/16",
+  });
+  assertEquals(updates, [organization]);
+});
+
+test("PUT /docker-networking may re-range over the stored bridge and pools it replaces", async () => {
+  const updates: unknown[] = [];
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    registry: {},
+    orgOptions: {
+      docker: {
+        addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+        defaultBridgeCidr: "172.26.0.1/16",
+      },
+    },
+    updates,
+  });
+  // The new pool covers the old bridge network and the new bridge sits in
+  // the old pool: both are being replaced, so neither is a collision.
+  const res = await app.request(`/organizations/${orgId}/docker-networking`, {
+    method: "PUT",
+    headers: { Cookie: cookie, "content-type": "application/json" },
+    body: JSON.stringify({
+      addressPools: [{ base: "172.26.0.0/16", size: 24 }],
+      defaultBridgeCidr: "10.200.0.1/16",
+    }),
+  });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), {
+    ok: true,
+    addressPools: [{ base: "172.26.0.0/16", size: 24 }],
+    defaultBridgeCidr: "10.200.0.1/16",
+  });
+  assertEquals(updates, [organization]);
+});
+
+test("PUT /docker-networking refuses a defaultBridgeCidr inside the fabric host range or container pool", async () => {
+  const updates: unknown[] = [];
+  const { app, cookie } = await buildSessionApp({
+    manageAllowed: true,
+    registry: {
+      fabric: {
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        cidr: "10.250.0.0/16",
+        options: { containerPool: "10.192.0.0/12" },
+      },
+    },
+    updates,
+  });
+  const put = (defaultBridgeCidr: string) =>
+    app.request(`/organizations/${orgId}/docker-networking`, {
+      method: "PUT",
+      headers: { Cookie: cookie, "content-type": "application/json" },
+      body: JSON.stringify({ defaultBridgeCidr }),
+    });
+
+  // The bip names a host; the aligned network is what collides.
+  const host = await put("10.250.4.1/24");
+  assertEquals(host.status, 409);
+  assertEquals(await host.json(), {
+    error: "cidr_overlaps_fabric",
+    cidr: "10.250.4.0/24",
+    conflictingCidr: "10.250.0.0/16",
+  });
+
+  const pool = await put("10.200.0.1/16");
+  assertEquals(pool.status, 409);
+  assertEquals(await pool.json(), {
+    error: "cidr_overlaps_fabric_pool",
+    cidr: "10.200.0.0/16",
+    conflictingCidr: "10.192.0.0/12",
+  });
+  assertEquals(updates, []);
+
+  // A bridge that clears the registry is stored.
+  const ok = await put("172.17.0.1/16");
+  assertEquals(ok.status, 200);
+  assertEquals(await ok.json(), {
+    ok: true,
+    addressPools: [],
+    defaultBridgeCidr: "172.17.0.1/16",
+  });
+  assertEquals(updates, [organization]);
 });

@@ -322,10 +322,14 @@ export const passkey = pgTable(
   ],
 );
 /**
- * Physical site grouping servers that share a private L2/L3 network; optional —
- * servers may have zero or many memberships via `ip` pins. `options` mirrors `organization.options` for
- * `defaultServerTimezone` / `enforceServerTimezone` (consumed by the next phase's
- * resolver). Must stay declared before `server` (same rule as `license`).
+ * Logical routing domain — not a building — of mutually routable private
+ * subnets (IPv4 and/or IPv6); optional — a server may belong to zero or many
+ * datacenters via `ip` pins. `options` mirrors `organization.options` for
+ * `defaultServerTimezone` / `enforceServerTimezone`, and carries routing policy
+ * `priority` (integer, lower wins, default 100) and `trusted` (default true;
+ * false when the L2 is not under the operator's control) parsed by
+ * `src/lib/datacenter-options.ts`. Must stay declared before `server` (same
+ * rule as `license`).
  */
 export const datacenter = pgTable(
   "datacenter",
@@ -1005,8 +1009,16 @@ export const dispatch = pgTable(
  * Org-owned network registry: datacenter site CIDRs (`kind = 'datacenter'`;
  * a datacenter may own multiple CIDR rows), external Docker registrations
  * (`kind = 'docker'`, optional `server_id`), TurboFabric logical spanning
- * networks (`kind = 'compose'`), and the org-wide managed-engine network
- * (`kind = 'managed'`).
+ * networks (`kind = 'compose'`), the org-wide managed-engine network
+ * (`kind = 'managed'`), and operator-declared **reserved** ranges
+ * (`kind = 'reserved'`).
+ *
+ * `reserved` rows are org-only (no datacenter/server/environment scope) and
+ * always carry a CIDR: they name ranges TurboPanel must never allocate from or
+ * accept elsewhere (a corporate VPN, an upstream transit block, …). They are
+ * operator data — renamable and re-rangeable — and every CIDR write goes
+ * through `src/lib/net/cidr-collisions.ts`, which treats them as hard
+ * collisions (`cidr_overlaps_reserved`); the fabric allocators exclude them.
  *
  * `managed` is platform-allocated, never operator-created: at most one row per
  * organization (`uniq_network_organization_managed`), no datacenter/server/
@@ -1083,7 +1095,7 @@ export const network = pgTable(
     }).onDelete("restrict"),
     check(
       "network_kind_check",
-      sql`kind IN ('datacenter', 'docker', 'compose', 'managed')`,
+      sql`kind IN ('datacenter', 'docker', 'compose', 'managed', 'reserved')`,
     ),
     check(
       "network_single_scope_check",
@@ -1091,7 +1103,8 @@ export const network = pgTable(
         (${table.kind} = 'datacenter' AND ${table.datacenterId} IS NOT NULL AND ${table.serverId} IS NULL AND ${table.environmentId} IS NULL AND ${table.cidr} IS NOT NULL) OR
         (${table.kind} = 'docker' AND ${table.datacenterId} IS NULL AND ${table.environmentId} IS NULL) OR
         (${table.kind} = 'compose' AND ${table.datacenterId} IS NULL AND ${table.serverId} IS NULL) OR
-        (${table.kind} = 'managed' AND ${table.datacenterId} IS NULL AND ${table.serverId} IS NULL AND ${table.environmentId} IS NULL AND ${table.cidr} IS NULL)
+        (${table.kind} = 'managed' AND ${table.datacenterId} IS NULL AND ${table.serverId} IS NULL AND ${table.environmentId} IS NULL AND ${table.cidr} IS NULL) OR
+        (${table.kind} = 'reserved' AND ${table.datacenterId} IS NULL AND ${table.serverId} IS NULL AND ${table.environmentId} IS NULL AND ${table.cidr} IS NOT NULL)
       )`,
     ),
     /** Unique CIDR per datacenter — a datacenter may own multiple CIDR rows. */

@@ -1,5 +1,6 @@
 import { assertEquals } from '@std/assert'
 import {
+  attachEffectivePolicy,
   attachPrivateCidrs,
   groupMembersByDerivedCidr,
   mergeDatacenterMetadata,
@@ -171,6 +172,31 @@ test('attachPrivateCidrs joins datacenter network CIDR lists', () => {
     privateCidrs: ['10.0.0.0/24', '10.0.1.0/24'],
   }])
   assertEquals(attachPrivateCidrs([{ id: 'dc-b' }], cidrs)[0].privateCidrs, [])
+})
+
+test('attachEffectivePolicy surfaces priority/trusted with defaults applied', () => {
+  assertEquals(
+    attachEffectivePolicy([
+      { id: 'dc-a', options: null },
+      { id: 'dc-b', options: { priority: 10, trusted: false } },
+      { id: 'dc-c', options: { priority: 9999, trusted: 'nope' } },
+    ]),
+    [
+      { id: 'dc-a', options: null, priority: 100, trusted: true },
+      {
+        id: 'dc-b',
+        options: { priority: 10, trusted: false },
+        priority: 10,
+        trusted: false,
+      },
+      {
+        id: 'dc-c',
+        options: { priority: 9999, trusted: 'nope' },
+        priority: 100,
+        trusted: true,
+      },
+    ],
+  )
 })
 
 test('parseNameSuggestionsQuery validates limit and unassignedOnly flag', () => {

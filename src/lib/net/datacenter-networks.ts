@@ -1,6 +1,11 @@
 import { and, eq, inArray, isNotNull } from 'drizzle-orm'
 import type { Db } from '../../db.ts'
-import { parseDatacenterOptions } from '../datacenter-options.ts'
+import {
+  DEFAULT_DATACENTER_PRIORITY,
+  DEFAULT_DATACENTER_TRUSTED,
+  parseDatacenterOptions,
+  resolveDatacenterPolicy,
+} from '../datacenter-options.ts'
 import { datacenter, ip, network } from '../db/schema.ts'
 import { cidrVersion } from '../ip-address.ts'
 import { loadDatacenterMembershipsForServers } from './datacenter-membership.ts'
@@ -217,17 +222,39 @@ export function resolveDerivedAdvertisedCidrsByRelay(
 }
 
 /**
- * Load `datacenter.options.addressPreference` for the given ids. Missing rows
- * and invalid/absent preference values default to `'ipv6'` (RFC 6724).
+ * Effective per-datacenter routing policy consumed by the private-endpoint
+ * ladder and TurboFabric path planning.
  */
-export async function loadDatacenterAddressPreferences(
+export type DatacenterPolicyRow = {
+  addressPreference: DatacenterAddressPreference
+  priority: number
+  trusted: boolean
+}
+
+/** Policy row for a datacenter with no stored `options` (or no row at all). */
+export function defaultDatacenterPolicyRow(): DatacenterPolicyRow {
+  return {
+    addressPreference: 'ipv6',
+    priority: DEFAULT_DATACENTER_PRIORITY,
+    trusted: DEFAULT_DATACENTER_TRUSTED,
+  }
+}
+
+/**
+ * Load the effective routing policy (`addressPreference`, `priority`,
+ * `trusted`) for the given datacenter ids in one `inArray` select. Every
+ * requested id is seeded with the documented defaults so missing rows and
+ * invalid/absent option values resolve to `'ipv6'` /
+ * `DEFAULT_DATACENTER_PRIORITY` / `DEFAULT_DATACENTER_TRUSTED`.
+ */
+export async function loadDatacenterPolicies(
   db: Db,
   datacenterIds: string[],
-): Promise<Map<string, DatacenterAddressPreference>> {
-  const byDc = new Map<string, DatacenterAddressPreference>()
+): Promise<Map<string, DatacenterPolicyRow>> {
+  const byDc = new Map<string, DatacenterPolicyRow>()
   if (datacenterIds.length === 0) return byDc
   for (const id of datacenterIds) {
-    byDc.set(id, 'ipv6')
+    byDc.set(id, defaultDatacenterPolicyRow())
   }
 
   const rows = await db
@@ -239,10 +266,30 @@ export async function loadDatacenterAddressPreferences(
     .where(inArray(datacenter.id, datacenterIds))
 
   for (const row of rows) {
-    byDc.set(
-      row.id,
-      parseDatacenterOptions(row.options).addressPreference ?? 'ipv6',
-    )
+    const policy = resolveDatacenterPolicy(row.options)
+    byDc.set(row.id, {
+      addressPreference: parseDatacenterOptions(row.options).addressPreference ??
+        'ipv6',
+      priority: policy.priority,
+      trusted: policy.trusted,
+    })
+  }
+  return byDc
+}
+
+/**
+ * Load `datacenter.options.addressPreference` for the given ids. Missing rows
+ * and invalid/absent preference values default to `'ipv6'` (RFC 6724).
+ * Thin projection over {@link loadDatacenterPolicies}.
+ */
+export async function loadDatacenterAddressPreferences(
+  db: Db,
+  datacenterIds: string[],
+): Promise<Map<string, DatacenterAddressPreference>> {
+  const byDc = new Map<string, DatacenterAddressPreference>()
+  const policies = await loadDatacenterPolicies(db, datacenterIds)
+  for (const [id, policy] of policies) {
+    byDc.set(id, policy.addressPreference)
   }
   return byDc
 }
